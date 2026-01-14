@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+begin
+  require 'bundler/setup'
+rescue LoadError
+  # Not in development mode, use installed gem
+end
+
+require 'regent'
+require 'regent/cli/base'
+
+begin
+  Regent::CLI::Base.start(ARGV)
+rescue Regent::Error => e
+  puts "Error: #{e.message}"
+  exit 1
+rescue Interrupt
+  puts "\nInterrupted"
+  exit 130
+end
