@@ -1,3 +1,74 @@
+Copyright (C) 2026 Felipe F. Quintella
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+-----------------------------------------------------------------------
+
+ADDITIONAL PROJECT TERMS AND CONTRIBUTOR NOTICE
+===============================================
+
+1. License Scope
+----------------
+All publicly released versions of this software are licensed under
+the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+Any use, modification, or distribution of this software, including
+use over a computer network, must comply with the AGPL-3.0 and its
+source code disclosure requirements.
+
+2. Network Use Disclosure
+-------------------------
+In accordance with Section 13 of the AGPL-3.0, if you modify this
+software and operate it on a network such that users interact with
+it remotely, you must provide those users with access to the complete
+corresponding source code of your modified version.
+
+3. Contributions
+----------------
+By submitting a contribution to this project, you agree that:
+
+- Your contribution is provided under the AGPL-3.0 for inclusion
+  in the open-source version of the project; and
+- You grant the Project Owner the right to use, modify, sublicense,
+  and relicense your contribution under alternative terms, including
+  proprietary or closed-source licenses.
+
+This project requires all contributors to sign a Contributor License
+Agreement (CLA) prior to contribution. Contributions without an
+accepted CLA may not be merged.
+
+4. Relicensing
+--------------
+The Project Owner reserves the right to release future versions of
+this software, including contributions, under different licensing
+terms.
+
+This does not affect the AGPL-3.0 licensing of any version already
+released under the AGPL-3.0.
+
+5. No Additional Rights Granted
+-------------------------------
+Except as explicitly stated above, no additional rights or permissions
+are granted beyond those provided by the GNU Affero General Public
+License v3.0.
+
+-----------------------------------------------------------------------
+
+END OF TERMS
+
+---
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
