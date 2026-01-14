@@ -20,7 +20,7 @@ module Regent
     end
 
     def root
-      File.expand_path('../..', __dir__)
+      File.expand_path('..', __dir__)
     end
   end
 end

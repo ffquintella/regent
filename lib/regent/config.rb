@@ -2,10 +2,9 @@
 
 module Regent
   class Config
-    attr_accessor :module_template_dir, :test_framework, :syntax_checker, :output_format
+    attr_accessor :test_framework, :syntax_checker, :output_format
 
     def initialize
-      @module_template_dir = File.join(Regent.root, 'templates', 'module')
       @test_framework = 'rspec'
       @syntax_checker = 'puppet-lint'
       @output_format = 'standard'

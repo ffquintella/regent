@@ -3,6 +3,7 @@
 require 'spec_helper'
 require 'tmpdir'
 require 'fileutils'
+require 'json'
 
 RSpec.describe Regent::Generator do
   let(:module_name) { 'testmodule' }

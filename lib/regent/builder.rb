@@ -53,7 +53,7 @@ module Regent
     def load_metadata
       metadata_path = File.join(path, 'metadata.json')
       JSON.parse(File.read(metadata_path))
-    rescue StandardError => e
+    rescue StandardError
       nil
     end
 
@@ -64,7 +64,7 @@ module Regent
       # In a real implementation, this would create a proper Puppet module package
       Dir.chdir(File.dirname(path)) do
         module_name = File.basename(path)
-        system("tar -czf #{output_path} #{module_name}")
+        system('tar', '-czf', output_path, module_name)
       end
 
       raise Error, 'Failed to create package' unless File.exist?(output_path)

@@ -2,6 +2,7 @@
 
 require 'thor'
 require 'colorize'
+require 'json'
 
 module Regent
   module CLI
