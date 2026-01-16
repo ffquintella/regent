@@ -9,7 +9,7 @@ pub mod ruby_interop;
 
 pub use config::Config;
 pub use generator::ModuleGenerator;
-pub use validator::Validator;
+pub use validator::ModuleValidator;
 pub use builder::{ModuleBuilder, ModuleMetadata, ChecksumGenerator, BuildArtifact, TarballBuilder, PackagerConfig, BuildFormat, DependencyResolver};
 pub use tester::{ModuleTester, TestConfig, TestResults, TestType};
 

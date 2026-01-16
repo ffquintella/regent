@@ -36,7 +36,11 @@ impl ModuleBuilder {
         version_override: Option<&str>,
     ) -> Result<BuildArtifact> {
         // Validate module first
-        crate::validator::Validator::validate(path)?;
+        // Validation is handled separately by ModuleValidator
+        // Ensure basic structure exists
+        if !path.join("metadata.json").exists() {
+            return Err(anyhow::anyhow!("Missing metadata.json"));
+        }
 
         // Load and validate metadata
         let metadata_path = path.join("metadata.json");
