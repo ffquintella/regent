@@ -1,0 +1,16 @@
+[build]
+# Use Rust 2021 edition
+edition = "2021"
+# Optimize for binary size and performance
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = true
+codegen-units = 1
+strip = true

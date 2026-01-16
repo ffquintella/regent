@@ -1,0 +1,71 @@
+[package]
+name = "regent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Felipe Quintella"]
+license = "AGPL-3.0"
+description = "Regent - A Rust-based alternative development kit for Puppet modules with Artichoke Ruby support"
+homepage = "https://github.com/ffquintella/regent"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+
+# Data formats
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Output formatting
+colored = "2.0"
+chrono = "0.4"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# File operations
+fs_extra = "1.0"
+
+# Pattern matching
+regex = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Async utilities
+lazy_static = "1.4"
+sha2 = "0.10.9"
+md5 = "0.8.0"
+tar = "0.4.44"
+flate2 = "1.1.8"
+bzip2 = "0.6.1"
+zip = "7.1.0"
+semver = "1.0.27"
+walkdir = "2.5.0"
+tempfile = "3.0"
+
+# Future: Artichoke Ruby integration (when stable)
+# artichoke = { version = "0.1", features = ["full"] }
+# artichoke-core = "0.1"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[lib]
+name = "regent"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "regent"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[features]
+default = []

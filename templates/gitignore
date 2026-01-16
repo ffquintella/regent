@@ -1,0 +1,24 @@
+# Puppet module artifacts
+pkg/
+*.tar.gz
+coverage/
+.rspec
+.rubocop_cache
+
+# Temporary files
+.tmp/
+tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gemfile lock (optional, depends on project policy)
+Gemfile.lock

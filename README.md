@@ -1,146 +1,69 @@
-# Regent
+# Regent - Puppet Development Kit in Rust
 
-Regent is an alternative OpenVox/Puppet development kit designed to replace the now paid PDK (Puppet Development Kit). It provides a comprehensive framework for developing, testing, and building Puppet modules.
+A high-performance, modern implementation of Puppet Development Kit (PDK) features in Rust with Ruby interoperability.
 
-## Features
+## 📚 Documentation
 
-- **Module Generation**: Scaffold new Puppet modules with proper structure
-- **Component Generators**: Create classes, tasks, and plans
-- **Validation**: Syntax checking and metadata validation
-- **Testing**: Integrated test framework support (RSpec)
-- **Building**: Package modules for distribution
-- **CLI Interface**: Easy-to-use command-line tools
+All project documentation has been organized in the [`docs/`](docs/) folder. Start with:
 
-## Installation
+- **[00_START_HERE.md](docs/00_START_HERE.md)** - Quick orientation guide
+- **[README.md](docs/README.md)** - Full project overview
+- **[ROADMAP_PDK_FEATURES.md](docs/ROADMAP_PDK_FEATURES.md)** - Feature roadmap and implementation status
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - Getting started guide
 
-Add this line to your application's Gemfile:
+### Key Documentation Files
 
-```ruby
-gem 'regent'
-```
+| Document | Purpose |
+|----------|---------|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and architecture overview |
+| [IMPLEMENTATION_COMPLETE.md](docs/IMPLEMENTATION_COMPLETE.md) | Phase 1 & 2 completion status |
+| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Contribution guidelines |
+| [BUILD_PHASE_IMPLEMENTATION.md](docs/BUILD_PHASE_IMPLEMENTATION.md) | Build system detailed implementation |
+| [ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md) | Ruby/Rust integration details |
 
-And then execute:
-
-```bash
-$ bundle install
-```
-
-Or install it yourself as:
+## 🚀 Quick Start
 
 ```bash
-$ gem install regent
+# Build the project
+cargo build
+
+# Run tests
+cargo test
+
+# Run the CLI
+./target/debug/regent --help
 ```
 
-## Usage
+## ✅ Current Status
 
-### Creating a New Module
+- **Phase 1 (BUILD)**: ✅ 100% Complete - 34/34 tests passing
+- **Phase 2 (TEST)**: ✅ 100% Complete - 80/80 tests passing
+  - Week 1: Unit Test Framework ✅
+  - Week 2: Multi-Version Testing Matrix ✅
+  - Week 3: Test Fixtures Management ✅
+  - Week 4: Integration Testing ✅
+- **Total**: 114/114 tests passing
 
-Generate a new Puppet module:
+## 📦 Project Structure
 
-```bash
-$ regent new mymodule --author "Your Name" --license Apache-2.0
+```
+regent/
+├── src/
+│   ├── builder/          # Phase 1: Build functionality
+│   ├── tester/           # Phase 2: Test functionality
+│   └── validator/        # Phase 3: Validation (planned)
+├── spec/                 # Ruby tests
+├── docs/                 # 📁 Documentation (see above)
+├── Cargo.toml            # Rust dependencies
+└── README.md             # This file
 ```
 
-This creates a complete module structure:
-```
-mymodule/
-├── manifests/
-│   └── init.pp
-├── files/
-├── templates/
-├── tasks/
-├── plans/
-├── lib/
-├── spec/
-│   └── spec_helper.rb
-├── metadata.json
-└── README.md
-```
+## 🔗 More Information
 
-### Generating Components
+For detailed implementation information, roadmap, and feature status, please see the [documentation folder](docs/).
 
-Generate a new class:
+---
 
-```bash
-$ cd mymodule
-$ regent generate class myclass
-```
-
-Generate a new task:
-
-```bash
-$ regent generate task mytask
-```
-
-### Validating a Module
-
-Validate syntax and structure:
-
-```bash
-$ regent validate
-```
-
-Or validate a specific path:
-
-```bash
-$ regent validate /path/to/module
-```
-
-### Building a Module
-
-Package your module:
-
-```bash
-$ regent build
-```
-
-This creates a `.tar.gz` package in the `pkg/` directory.
-
-### Running Tests
-
-Run all tests:
-
-```bash
-$ regent test
-```
-
-Run specific test types:
-
-```bash
-$ regent test --type unit
-$ regent test --type integration
-```
-
-### Command Reference
-
-```bash
-regent new MODULE_NAME          # Create a new module
-regent generate TYPE NAME       # Generate module components
-regent validate [PATH]          # Validate module
-regent build [PATH]             # Build and package module
-regent test [PATH]              # Run tests
-regent version                  # Show version
-```
-
-## Development
-
-After checking out the repo, run:
-
-```bash
-$ bundle install
-$ rake spec
-```
-
-To install this gem onto your local machine, run:
-
-```bash
-$ bundle exec rake install
-```
-
-## Contributing
-
-Bug reports and pull requests are welcome on GitHub at https://github.com/ffquintella/regent.
-
-## License
-
-The gem is available as open source under the terms of the [GNU Affero General Public License v3.0](https://opensource.org/licenses/AGPL-3.0).
+**Version**: 1.0  
+**Last Updated**: January 16, 2026  
+**Status**: Active Development
