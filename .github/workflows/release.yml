@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.1)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build macOS Packages
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Create tarball
+        run: |
+          mkdir -p dist/regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/regent dist/regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}/
+          cd dist
+          tar -czf regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
+          shasum -a 256 regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz > regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz.sha256
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  build-linux:
+    name: Build Linux Packages
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+        arch:
+          - amd64
+          - arm64
+        exclude:
+          - target: x86_64-unknown-linux-gnu
+            arch: arm64
+          - target: aarch64-unknown-linux-gnu
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev fakeroot rpm
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build release binary
+        run: cross build --release --target ${{ matrix.target }}
+      
+      - name: Build Debian package
+        run: |
+          bash packaging/linux/build-deb.sh ${{ steps.version.outputs.VERSION }} ${{ matrix.arch }}
+      
+      - name: Build RPM package
+        run: |
+          RPM_ARCH=${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}
+          bash packaging/linux/build-rpm.sh ${{ steps.version.outputs.VERSION }} $RPM_ARCH
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            regent_*.deb
+            regent-*.rpm
+
+  build-windows:
+    name: Build Windows Packages
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      
+      - name: Install WiX
+        run: |
+          choco install wixtoolset -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" >> $env:GITHUB_PATH
+      
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      
+      - name: Build MSI installer
+        shell: cmd
+        run: |
+          cd packaging\windows
+          call build-msi.bat
+      
+      - name: Build portable ZIP
+        shell: cmd
+        run: |
+          cd packaging\windows
+          call build-portable.bat
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            regent-*.msi
+            regent-*-portable.zip
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.deb" -o -name "*.rpm" -o -name "*.msi" -o -name "*.zip" \) -exec sha256sum {} \; > ../SHA256SUMS
+          cd ..
+      
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: Regent v${{ steps.version.outputs.VERSION }}
+          body_path: vscode-extension/CHANGELOG.md
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.msi
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+            SHA256SUMS
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

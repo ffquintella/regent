@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" 
+           Name="Regent" 
+           Language="1033" 
+           Version="0.1.1" 
+           Manufacturer="Felipe Quintella" 
+           UpgradeCode="12345678-1234-1234-1234-123456789012">
+    
+    <Package InstallerVersion="200" 
+             Compressed="yes" 
+             InstallScope="perMachine" 
+             Description="Regent - High-performance Puppet Development Kit"
+             Comments="Regent PDK v0.1.1" />
+    
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    
+    <MediaTemplate EmbedCab="yes" />
+    
+    <Feature Id="ProductFeature" 
+             Title="Regent" 
+             Level="1"
+             Description="Regent PDK executable and documentation">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="PathEnvironmentVariable" />
+    </Feature>
+    
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+    <WixVariable Id="WixUILicenseRtf" Value="packaging\windows\License.rtf" />
+    
+    <!-- Custom icons -->
+    <Icon Id="regent.ico" SourceFile="packaging\windows\regent.ico" />
+    <Property Id="ARPPRODUCTICON" Value="regent.ico" />
+    
+    <!-- Add to system PATH -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+  </Product>
+  
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Regent">
+          <Directory Id="BinFolder" Name="bin" />
+        </Directory>
+      </Directory>
+      
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Regent"/>
+      </Directory>
+    </Directory>
+  </Fragment>
+  
+  <Fragment>
+    <ComponentGroup Id="ProductComponents" Directory="BinFolder">
+      <Component Id="RegentExecutable" Guid="23456789-2345-2345-2345-234567890123">
+        <File Id="regent.exe" 
+              Name="regent.exe" 
+              Source="target\release\regent.exe" 
+              KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ApplicationProgramsFolder"
+                    Name="Regent"
+                    Description="Regent Puppet Development Kit"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="regent.ico"
+                    Advertise="yes" />
+        </File>
+      </Component>
+    </ComponentGroup>
+    
+    <Component Id="PathEnvironmentVariable" Directory="TARGETDIR" Guid="34567890-3456-3456-3456-345678901234">
+      <Environment Id="PATH" 
+                   Name="PATH" 
+                   Value="[BinFolder]" 
+                   Permanent="no" 
+                   Part="last" 
+                   Action="set" 
+                   System="yes" />
+    </Component>
+  </Fragment>
+</Wix>

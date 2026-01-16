@@ -5,7 +5,8 @@ CARGO ?= cargo
 PYTHON ?= python3
 NPM ?= npm
 
-.PHONY: help version-show bump-major bump-minor bump-patch build install vscode-extension
+.PHONY: help version-show bump-major bump-minor bump-patch build install vscode-extension \
+	package-homebrew package-deb package-rpm package-windows package-all
 
 help:
 	@echo "Available targets:"
@@ -16,6 +17,13 @@ help:
 	@echo "  build            - Build release binary (cargo build --release)"
 	@echo "  install          - Install binary locally (cargo install --path . --locked)"
 	@echo "  vscode-extension - Build VS Code extension VSIX package"
+	@echo ""
+	@echo "Packaging targets:"
+	@echo "  package-homebrew - Build Homebrew release artifacts"
+	@echo "  package-deb      - Build Debian packages (amd64, arm64)"
+	@echo "  package-rpm      - Build RPM packages (x86_64, aarch64)"
+	@echo "  package-windows  - Build Windows MSI and portable ZIP (requires Windows)"
+	@echo "  package-all      - Build all packages (runs on current platform)"
 
 version-show:
 	@$(PYTHON) -c 'import pathlib, re, sys; text = pathlib.Path("Cargo.toml").read_text(); m = re.search(r"^version = \"([0-9]+\.[0-9]+\.[0-9]+)\"", text, re.M); print(m.group(1)) if m else sys.exit("version not found in Cargo.toml")'
@@ -42,3 +50,30 @@ vscode-extension:
 	@ls -lh vscode-extension/*.vsix
 install:
 	$(CARGO) install --path . --locked
+
+# Packaging targets
+package-homebrew:
+	@echo "Building Homebrew release artifacts..."
+	@bash packaging/homebrew/build-release.sh $$($(MAKE) version-show)
+	@echo "Homebrew artifacts ready in target/homebrew-release/"
+
+package-deb:
+	@echo "Building Debian packages..."
+	@bash packaging/linux/build-deb.sh $$($(MAKE) version-show) amd64
+	@bash packaging/linux/build-deb.sh $$($(MAKE) version-show) arm64
+	@echo "Debian packages ready"
+
+package-rpm:
+	@echo "Building RPM packages..."
+	@bash packaging/linux/build-rpm.sh $$($(MAKE) version-show) x86_64
+	@bash packaging/linux/build-rpm.sh $$($(MAKE) version-show) aarch64
+	@echo "RPM packages ready"
+
+package-windows:
+	@echo "Building Windows packages..."
+	@echo "Note: This target should be run on Windows"
+	@echo "Run: cd packaging\\windows && build-msi.bat && build-portable.bat"
+
+package-all: package-homebrew package-deb package-rpm
+	@echo "All packages built successfully!"
+	@echo "Windows packages must be built separately on Windows platform"
