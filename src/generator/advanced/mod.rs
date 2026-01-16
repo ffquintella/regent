@@ -4,17 +4,22 @@
 //! - Custom providers
 //! - Deferred functions
 //! - Bolt transports
+//! - Puppet classes
+//! - Resources
 
 pub mod provider;
 pub mod deferred;
 pub mod bolt;
+pub mod class;
+pub mod resource;
 
 pub use provider::ProviderGenerator;
 pub use deferred::DeferredFunctionGenerator;
 pub use bolt::BoltTransportGenerator;
+pub use class::ClassGenerator;
+pub use resource::ResourceGenerator;
 
 use std::path::PathBuf;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Component type to generate
