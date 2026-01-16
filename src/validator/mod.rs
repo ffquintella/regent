@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Serialize, Deserialize};
 use chrono;
 
 pub mod lint;
@@ -14,12 +14,24 @@ pub mod metadata;
 pub mod puppet;
 pub mod ruby;
 pub mod yaml;
+pub mod report;
+pub mod cli;
 
 pub use lint::{LintConfig, LintIssue, LintLevel, LintManager, LintResult, LintTool};
 pub use metadata::MetadataValidator;
 pub use puppet::PuppetValidator;
 pub use ruby::RubyValidator;
 pub use yaml::YamlValidator;
+pub use report::ReportGenerator;
+pub use cli::ValidatorCli;
+
+/// Report format enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReportFormat {
+    Json,
+    Text,
+    Html,
+}
 
 /// Main validator orchestrator
 pub struct ModuleValidator {
