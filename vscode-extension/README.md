@@ -1,4 +1,4 @@
-# Regent - Puppet Development Kit for VS Code
+# Regent - OpenVox Development Kit for VS Code
 
 A lightweight, Rust-powered extension for Puppet module development. Build, test, and validate Puppet modules with speed and simplicity.
 
