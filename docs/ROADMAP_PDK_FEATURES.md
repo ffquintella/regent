@@ -14,8 +14,8 @@
 - [Phase 2: Test (Complete)](#phase-2-test-functionality-complete-)
 - [Phase 3: Validation (Complete)](#phase-3-detailed-validation-enhancements-complete-)
 - [Phase 4: Advanced Generation (Complete)](#phase-4-advanced-generation-complete-)
-- [Phase 5: VS Code Extension (Planned)](#phase-5-vs-code-extension-planned-)
-- [Phase 6: Cross-Platform Releases (Planned)](#phase-6-cross-platform-releases-planned-)
+- [Phase 5: VS Code Extension (Complete)](#phase-5-vs-code-extension-complete-)
+- [Phase 6: Cross-Platform Releases (In Progress)](#phase-6-cross-platform-releases-in-progress-)
 - [Implementation Checklist](#-implementation-checklist)
 - [Priority Matrix](#-implementation-priority-matrix)
 
@@ -714,9 +714,9 @@ Build a Visual Studio Code extension for Regent that can fully replace the Puppe
 - **Week 3**: Code actions (quick-fix hooks to Regent lint autofix), task/launch templates, UX polish
 - **Week 4** (buffer): Hardening, docs, packaging, and marketplace publishing checklist
 
-## Phase 6: CROSS-PLATFORM RELEASES (Planned 🚧)
+## Phase 6: CROSS-PLATFORM RELEASES (In Progress 🔧)
 
-**Duration**: 2-3 weeks | **Tests**: TBD | **Status**: Planned
+**Duration**: 2-3 weeks | **Tests**: TBD | **Status**: In Progress - Week 1
 
 ### Objective
 
@@ -830,14 +830,17 @@ Ship polished, signed installers for macOS, Linux, and Windows with repeatable C
 - [x] CLI integration and validation
 - [x] 30 tests passing
 
-### Phase 5: VS CODE EXTENSION (Planned 🚧)
+### Phase 5: VS CODE EXTENSION (Complete ✅)
 
-- [ ] Extension scaffold with commands for build/test/lint
-- [ ] Problem matchers piping Regent output to Diagnostics
-- [ ] Snippets and code actions for generators
-- [ ] Task/launch templates for Regent workflows
-- [ ] Settings for Regent binary path and validation toggles
-- [ ] Publishing and docs checklist
+- [x] Extension scaffold with commands for build/test/lint
+- [x] Problem matchers piping Regent output to Diagnostics
+- [x] Snippets and code actions for generators
+- [x] Task/launch templates for Regent workflows
+- [x] Settings for Regent binary path and validation toggles
+- [x] Publishing and docs checklist
+- [x] Integration test suite with Mocha
+- [x] Enhanced error handling and performance optimization
+- [x] Complete documentation (README, EXAMPLES, PUBLISHING, CHANGELOG)
 
 ---
 
