@@ -1,7 +1,0 @@
-/Users/felipe/Dev/regent/target/debug/deps/crc_catalog-2a7b71606b267fa1.d: /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/lib.rs /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/poly.rs /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/algorithm.rs
-
-/Users/felipe/Dev/regent/target/debug/deps/libcrc_catalog-2a7b71606b267fa1.rmeta: /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/lib.rs /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/poly.rs /Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/algorithm.rs
-
-/Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/lib.rs:
-/Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/poly.rs:
-/Users/felipe/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/crc-catalog-2.4.0/src/algorithm.rs:

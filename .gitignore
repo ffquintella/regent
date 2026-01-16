@@ -57,3 +57,6 @@ build-iPhoneSimulator/
 # .rubocop-https?--*
 .rspec_status
 Gemfile.lock
+
+# Rust build outputs
+target/
