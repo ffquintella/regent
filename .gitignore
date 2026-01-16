@@ -60,3 +60,6 @@ Gemfile.lock
 
 # Rust build outputs
 target/
+
+# VS Code extension build artifacts
+*.vsix
