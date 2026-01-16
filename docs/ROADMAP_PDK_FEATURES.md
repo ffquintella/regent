@@ -2,7 +2,7 @@
 
 **Version**: 0.1.1  
 **Last Updated**: January 16, 2026  
-**Status**: Phase 4 Complete (187/187 tests) ✅ Phases 1-4 Complete
+**Status**: Phase 4 Complete (187/187 tests) ✅ Phases 1-4 Complete | Phase 5 Planned (VS Code Extension) | Phase 6 Planned (Cross-Platform Releases)
 
 ---
 
@@ -14,6 +14,8 @@
 - [Phase 2: Test (Complete)](#phase-2-test-functionality-complete-)
 - [Phase 3: Validation (Complete)](#phase-3-detailed-validation-enhancements-complete-)
 - [Phase 4: Advanced Generation (Complete)](#phase-4-advanced-generation-complete-)
+- [Phase 5: VS Code Extension (Planned)](#phase-5-vs-code-extension-planned-)
+- [Phase 6: Cross-Platform Releases (Planned)](#phase-6-cross-platform-releases-planned-)
 - [Implementation Checklist](#-implementation-checklist)
 - [Priority Matrix](#-implementation-priority-matrix)
 
@@ -65,7 +67,9 @@ Binary Size: 8.7 MB (debug)
 | 2 | TEST | ✅ 100% | 80/80 | 4 weeks |
 | 3 | VALIDATE | ✅ 100% | 43/43 | 2 weeks ✅ |
 | 4 | GENERATE | ✅ 100% | 30/30 | 2-3 weeks |
-| **TOTAL** | | **100%** | **187/187** | **11-16 weeks** |
+| 5 | VS CODE EXTENSION | � In Progress | TBD | 3-4 weeks |
+| 6 | CROSS-PLATFORM RELEASES | 🚧 Planned | 0/TBD | 2-3 weeks |
+| **TOTAL (Phases 1-4)** | | **100%** | **187/187** | **11-16 weeks** |
 
 ---
 
@@ -647,6 +651,88 @@ Implemented advanced generators for Puppet components with production-ready temp
 
 ---
 
+## Phase 5: VS CODE EXTENSION (In Progress 🔧)
+
+**Duration**: 3-4 weeks | **Tests**: TBD | **Status**: In Progress
+
+### Objective
+
+Build a Visual Studio Code extension for Regent that can fully replace the Puppet extension while staying lightweight and Rust-powered.
+
+### Scope & Features
+
+- VS Code commands to run `regent build`, `regent test`, and `regent lint` with problem matchers
+- Syntax highlighting, snippets, and code actions aligned with Regent generators (classes, resources, providers)
+- Integrated validation feedback surfacing lint/test results in the Problems panel
+- Task/launch templates to wire Regent workflows into VS Code without custom setup
+- Extension settings for Regent binary path, Puppet/Ruby version hints, and validation toggles
+- Telemetry-free, offline-friendly design
+
+### Implementation Status
+
+✅ **Week 1 Complete**: Extension scaffolding and core commands
+- [x] Extension directory structure (`vscode-extension/`)
+- [x] `package.json` with commands, configuration, and problem matchers
+- [x] TypeScript setup with `tsconfig.json` and ESLint
+- [x] Core commands: Build, Test, Lint, Generate, List Validators
+- [x] Output channel for command feedback
+- [x] Status bar integration preparation
+
+🔧 **Week 2 In Progress**: Diagnostics and snippets
+- [x] Problem matcher pipeline for lint output parsing
+- [x] Diagnostic collection in Problems panel
+- [x] JSON report parsing from `regent lint --report json`
+- [x] Puppet snippets for classes, types, resources, RSpec tests
+- [x] Task templates (tasks.json) for VS Code Tasks
+- [x] Launch configurations for debugging extension
+- [x] Configuration schema (binary path, versions, lint-on-save)
+- [x] Lint-on-save functionality
+- [x] README with usage documentation
+
+🚧 **Week 3 Planned**: Code actions and polish
+- [ ] Quick-fix code actions (hook to Regent lint autofix)
+- [ ] Workspace task templates generation
+- [ ] Status bar indicators for build/test/lint status
+- [ ] Extension icon and branding
+- [ ] Marketplace preparation
+
+🚧 **Week 4 (Buffer) Planned**: Hardening and release
+- [ ] Integration tests for extension commands
+- [ ] Error handling improvements
+- [ ] Performance optimization
+- [ ] Documentation finalization
+- [ ] VSIX packaging for distribution
+- [ ] Marketplace publishing checklist
+
+### Proposed Milestones
+
+- **Week 1**: Extension scaffolding, commands for build/test/lint, basic status bar indicators
+- **Week 2**: Diagnostics + problem matcher pipeline, snippets for generators, configuration surface
+- **Week 3**: Code actions (quick-fix hooks to Regent lint autofix), task/launch templates, UX polish
+- **Week 4** (buffer): Hardening, docs, packaging, and marketplace publishing checklist
+
+## Phase 6: CROSS-PLATFORM RELEASES (Planned 🚧)
+
+**Duration**: 2-3 weeks | **Tests**: TBD | **Status**: Planned
+
+### Objective
+
+Ship polished, signed installers for macOS, Linux, and Windows with repeatable CI/CD pipelines and integrity guarantees.
+
+### Scope & Features
+
+- Homebrew tap with signed bottles and checksum publishing
+- Linux packages: deb/rpm builds, repository metadata, and install docs
+- Windows MSI installer plus portable ZIP; Start Menu and PATH wiring
+- Release signing and verification: SHA256 sums, GPG/cosign signatures
+- CI/CD: matrix build/test/package across platforms with smoke install runs
+
+### Proposed Milestones
+
+- **Week 1**: Package scaffolds for brew tap, deb/rpm, and MSI/ZIP; establish release artifact layout
+- **Week 2**: CI pipelines for build/test/package, signing and checksum publication, install-time smoke tests
+- **Week 3** (buffer): Installer polish (icons, metadata), docs for install/verify/uninstall, hardening and QA
+
 ## 📋 Implementation Checklist
 
 ### Phase 1: BUILD ✅
@@ -741,6 +827,15 @@ Implemented advanced generators for Puppet components with production-ready temp
 - [x] CLI integration and validation
 - [x] 30 tests passing
 
+### Phase 5: VS CODE EXTENSION (Planned 🚧)
+
+- [ ] Extension scaffold with commands for build/test/lint
+- [ ] Problem matchers piping Regent output to Diagnostics
+- [ ] Snippets and code actions for generators
+- [ ] Task/launch templates for Regent workflows
+- [ ] Settings for Regent binary path and validation toggles
+- [ ] Publishing and docs checklist
+
 ---
 
 ## 🎯 Implementation Priority Matrix
@@ -756,6 +851,7 @@ Implemented advanced generators for Puppet components with production-ready temp
 | **Integration Testing** | 2 | ✅ DONE | High | High | Week 4 |
 | **Advanced Validation** | 3 | ✅ DONE | Low | Medium | Complete |
 | **Extended Generation** | 4 | ✅ DONE | Medium | Medium | Complete |
+| **VS Code Extension (Puppet replacement)** | 5 | 🚧 Planned | Medium | Critical | 3-4 weeks |
 
 ---
 

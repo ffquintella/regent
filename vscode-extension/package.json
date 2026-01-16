@@ -1,0 +1,162 @@
+{
+  "name": "regent",
+  "displayName": "Regent - Puppet Development Kit",
+  "description": "Lightweight Puppet development toolkit powered by Rust. Build, test, and validate Puppet modules with speed.",
+  "version": "0.1.0",
+  "publisher": "regent",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Snippets",
+    "Testing"
+  ],
+  "keywords": [
+    "puppet",
+    "regent",
+    "devops",
+    "infrastructure",
+    "automation"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/metadata.json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "regent.build",
+        "title": "Regent: Build Module",
+        "icon": "$(package)"
+      },
+      {
+        "command": "regent.test",
+        "title": "Regent: Run Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "regent.lint",
+        "title": "Regent: Lint Module",
+        "icon": "$(search-fuzzy)"
+      },
+      {
+        "command": "regent.validators",
+        "title": "Regent: List Validators"
+      },
+      {
+        "command": "regent.generate",
+        "title": "Regent: Generate Component"
+      }
+    ],
+    "configuration": {
+      "title": "Regent",
+      "properties": {
+        "regent.binaryPath": {
+          "type": "string",
+          "default": "regent",
+          "description": "Path to the Regent binary. Leave as 'regent' to use PATH.",
+          "scope": "machine-overridable"
+        },
+        "regent.puppetVersion": {
+          "type": "string",
+          "default": "",
+          "description": "Puppet version hint for validation (e.g., '7.x', '8.x'). Leave empty for auto-detection.",
+          "scope": "resource"
+        },
+        "regent.rubyVersion": {
+          "type": "string",
+          "default": "",
+          "description": "Ruby version hint for validation (e.g., '3.1', '3.2'). Leave empty for auto-detection.",
+          "scope": "resource"
+        },
+        "regent.lintOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run regent lint automatically when saving Puppet files.",
+          "scope": "resource"
+        },
+        "regent.failOnWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Treat lint warnings as errors.",
+          "scope": "resource"
+        },
+        "regent.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show lint issues in the Problems panel.",
+          "scope": "resource"
+        }
+      }
+    },
+    "problemMatchers": [
+      {
+        "name": "regent-lint",
+        "owner": "regent",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(.+):(\\d+):(\\d+):\\s+(error|warning|info):\\s+(.+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      },
+      {
+        "name": "regent-test",
+        "owner": "regent",
+        "fileLocation": ["relative", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^\\s+Failure/Error:\\s+(.+)$",
+          "message": 1
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "puppet",
+        "path": "./snippets/puppet.json"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "regent",
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The Regent command to run (build, test, lint)"
+          },
+          "args": {
+            "type": "array",
+            "description": "Additional arguments"
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/regent/regent-vscode"
+  },
+  "license": "MIT"
+}

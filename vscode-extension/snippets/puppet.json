@@ -1,0 +1,164 @@
+{
+  "Puppet Class": {
+    "prefix": "regent-class",
+    "body": [
+      "# @summary ${1:Brief description of class}",
+      "#",
+      "# ${2:Longer description of class}",
+      "#",
+      "# @param ${3:param_name}",
+      "#   Description of parameter",
+      "#",
+      "# @example",
+      "#   include ${4:module_name}::${5:class_name}",
+      "#",
+      "class ${4:module_name}::${5:class_name} (",
+      "  ${6:String} \\$${3:param_name} = '${7:default}',",
+      ") {",
+      "  $0",
+      "}"
+    ],
+    "description": "Regent-style Puppet class with documentation"
+  },
+  "Puppet Defined Type": {
+    "prefix": "regent-define",
+    "body": [
+      "# @summary ${1:Brief description of defined type}",
+      "#",
+      "# ${2:Longer description}",
+      "#",
+      "# @param ${3:param_name}",
+      "#   Description of parameter",
+      "#",
+      "# @example",
+      "#   ${4:module_name}::${5:type_name} { '${6:namevar}': }",
+      "#",
+      "define ${4:module_name}::${5:type_name} (",
+      "  ${7:String} \\$${3:param_name} = '${8:default}',",
+      ") {",
+      "  $0",
+      "}"
+    ],
+    "description": "Regent-style Puppet defined type with documentation"
+  },
+  "Puppet Resource": {
+    "prefix": "regent-resource",
+    "body": [
+      "${1:type} { '${2:title}':",
+      "  ensure => ${3:present},",
+      "  $0",
+      "}"
+    ],
+    "description": "Puppet resource declaration"
+  },
+  "Puppet File Resource": {
+    "prefix": "regent-file",
+    "body": [
+      "file { '${1:path}':",
+      "  ensure  => ${2|file,directory,link,absent|},",
+      "  owner   => '${3:root}',",
+      "  group   => '${4:root}',",
+      "  mode    => '${5:0644}',",
+      "  content => ${6:template('${7:module_name}/${8:template.erb}')},",
+      "}"
+    ],
+    "description": "Puppet file resource with common attributes"
+  },
+  "Puppet Package Resource": {
+    "prefix": "regent-package",
+    "body": [
+      "package { '${1:package_name}':",
+      "  ensure => ${2|installed,latest,absent,<version>|},",
+      "}"
+    ],
+    "description": "Puppet package resource"
+  },
+  "Puppet Service Resource": {
+    "prefix": "regent-service",
+    "body": [
+      "service { '${1:service_name}':",
+      "  ensure => ${2|running,stopped|},",
+      "  enable => ${3|true,false|},",
+      "}"
+    ],
+    "description": "Puppet service resource"
+  },
+  "Puppet Exec Resource": {
+    "prefix": "regent-exec",
+    "body": [
+      "exec { '${1:command_name}':",
+      "  command => '${2:command}',",
+      "  path    => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'],",
+      "  ${3|unless,onlyif,creates|} => '${4:condition}',",
+      "}"
+    ],
+    "description": "Puppet exec resource"
+  },
+  "RSpec Describe Block": {
+    "prefix": "regent-describe",
+    "body": [
+      "describe '${1:class_or_type}' do",
+      "  ${2:on_supported_os.each do |os, os_facts|}",
+      "    ${3:context \"on #{os}\" do}",
+      "      ${4:let(:facts) { os_facts \\}}",
+      "",
+      "      it { is_expected.to compile.with_all_deps }",
+      "",
+      "      $0",
+      "    end",
+      "  end",
+      "end"
+    ],
+    "description": "RSpec describe block for Puppet testing"
+  },
+  "RSpec Context": {
+    "prefix": "regent-context",
+    "body": [
+      "context '${1:description}' do",
+      "  ${2:let(:params) { { ${3:param}: '${4:value}' \\} \\}}",
+      "",
+      "  it { is_expected.to ${5:compile.with_all_deps} }",
+      "  $0",
+      "end"
+    ],
+    "description": "RSpec context block"
+  },
+  "RSpec It Block": {
+    "prefix": "regent-it",
+    "body": [
+      "it '${1:description}' do",
+      "  ${2:is_expected.to contain_${3:type}('${4:title}')}",
+      "end"
+    ],
+    "description": "RSpec it block for Puppet testing"
+  },
+  "Puppet Function (Ruby)": {
+    "prefix": "regent-function-ruby",
+    "body": [
+      "# @summary ${1:Brief description}",
+      "#",
+      "Puppet::Functions.create_function(:'${2:module_name}::${3:function_name}') do",
+      "  # @param ${4:param_name}",
+      "  #   Description of parameter",
+      "  # @return [${5:String}]",
+      "  #   Description of return value",
+      "  dispatch :${3:function_name} do",
+      "    param '${6:String}', :${4:param_name}",
+      "    return_type '${5:String}'",
+      "  end",
+      "",
+      "  def ${3:function_name}(${4:param_name})",
+      "    $0",
+      "  end",
+      "end"
+    ],
+    "description": "Puppet 4.x Ruby function"
+  },
+  "Hiera Lookup": {
+    "prefix": "regent-lookup",
+    "body": [
+      "lookup('${1:key}', ${2|String,Array,Hash,Integer,Boolean|}, '${3|first,unique,hash,deep|}', ${4:'default_value'})"
+    ],
+    "description": "Hiera lookup function"
+  }
+}
