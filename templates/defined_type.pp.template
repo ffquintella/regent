@@ -1,0 +1,39 @@
+# <%= defined_type_name %>
+#
+# @summary A description of what this defined type does
+#
+# A longer description of what this defined type does, if the resource has any
+# parameters it should be documented here.
+#
+# @example
+#   <%= module_name %>::<%= defined_type_name %> { 'namevar':
+#     param1 => 'value1',
+#   }
+#
+# @param namevar
+#   Description of the namevar parameter.
+#
+# @param [String] $param1
+#   Description of parameter 1
+#
+# @param [Boolean] $ensure
+#   Whether the resource should be present or absent.
+#
+define <%= module_name %>::<%= defined_type_name %> (
+  String $param1 = 'default_value',
+  Enum['present', 'absent'] $ensure = 'present',
+) {
+  # Your defined type implementation here
+  
+  case $ensure {
+    'present': {
+      notify { "Adding <%= defined_type_name %> ${name}": }
+    }
+    'absent': {
+      notify { "Removing <%= defined_type_name %> ${name}": }
+    }
+    default: {
+      fail("Invalid ensure value: ${ensure}")
+    }
+  }
+}

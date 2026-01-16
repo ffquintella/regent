@@ -1,24 +1,67 @@
 # Puppet module artifacts
 pkg/
 *.tar.gz
+files/
+mod/
+build/
+dist/
+
+# Test & coverage
 coverage/
 .rspec
 .rubocop_cache
+junit.xml
+coverage_html/
 
 # Temporary files
 .tmp/
 tmp/
+.cache/
+*.tmp
 
 # IDE
 .vscode/
 .idea/
+*.sublime-*
 *.swp
 *.swo
 *~
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
 
 # OS
 .DS_Store
 Thumbs.db
+.vagrant/
+*.iso
 
-# Gemfile lock (optional, depends on project policy)
+# Dependency management
 Gemfile.lock
+vendor/
+node_modules/
+.bundle/
+.ruby-version
+.ruby-gemset
+
+# Puppet specific
+.puppet/
+modules/
+fixtures/modules/*
+!fixtures/modules/.gitkeep
+manifests/.DS_Store
+files/.DS_Store
+
+# Build artifacts
+*.gem
+*.rlib
+
+# Beaker
+.beaker/
+.beaker_history
+
+# Acceptance test temp
+spec/fixtures/modules/

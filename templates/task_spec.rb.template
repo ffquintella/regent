@@ -1,0 +1,21 @@
+# frozen_string_literal: true
+
+require 'spec_helper'
+
+describe '<%= module_name %>::<%= task_name %>' do
+  it 'has a description' do
+    expect(subject[:description]).not_to be_empty
+  end
+
+  describe 'default parameter values' do
+    it 'accepts no parameters' do
+      expect(subject[:parameters]).to be_empty
+    end
+  end
+
+  it 'executes successfully' do
+    # Example of running a task in testing
+    # You can use Bolt's testing framework here
+    pending('Task execution test')
+  end
+end

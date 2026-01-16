@@ -1,0 +1,26 @@
+{
+  "name": "<%= module_name %>",
+  "version": "1.0.0",
+  "author": "<%= author %>",
+  "summary": "A module for <%= summary %>",
+  "license": "Apache-2.0",
+  "source": "https://github.com/<%= github_user %>/<%= module_name %>",
+  "project_page": "https://github.com/<%= github_user %>/<%= module_name %>",
+  "issues_url": "https://github.com/<%= github_user %>/<%= module_name %>/issues",
+  "dependencies": [],
+  "operatingsystem_support": [
+    {
+      "operatingsystem": "Ubuntu",
+      "operatingsystemrelease": ["18.04", "20.04", "22.04"]
+    },
+    {
+      "operatingsystem": "CentOS",
+      "operatingsystemrelease": ["7", "8"]
+    },
+    {
+      "operatingsystem": "RedHat",
+      "operatingsystemrelease": ["7", "8", "9"]
+    }
+  ],
+  "tags": ["module", "<%= tags %>"]
+}

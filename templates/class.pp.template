@@ -1,0 +1,37 @@
+# <%= class_name %>
+#
+# @summary A description of what this class does
+#
+# A longer description of what this class does, if the class has any
+# parameters it should be documented here.
+#
+# @example
+#   include <%= module_name %>::<%= class_name %>
+#
+# @param [String] $param1
+#   Description of parameter 1
+#
+# @param [Boolean] $ensure
+#   Whether the resource should be present or absent. Valid values are present, absent.
+#   Default: present
+#
+class <%= module_name %>::<%= class_name %> (
+  String $param1 = 'default_value',
+  Enum['present', 'absent'] $ensure = 'present',
+) {
+  # Your class implementation here
+  
+  case $ensure {
+    'present': {
+      # Add resource declarations
+      notify { "Adding <%= class_name %> with param1=${param1}": }
+    }
+    'absent': {
+      # Add resource declarations for removal
+      notify { "Removing <%= class_name %>": }
+    }
+    default: {
+      fail("Invalid ensure value: ${ensure}")
+    }
+  }
+}

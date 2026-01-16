@@ -1,0 +1,41 @@
+# frozen_string_literal: true
+
+require 'spec_helper'
+
+describe '<%= module_name %>::<%= class_name %>' do
+  context 'with default values for all parameters' do
+    let(:params) { {} }
+
+    it 'compiles' do
+      is_expected.to compile
+    end
+
+    it 'creates expected resources' do
+      is_expected.to contain_notify('default notification')
+    end
+  end
+
+  context 'with param1 set to a custom value' do
+    let(:params) { { param1: 'custom_value' } }
+
+    it 'compiles' do
+      is_expected.to compile
+    end
+
+    it 'uses custom parameter value' do
+      is_expected.to contain_notify("Adding <%= class_name %> with param1=custom_value")
+    end
+  end
+
+  context 'with ensure set to absent' do
+    let(:params) { { ensure: 'absent' } }
+
+    it 'compiles' do
+      is_expected.to compile
+    end
+
+    it 'removes resources' do
+      is_expected.to contain_notify("Removing <%= class_name %>")
+    end
+  end
+end
