@@ -7,6 +7,7 @@ const execAsync = promisify(exec);
 
 let diagnosticCollection: vscode.DiagnosticCollection;
 let outputChannel: vscode.OutputChannel;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('Regent');
@@ -14,7 +15,19 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(diagnosticCollection);
     context.subscriptions.push(outputChannel);
 
+    // Create status bar item
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    statusBarItem.text = "$(regent) Regent";
+    statusBarItem.tooltip = "Regent - OpenVox Development Kit";
+    statusBarItem.command = 'regent.showMenu';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
+
     // Register commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('regent.showMenu', () => showQuickMenu())
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('regent.build', () => runRegentCommand('build'))
     );
@@ -35,6 +48,23 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('regent.generate', () => runGenerateCommand())
     );
 
+    // Register fix all command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('regent.fixAll', () => runFixAll())
+    );
+
+    // Register setup workspace command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('regent.setupWorkspace', () => setupWorkspace())
+    );
+
+    // Register code action provider for quick fixes
+    context.subscriptions.push(
+        vscode.languages.registerCodeActionsProvider('puppet', new RegentCodeActionProvider(), {
+            providedCodeActionKinds: RegentCodeActionProvider.providedCodeActionKinds
+        })
+    );
+
     // Lint on save if enabled
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument((document) => {
@@ -44,6 +74,33 @@ export function activate(context: vscode.ExtensionContext) {
                     runRegentLint(false);
                 }
             }
+    if (statusBarItem) {
+        statusBarItem.dispose();
+    }
+}
+
+async function showQuickMenu() {
+    const options = [
+        { label: '$(package) Build Module', command: 'build' },
+        { label: '$(beaker) Run Tests', command: 'test' },
+        { label: '$(search-fuzzy) Lint Module', command: 'lint' },
+        { label: '$(list-unordered) List Validators', command: 'validators' },
+        { label: '$(file-add) Generate Component', command: 'generate' },
+    ];
+
+    const selected = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Select a Regent command'
+    });
+
+    if (selected) {
+        if (selected.command === 'generate') {
+            await runGenerateCommand();
+        } else if (selected.command === 'lint') {
+            await runRegentLint();
+        } else {
+            await runRegentCommand(selected.command);
+        }
+    }
         })
     );
 
@@ -81,6 +138,9 @@ async function runRegentCommand(command: string, args: string[] = []) {
     const regent = await getRegentBinary();
     const fullCommand = `${regent} ${command} ${args.join(' ')}`;
 
+    // Update status bar
+    statusBarItem.text = `$(sync~spin) Regent: ${command}...`;
+
     outputChannel.show(true);
     outputChannel.appendLine(`\n$ ${fullCommand}`);
     outputChannel.appendLine('─'.repeat(80));
@@ -98,8 +158,10 @@ async function runRegentCommand(command: string, args: string[] = []) {
             outputChannel.appendLine(stderr);
         }
 
+        statusBarItem.text = `$(check) Regent`;
         vscode.window.showInformationMessage(`Regent ${command} completed successfully`);
     } catch (error: any) {
+        statusBarItem.text = `$(error) Regent`;
         outputChannel.appendLine(`Error: ${error.message}`);
         if (error.stdout) {
             outputChannel.appendLine(error.stdout);
@@ -108,6 +170,11 @@ async function runRegentCommand(command: string, args: string[] = []) {
             outputChannel.appendLine(error.stderr);
         }
         vscode.window.showErrorMessage(`Regent ${command} failed: ${error.message}`);
+    } finally {
+        // Reset status bar after 3 seconds
+        setTimeout(() => {
+            statusBarItem.text = "$(regent) Regent";
+        }, 3000);
     }
 }
 
@@ -124,6 +191,9 @@ async function runRegentLint(showOutput: boolean = true) {
     const enableDiagnostics = config.get<boolean>('enableDiagnostics');
     
     const fullCommand = `${regent} lint --report json${failOnWarnings}`;
+
+    // Update status bar
+    statusBarItem.text = `$(sync~spin) Regent: linting...`;
 
     if (showOutput) {
         outputChannel.show(true);
@@ -151,10 +221,12 @@ async function runRegentLint(showOutput: boolean = true) {
             }
         }
 
+        statusBarItem.text = `$(check) Regent`;
         if (showOutput) {
             vscode.window.showInformationMessage('Regent lint completed');
         }
     } catch (error: any) {
+        statusBarItem.text = `$(warning) Regent`;
         if (showOutput) {
             outputChannel.appendLine(`Error: ${error.message}`);
             if (error.stdout) {
@@ -175,6 +247,11 @@ async function runRegentLint(showOutput: boolean = true) {
         if (showOutput) {
             vscode.window.showWarningMessage(`Regent lint found issues`);
         }
+    } finally {
+        // Reset status bar after 3 seconds
+        setTimeout(() => {
+            statusBarItem.text = "$(regent) Regent";
+        }, 3000);
     }
 }
 
@@ -247,4 +324,187 @@ async function runGenerateCommand() {
 
     const args = [componentType, componentName];
     await runRegentCommand('generate', args);
+}
+
+// Code Action Provider for quick fixes
+class RegentCodeActionProvider implements vscode.CodeActionProvider {
+    public static readonly providedCodeActionKinds = [
+        vscode.CodeActionKind.QuickFix
+    ];
+
+    provideCodeActions(
+        document: vscode.TextDocument,
+        range: vscode.Range | vscode.Selection,
+        context: vscode.CodeActionContext,
+        token: vscode.CancellationToken
+    ): vscode.CodeAction[] | undefined {
+        const regentDiagnostics = context.diagnostics.filter(
+            diagnostic => diagnostic.source === 'regent'
+        );
+
+        if (regentDiagnostics.length === 0) {
+            return [];
+        }
+
+        const actions: vscode.CodeAction[] = [];
+
+        // Add "Run Regent Lint" action
+        const lintAction = new vscode.CodeAction(
+            'Run Regent Lint',
+            vscode.CodeActionKind.QuickFix
+        );
+        lintAction.command = {
+            command: 'regent.lint',
+            title: 'Run Regent Lint'
+        };
+        actions.push(lintAction);
+
+        // Add "Fix All Auto-fixable Issues" action (if autofix is available)
+        const fixAllAction = new vscode.CodeAction(
+            'Fix All Auto-fixable Issues',
+            vscode.CodeActionKind.QuickFix
+        );
+        fixAllAction.command = {
+            command: 'regent.fixAll',
+            title: 'Fix All Auto-fixable Issues'
+        };
+        fixAllAction.isPreferred = true;
+        actions.push(fixAllAction);
+
+        return actions;
+    }
+}
+
+async function runFixAll() {
+    const workspaceRoot = await getWorkspaceRoot();
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open');
+        return;
+    }
+
+    const regent = await getRegentBinary();
+    const fullCommand = `${regent} lint --fix`;
+
+    statusBarItem.text = `$(sync~spin) Regent: fixing...`;
+    outputChannel.show(true);
+    outputChannel.appendLine(`\n$ ${fullCommand}`);
+    outputChannel.appendLine('─'.repeat(80));
+
+    try {
+        const { stdout, stderr } = await execAsync(fullCommand, {
+            cwd: workspaceRoot,
+            maxBuffer: 10 * 1024 * 1024
+        });
+
+        if (stdout) {
+            outputChannel.appendLine(stdout);
+        }
+        if (stderr) {
+            outputChannel.appendLine(stderr);
+        }
+
+        statusBarItem.text = `$(check) Regent`;
+        vscode.window.showInformationMessage('Auto-fixable issues resolved');
+        
+        // Re-run lint to update diagnostics
+        setTimeout(() => runRegentLint(false), 500);
+    } catch (error: any) {
+        statusBarItem.text = `$(error) Regent`;
+        outputChannel.appendLine(`Error: ${error.message}`);
+        if (error.stdout) {
+            outputChannel.appendLine(error.stdout);
+        }
+        if (error.stderr) {
+            outputChannel.appendLine(error.stderr);
+        }
+        vscode.window.showErrorMessage(`Fix failed: ${error.message}`);
+    } finally {
+        setTimeout(() => {
+            statusBarItem.text = "$(regent) Regent";
+        }, 3000);
+    }
+}
+
+async function setupWorkspace() {
+    const workspaceRoot = await getWorkspaceRoot();
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open');
+        return;
+    }
+
+    const vscodePath = path.join(workspaceRoot, '.vscode');
+    const fs = require('fs').promises;
+
+    try {
+        // Create .vscode directory if it doesn't exist
+        try {
+            await fs.mkdir(vscodePath, { recursive: true });
+        } catch (err) {
+            // Directory might already exist
+        }
+
+        // Create tasks.json
+        const tasksPath = path.join(vscodePath, 'tasks.json');
+        const tasksContent = {
+            version: '2.0.0',
+            tasks: [
+                {
+                    label: 'Regent: Build Module',
+                    type: 'shell',
+                    command: 'regent',
+                    args: ['build'],
+                    problemMatcher: [],
+                    group: {
+                        kind: 'build',
+                        isDefault: true
+                    }
+                },
+                {
+                    label: 'Regent: Run Tests',
+                    type: 'shell',
+                    command: 'regent',
+                    args: ['test'],
+                    problemMatcher: '$regent-test',
+                    group: {
+                        kind: 'test',
+                        isDefault: true
+                    }
+                },
+                {
+                    label: 'Regent: Lint Module',
+                    type: 'shell',
+                    command: 'regent',
+                    args: ['lint'],
+                    problemMatcher: '$regent-lint'
+                }
+            ]
+        };
+
+        await fs.writeFile(tasksPath, JSON.stringify(tasksContent, null, 2));
+
+        // Create settings.json with Regent configuration
+        const settingsPath = path.join(vscodePath, 'settings.json');
+        let settings: any = {};
+        
+        try {
+            const existingSettings = await fs.readFile(settingsPath, 'utf8');
+            settings = JSON.parse(existingSettings);
+        } catch (err) {
+            // File doesn't exist or can't be parsed, use empty object
+        }
+
+        // Add Regent settings if not present
+        if (!settings['regent.enableDiagnostics']) {
+            settings['regent.enableDiagnostics'] = true;
+        }
+        if (!settings['regent.lintOnSave']) {
+            settings['regent.lintOnSave'] = false;
+        }
+
+        await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+
+        vscode.window.showInformationMessage('Regent workspace setup complete! Created tasks.json and updated settings.json');
+    } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to setup workspace: ${error.message}`);
+    }
 }

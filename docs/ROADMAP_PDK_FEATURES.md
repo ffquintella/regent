@@ -689,19 +689,20 @@ Build a Visual Studio Code extension for Regent that can fully replace the Puppe
 - [x] Lint-on-save functionality
 - [x] README with usage documentation
 
-🚧 **Week 3 Planned**: Code actions and polish
-- [ ] Quick-fix code actions (hook to Regent lint autofix)
-- [ ] Workspace task templates generation
-- [ ] Status bar indicators for build/test/lint status
-- [ ] Extension icon and branding
-- [ ] Marketplace preparation
+✅ **Week 3 Complete**: Code actions and polish
+- [x] Quick-fix code actions (hook to Regent lint autofix)
+- [x] Workspace task templates generation command
+- [x] Status bar indicators for build/test/lint status
+- [x] Quick menu from status bar
+- [x] Extension icon and branding (maestro theme)
+- [x] Makefile target for VSIX packaging
+- [x] LICENSE file included
 
 🚧 **Week 4 (Buffer) Planned**: Hardening and release
 - [ ] Integration tests for extension commands
 - [ ] Error handling improvements
 - [ ] Performance optimization
 - [ ] Documentation finalization
-- [ ] VSIX packaging for distribution
 - [ ] Marketplace publishing checklist
 
 ### Proposed Milestones

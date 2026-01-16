@@ -49,6 +49,16 @@
       {
         "command": "regent.generate",
         "title": "Regent: Generate Component"
+      },
+      {
+        "command": "regent.fixAll",
+        "title": "Regent: Fix All Auto-fixable Issues",
+        "icon": "$(wrench)"
+      },
+      {
+        "command": "regent.setupWorkspace",
+        "title": "Regent: Setup Workspace",
+        "icon": "$(tools)"
       }
     ],
     "configuration": {
