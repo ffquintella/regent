@@ -120,6 +120,12 @@ This creates a `.vsix` file for distribution.
 
 MIT
 
+## Links
+
+- [GitHub Repository](https://github.com/ffquintella/regent)
+- [Examples and Workflows](EXAMPLES.md)
+- [Report Issues](https://github.com/ffquintella/regent/issues)
+
 ## Contributing
 
 Issues and pull requests welcome at [regent/regent-vscode](https://github.com/regent/regent-vscode)

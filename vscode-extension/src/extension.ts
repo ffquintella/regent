@@ -8,6 +8,8 @@ const execAsync = promisify(exec);
 let diagnosticCollection: vscode.DiagnosticCollection;
 let outputChannel: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem;
+let lintCache = new Map<string, { timestamp: number, diagnostics: vscode.Diagnostic[] }>();
+const CACHE_TTL = 30000; // 30 seconds cache
 
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('Regent');
@@ -118,7 +120,24 @@ export function deactivate() {
 
 async function getRegentBinary(): Promise<string> {
     const config = vscode.workspace.getConfiguration('regent');
-    return config.get<string>('binaryPath') || 'regent';
+    const binaryPath = config.get<string>('binaryPath') || 'regent';
+    
+    // Validate binary exists (basic check)
+    try {
+        const { execAsync } = require('child_process');
+        await execAsync(`which ${binaryPath}`, { timeout: 2000 });
+    } catch (error) {
+        vscode.window.showWarningMessage(
+            `Regent binary '${binaryPath}' not found in PATH. Please check your configuration.`,
+            'Open Settings'
+        ).then(selection => {
+            if (selection === 'Open Settings') {
+                vscode.commands.executeCommand('workbench.action.openSettings', 'regent.binaryPath');
+            }
+        });
+    }
+    
+    return binaryPath;
 }
 
 async function getWorkspaceRoot(): Promise<string | undefined> {
@@ -131,7 +150,7 @@ async function getWorkspaceRoot(): Promise<string | undefined> {
 async function runRegentCommand(command: string, args: string[] = []) {
     const workspaceRoot = await getWorkspaceRoot();
     if (!workspaceRoot) {
-        vscode.window.showErrorMessage('No workspace folder open');
+        vscode.window.showErrorMessage('No workspace folder open. Please open a Puppet module folder.');
         return;
     }
 
@@ -148,13 +167,15 @@ async function runRegentCommand(command: string, args: string[] = []) {
     try {
         const { stdout, stderr } = await execAsync(fullCommand, {
             cwd: workspaceRoot,
-            maxBuffer: 10 * 1024 * 1024 // 10MB buffer
+            maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+            timeout: 300000 // 5 minutes timeout
         });
 
         if (stdout) {
             outputChannel.appendLine(stdout);
         }
-        if (stderr) {
+        if (stderr && stderr.length > 0) {
+            outputChannel.appendLine('STDERR:');
             outputChannel.appendLine(stderr);
         }
 
@@ -162,14 +183,38 @@ async function runRegentCommand(command: string, args: string[] = []) {
         vscode.window.showInformationMessage(`Regent ${command} completed successfully`);
     } catch (error: any) {
         statusBarItem.text = `$(error) Regent`;
-        outputChannel.appendLine(`Error: ${error.message}`);
+        
+        const errorMessage = error.message || 'Unknown error';
+        outputChannel.appendLine(`\nError: ${errorMessage}`);
+        
         if (error.stdout) {
+            outputChannel.appendLine('\nOutput before error:');
             outputChannel.appendLine(error.stdout);
         }
         if (error.stderr) {
+            outputChannel.appendLine('\nError output:');
             outputChannel.appendLine(error.stderr);
         }
-        vscode.window.showErrorMessage(`Regent ${command} failed: ${error.message}`);
+        
+        // Provide helpful error messages
+        if (error.code === 'ENOENT') {
+            vscode.window.showErrorMessage(
+                `Regent command not found. Please ensure Regent is installed and in your PATH.`,
+                'Open Settings'
+            ).then(selection => {
+                if (selection === 'Open Settings') {
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'regent.binaryPath');
+                }
+            });
+        } else if (error.killed || error.signal === 'SIGTERM') {
+            vscode.window.showErrorMessage(`Regent ${command} timed out or was killed`);
+        } else {
+            vscode.window.showErrorMessage(`Regent ${command} failed: ${errorMessage}`, 'View Output').then(selection => {
+                if (selection === 'View Output') {
+                    outputChannel.show();
+                }
+            });
+        }
     } finally {
         // Reset status bar after 3 seconds
         setTimeout(() => {
@@ -259,6 +304,7 @@ function parseLintResults(lintReport: any, workspaceRoot: string) {
     diagnosticCollection.clear();
 
     const diagnosticsMap = new Map<string, vscode.Diagnostic[]>();
+    const cacheTimestamp = Date.now();
 
     if (lintReport.results && Array.isArray(lintReport.results)) {
         for (const result of lintReport.results) {
@@ -269,7 +315,8 @@ function parseLintResults(lintReport: any, workspaceRoot: string) {
                     
                     const line = Math.max(0, (issue.line || 1) - 1);
                     const column = Math.max(0, (issue.column || 1) - 1);
-                    const range = new vscode.Range(line, column, line, column + 100);
+                    const endColumn = column + (issue.length || 100);
+                    const range = new vscode.Range(line, column, line, endColumn);
 
                     let severity = vscode.DiagnosticSeverity.Warning;
                     if (issue.severity === 'error') {
@@ -295,9 +342,17 @@ function parseLintResults(lintReport: any, workspaceRoot: string) {
         }
     }
 
-    // Apply all diagnostics
+    // Apply all diagnostics and update cache
     for (const [filePath, diagnostics] of diagnosticsMap) {
         diagnosticCollection.set(vscode.Uri.file(filePath), diagnostics);
+        lintCache.set(filePath, { timestamp: cacheTimestamp, diagnostics });
+    }
+    
+    // Clean up old cache entries
+    for (const [key, value] of lintCache.entries()) {
+        if (cacheTimestamp - value.timestamp > CACHE_TTL) {
+            lintCache.delete(key);
+        }
     }
 }
 

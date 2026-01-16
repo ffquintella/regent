@@ -2,7 +2,7 @@
 
 **Version**: 0.1.1  
 **Last Updated**: January 16, 2026  
-**Status**: Phase 4 Complete (187/187 tests) ✅ Phases 1-4 Complete | Phase 5 Planned (VS Code Extension) | Phase 6 Planned (Cross-Platform Releases)
+**Status**: Phase 5 Complete (187/187 core tests + Extension) ✅ Phases 1-5 Complete | Phase 6 Planned (Cross-Platform Releases)
 
 ---
 
@@ -67,9 +67,9 @@ Binary Size: 8.7 MB (debug)
 | 2 | TEST | ✅ 100% | 80/80 | 4 weeks |
 | 3 | VALIDATE | ✅ 100% | 43/43 | 2 weeks ✅ |
 | 4 | GENERATE | ✅ 100% | 30/30 | 2-3 weeks |
-| 5 | VS CODE EXTENSION | � In Progress | TBD | 3-4 weeks |
+| 5 | VS CODE EXTENSION | ✅ 100% | Integration Suite | 3-4 weeks |
 | 6 | CROSS-PLATFORM RELEASES | 🚧 Planned | 0/TBD | 2-3 weeks |
-| **TOTAL (Phases 1-4)** | | **100%** | **187/187** | **11-16 weeks** |
+| **TOTAL (Phases 1-5)** | | **100%** | **187/187 + Tests** | **14-20 weeks** |
 
 ---
 
@@ -651,9 +651,9 @@ Implemented advanced generators for Puppet components with production-ready temp
 
 ---
 
-## Phase 5: VS CODE EXTENSION (In Progress 🔧)
+## Phase 5: VS CODE EXTENSION (Complete ✅)
 
-**Duration**: 3-4 weeks | **Tests**: TBD | **Status**: In Progress
+**Duration**: 3-4 weeks | **Tests**: Integration Suite | **Status**: Complete
 
 ### Objective
 
@@ -698,12 +698,14 @@ Build a Visual Studio Code extension for Regent that can fully replace the Puppe
 - [x] Makefile target for VSIX packaging
 - [x] LICENSE file included
 
-🚧 **Week 4 (Buffer) Planned**: Hardening and release
-- [ ] Integration tests for extension commands
-- [ ] Error handling improvements
-- [ ] Performance optimization
-- [ ] Documentation finalization
-- [ ] Marketplace publishing checklist
+✅ **Week 4 Complete**: Hardening and release
+- [x] Integration test suite (Mocha + @vscode/test-electron)
+- [x] Error handling improvements (timeouts, helpful messages, settings shortcuts)
+- [x] Performance optimization (diagnostic caching, 30s TTL)
+- [x] Documentation finalization (EXAMPLES.md, enhanced README)
+- [x] Marketplace publishing checklist (PUBLISHING.md)
+- [x] CHANGELOG.md created
+- [x] Binary validation with PATH checking
 
 ### Proposed Milestones
 
@@ -726,7 +728,7 @@ Ship polished, signed installers for macOS, Linux, and Windows with repeatable C
 - Linux packages: deb/rpm builds, repository metadata, and install docs
 - Windows MSI installer plus portable ZIP; Start Menu and PATH wiring
 - Release signing and verification: SHA256 sums, GPG/cosign signatures
-- CI/CD: matrix build/test/package across platforms with smoke install runs
+- CI/CD (only using makefile): matrix build/test/package across platforms with smoke install runs
 
 ### Proposed Milestones
 

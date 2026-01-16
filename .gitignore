@@ -63,3 +63,4 @@ target/
 
 # VS Code extension build artifacts
 *.vsix
+vscode-extension/node_modules/
