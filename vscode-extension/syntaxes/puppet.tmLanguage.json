@@ -1,0 +1,87 @@
+{
+  "scopeName": "source.puppet",
+  "name": "Puppet",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#variables" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.puppet",
+          "match": "#.*$"
+        },
+        {
+          "name": "comment.block.puppet",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.puppet",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "variable.interpolation.puppet",
+              "match": "\\$\\{[^}]+\\}"
+            },
+            {
+              "name": "variable.other.puppet",
+              "match": "\\$[A-Za-z_][\\w:]*"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.puppet",
+          "begin": "'",
+          "end": "'"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.puppet",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.puppet",
+          "match": "\\b(class|define|node|if|elsif|else|case|when|default|inherits|include|require|contain|import|and|or|in|unless|return)\\b"
+        },
+        {
+          "name": "constant.language.puppet",
+          "match": "\\b(true|false|undef)\\b"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.puppet",
+          "match": "\\$[A-Za-z_][\\w:]*"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.puppet",
+          "match": "(==|!=|<=|>=|<|>|=|\\+|\\-|\\*|/|\\bnot\\b)"
+        }
+      ]
+    }
+  }
+}

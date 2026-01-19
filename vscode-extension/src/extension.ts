@@ -76,9 +76,10 @@ export function activate(context: vscode.ExtensionContext) {
                     runRegentLint(false);
                 }
             }
-    if (statusBarItem) {
-        statusBarItem.dispose();
-    }
+        })
+    );
+
+    outputChannel.appendLine('Regent extension activated');
 }
 
 async function showQuickMenu() {
@@ -103,10 +104,6 @@ async function showQuickMenu() {
             await runRegentCommand(selected.command);
         }
     }
-        })
-    );
-
-    outputChannel.appendLine('Regent extension activated');
 }
 
 export function deactivate() {
@@ -115,6 +112,9 @@ export function deactivate() {
     }
     if (outputChannel) {
         outputChannel.dispose();
+    }
+    if (statusBarItem) {
+        statusBarItem.dispose();
     }
 }
 

@@ -2,7 +2,7 @@
   "name": "regent",
   "displayName": "Regent - OpenVox Development Kit",
   "description": "Lightweight Puppet development toolkit powered by Rust. Build, test, and validate Puppet modules with speed.",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "publisher": "regent",
   "icon": "icon.png",
   "engines": {
@@ -22,10 +22,31 @@
     "automation"
   ],
   "activationEvents": [
+    "onLanguage:puppet",
     "workspaceContains:**/metadata.json"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "puppet",
+        "aliases": [
+          "Puppet",
+          "puppet"
+        ],
+        "extensions": [
+          ".pp"
+        ],
+        "configuration": "./languages/puppet.language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "puppet",
+        "scopeName": "source.puppet",
+        "path": "./syntaxes/puppet.tmLanguage.json"
+      }
+    ],
     "commands": [
       {
         "command": "regent.build",
@@ -150,12 +171,13 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "sync-version": "python3 ../scripts/sync-vscode-version.py",
+    "vscode:prepublish": "npm run sync-version && npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
     "test": "npm run compile && node ./out/test/runTest.js",
-    "package": "vsce package"
+    "package": "npm run sync-version && vsce package"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",

@@ -87,3 +87,11 @@ jobs:
           name: regent-${{ matrix.os }}
           path: |
             target/release/regent${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+
+  vscode-extension-version:
+    name: VS Code Extension Version Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check VS Code extension version sync
+        run: python3 scripts/sync-vscode-version.py --check

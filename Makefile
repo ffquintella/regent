@@ -5,12 +5,14 @@ CARGO ?= cargo
 PYTHON ?= python3
 NPM ?= npm
 
-.PHONY: help version-show bump-major bump-minor bump-patch build install vscode-extension \
+.PHONY: help version-show sync-vscode-version sync-vscode-version-check bump-major bump-minor bump-patch build install vscode-extension \
 	package-homebrew package-deb package-rpm package-windows package-all
 
 help:
 	@echo "Available targets:"
 	@echo "  version-show     - Show current version from Cargo.toml"
+	@echo "  sync-vscode-version - Sync VS Code extension version with Cargo.toml"
+	@echo "  sync-vscode-version-check - Verify VS Code extension version matches Cargo.toml"
 	@echo "  bump-major       - Increment MAJOR version (X+1.0.0)"
 	@echo "  bump-minor       - Increment MINOR version (X.Y+1.0)"
 	@echo "  bump-patch       - Increment PATCH version (X.Y.Z+1)"
@@ -28,14 +30,23 @@ help:
 version-show:
 	@$(PYTHON) -c 'import pathlib, re, sys; text = pathlib.Path("Cargo.toml").read_text(); m = re.search(r"^version = \"([0-9]+\.[0-9]+\.[0-9]+)\"", text, re.M); print(m.group(1)) if m else sys.exit("version not found in Cargo.toml")'
 
+sync-vscode-version:
+	@$(PYTHON) scripts/sync-vscode-version.py
+
+sync-vscode-version-check:
+	@$(PYTHON) scripts/sync-vscode-version.py --check
+
 bump-major:
 	@$(PYTHON) -c 'import pathlib, re, sys; path = pathlib.Path("Cargo.toml"); text = path.read_text(); m = re.search(r"^version = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"", text, re.M); sys.exit("version not found in Cargo.toml") if not m else None; maj, minor, patch = map(int, m.groups()); new_version = f"{maj + 1}.0.0"; old_version = f"{maj}.{minor}.{patch}"; updated = text.replace(f"version = \"{old_version}\"", f"version = \"{new_version}\"", 1); path.write_text(updated); print(f"Bumped MAJOR: {old_version} -> {new_version}")'
+	@$(MAKE) sync-vscode-version
 
 bump-minor:
 	@$(PYTHON) -c 'import pathlib, re, sys; path = pathlib.Path("Cargo.toml"); text = path.read_text(); m = re.search(r"^version = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"", text, re.M); sys.exit("version not found in Cargo.toml") if not m else None; maj, minor, patch = map(int, m.groups()); new_version = f"{maj}.{minor + 1}.0"; old_version = f"{maj}.{minor}.{patch}"; updated = text.replace(f"version = \"{old_version}\"", f"version = \"{new_version}\"", 1); path.write_text(updated); print(f"Bumped MINOR: {old_version} -> {new_version}")'
+	@$(MAKE) sync-vscode-version
 
 bump-patch:
 	@$(PYTHON) -c 'import pathlib, re, sys; path = pathlib.Path("Cargo.toml"); text = path.read_text(); m = re.search(r"^version = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"", text, re.M); sys.exit("version not found in Cargo.toml") if not m else None; maj, minor, patch = map(int, m.groups()); new_version = f"{maj}.{minor}.{patch + 1}"; old_version = f"{maj}.{minor}.{patch}"; updated = text.replace(f"version = \"{old_version}\"", f"version = \"{new_version}\"", 1); path.write_text(updated); print(f"Bumped PATCH: {old_version} -> {new_version}")'
+	@$(MAKE) sync-vscode-version
 
 build:
 	$(CARGO) build --release
@@ -43,6 +54,8 @@ build:
 
 vscode-extension:
 	@echo "Building VS Code extension..."
+	@$(MAKE) sync-vscode-version-check
+	@$(MAKE) sync-vscode-version
 	cd vscode-extension && $(NPM) install
 	cd vscode-extension && $(NPM) run compile
 	cd vscode-extension && $(NPM) run package
