@@ -202,7 +202,7 @@ mod tests {
     use crate::validator::ValidationStatus;
 
     fn create_test_report() -> ValidationReport {
-        let mut report = ValidationReport {
+        let report = ValidationReport {
             module_path: "/test/module".to_string(),
             timestamp: "2026-01-16T00:00:00Z".to_string(),
             overall_status: ValidationStatus::Warnings,

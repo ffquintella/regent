@@ -61,6 +61,14 @@ Regent.load_gem('puppet')
 Regent.load_gem('rspec')
 ```
 
+## Warning: Native Dependencies
+
+Any feature or gem that relies on native extensions must be rebuilt or replaced with a pure-Ruby alternative for Artichoke. Native-dependent gems are not compatible out of the box and will fail to load unless a compatible build is provided.
+
+## Base Gems Bundling
+
+Regent should bundle the base gems required for all test runs to avoid re-downloading them. This includes the core RSpec stack and any pure-Ruby dependencies needed for Artichoke execution.
+
 ## Building for Distribution
 
 ### Create standalone binary

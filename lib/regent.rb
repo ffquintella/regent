@@ -6,6 +6,7 @@ require_relative 'regent/generator'
 require_relative 'regent/validator'
 require_relative 'regent/builder'
 require_relative 'regent/tester'
+require_relative 'regent/dependency_resolver'
 
 module Regent
   class Error < StandardError; end

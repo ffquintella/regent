@@ -1,11 +1,12 @@
 [package]
 name = "regent"
-version = "0.2.1"
+version = "0.4.0"
 edition = "2021"
 authors = ["Felipe Quintella"]
 license = "AGPL-3.0"
 description = "Regent - A Rust-based alternative development kit for Puppet modules with Artichoke Ruby support"
 homepage = "https://github.com/ffquintella/regent"
+default-run = "regent"
 
 [dependencies]
 # CLI framework
@@ -46,9 +47,8 @@ semver = "1.0.27"
 walkdir = "2.5.0"
 tempfile = "3.0"
 
-# Future: Artichoke Ruby integration (when stable)
-# artichoke = { version = "0.1", features = ["full"] }
-# artichoke-core = "0.1"
+# Artichoke Ruby integration
+artichoke = { git = "https://github.com/artichoke/artichoke.git" }
 
 [dev-dependencies]
 tempfile = "3.0"

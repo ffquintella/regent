@@ -9,13 +9,19 @@ pub mod reporter;
 pub mod version_matrix;
 pub mod fixtures;
 pub mod integration;
+pub mod artichoke_runner;
+pub mod bundled_gems;
+pub mod puppet_eval;
+pub mod regent_spec;
 
 pub use runner::TestRunner;
+pub use artichoke_runner::ArtichokeTestRunner;
 pub use parser::RSpecParser;
 pub use reporter::TestReporter;
 pub use version_matrix::{TestMatrixRunner, VersionMatrix, VersionTestResult, MatrixTestResults};
 pub use fixtures::{FixtureManager, FixtureConfig, FixtureModule};
 pub use integration::{IntegrationTester, NodeSpec, TestScenario, AcceptanceResults, IntegrationConfig};
+pub use regent_spec::{RegentPlan, RegentSpecRunner};
 
 /// Types of tests that can be executed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +51,8 @@ pub struct TestConfig {
     pub module_path: PathBuf,
     /// Type of test to run
     pub test_type: TestType,
+    /// Optional RSpec pattern override
+    pub pattern: Option<String>,
     /// Puppet version(s) to test against
     pub puppet_versions: Vec<String>,
     /// Ruby version(s) to test against
@@ -62,12 +70,18 @@ impl TestConfig {
         Self {
             module_path: module_path.into(),
             test_type,
+            pattern: None,
             puppet_versions: vec!["latest".to_string()],
             ruby_versions: vec![],
             parallel: false,
             threads: None,
             coverage: false,
         }
+    }
+
+    pub fn with_pattern(mut self, pattern: Option<String>) -> Self {
+        self.pattern = pattern;
+        self
     }
 
     pub fn with_puppet_versions(mut self, versions: Vec<String>) -> Self {
@@ -214,7 +228,7 @@ impl ModuleTester {
 
     /// Run RSpec-Puppet unit tests
     pub fn run_unit_tests(&self) -> Result<TestResults> {
-        let runner = TestRunner::new(&self.config);
+        let runner = ArtichokeTestRunner::new(&self.config);
         runner.run_unit_tests()
     }
 

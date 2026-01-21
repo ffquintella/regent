@@ -12,7 +12,7 @@ use cli::{NewCommand, GenerateCommand, ValidateCommand, BuildCommand, TestComman
 #[derive(Parser)]
 #[command(
     name = "regent",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Regent - Rust + Artichoke Ruby powered Puppet Development Kit",
     long_about = "Regent is an alternative development kit for Puppet modules with native Rust performance and full Ruby gem compatibility through Artichoke Ruby."
 )]
@@ -67,6 +67,12 @@ enum Commands {
 
         #[arg(short, long, help = "Test pattern")]
         pattern: Option<String>,
+
+        #[arg(long, help = "Write test report to path")]
+        report: Option<PathBuf>,
+
+        #[arg(long, help = "Show detailed test case output")]
+        detail: bool,
     },
 
     /// Show version
@@ -163,9 +169,14 @@ fn main() -> anyhow::Result<()> {
             BuildCommand::execute(&path, output.as_deref())?;
         }
 
-        Commands::Test { path, pattern } => {
+        Commands::Test {
+            path,
+            pattern,
+            report,
+            detail,
+        } => {
             println!("{}", format!("Running tests at: {:?}", path).cyan());
-            TestCommand::execute(&path, pattern.as_deref())?;
+            TestCommand::execute(&path, pattern.as_deref(), report.as_deref(), detail)?;
         }
 
         Commands::Version => {

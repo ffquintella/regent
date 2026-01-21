@@ -110,6 +110,17 @@ module Regent
       def test(path = '.')
         test_type = options[:type] || 'all'
         puts "Running #{test_type} tests for module at: #{path}".yellow
+
+        resolver = Regent::DependencyResolver.new(path, options)
+        dep_result = resolver.resolve
+        unless dep_result[:success]
+          puts "✗ Error: #{dep_result[:error] || dep_result[:errors]&.join(', ')}".red
+          puts "  #{dep_result[:help]}".yellow if dep_result[:help]
+          exit 1
+        end
+        if dep_result[:installed].any? || dep_result[:skipped].any?
+          puts "✓ Dependencies resolved (installed: #{dep_result[:installed].length}, skipped: #{dep_result[:skipped].length})".green
+        end
         
         tester = Regent::Tester.new(path, options)
         result = tester.run_tests
