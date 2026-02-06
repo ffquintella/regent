@@ -1,0 +1,9 @@
+{
+  "name": "openvox-stub",
+  "version": "0.1.0",
+  "author": "Regent",
+  "summary": "Stub module for Regent tests",
+  "license": "Apache-2.0",
+  "source": "https://example.invalid/openvox-stub",
+  "dependencies": []
+}
