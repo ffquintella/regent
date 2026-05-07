@@ -258,6 +258,7 @@ enum Expr {
     Var(VarRef),
     MethodCall { target: Box<Expr>, name: String },
     ResourceRef { rtype: String, title: Box<Expr> },
+    FunctionCall { name: String, args: Vec<Expr> },
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +498,22 @@ impl<'a> EvalContext<'a> {
             Expr::ResourceRef { rtype, title } => {
                 let title = self.eval_expr(title)?.as_string();
                 PuppetValue::String(format!("{rtype}[{title}]"))
+            }
+            Expr::FunctionCall { name, args } => {
+                let arg_values: Vec<PuppetValue> = args
+                    .iter()
+                    .map(|arg| self.eval_expr(arg))
+                    .collect::<Result<Vec<_>>>()?;
+                match name.as_str() {
+                    "template" | "epp" | "inline_template" | "inline_epp" => {
+                        let source = arg_values
+                            .first()
+                            .map(|value| value.as_string())
+                            .unwrap_or_default();
+                        PuppetValue::String(format!("<{name}:{source}>"))
+                    }
+                    _ => PuppetValue::Undef,
+                }
             }
         })
     }
@@ -827,6 +844,17 @@ impl<'a> PuppetParser<'a> {
         }
         if self.peek_kind() == Some(TokenKind::Ident) {
             let ident = self.expect_ident()?;
+            if self.consume(TokenKind::LParen) {
+                let mut args = Vec::new();
+                while !self.consume(TokenKind::RParen) && !self.is_eof() {
+                    if self.peek_kind() == Some(TokenKind::Comma) {
+                        self.index += 1;
+                        continue;
+                    }
+                    args.push(self.parse_expr()?);
+                }
+                return Ok(Expr::FunctionCall { name: ident, args });
+            }
             if self.allow_bare_vars {
                 let mut path = Vec::new();
                 while self.consume(TokenKind::LBracket) {
@@ -966,6 +994,7 @@ impl Expr {
             Expr::Var(var) => var.name.clone(),
             Expr::MethodCall { name, .. } => name.clone(),
             Expr::ResourceRef { rtype, .. } => rtype.clone(),
+            Expr::FunctionCall { name, .. } => name.clone(),
         }
     }
 
@@ -1200,4 +1229,58 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write_module(name: &str, manifest: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        fs::create_dir_all(&manifests).unwrap();
+        fs::write(manifests.join(format!("{name}.pp")), manifest).unwrap();
+        dir
+    }
+
+    #[test]
+    fn function_call_with_trailing_comma_in_resource_attrs() {
+        let manifest = r#"
+            class foo {
+              file { '/x':
+                content => template('mod/t.erb'),
+                mode    => '0644',
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .expect("class with template(...) followed by trailing comma must parse");
+        let resource = catalog.find("file", "/x").expect("file resource present");
+        assert_eq!(
+            resource.attributes.get("mode"),
+            Some(&PuppetValue::String("0644".to_string()))
+        );
+    }
+
+    #[test]
+    fn epp_call_with_trailing_comma() {
+        let manifest = r#"
+            class foo {
+              file { '/y':
+                content => epp('mod/t.epp', { 'k' => 'v' }),
+                ensure  => file,
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .expect("class with epp(...) followed by trailing comma must parse");
+        assert!(catalog.contains("file", "/y"));
+    }
 }

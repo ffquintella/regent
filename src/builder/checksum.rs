@@ -31,7 +31,8 @@ impl ChecksumGenerator {
             hasher.update(&buffer[..count]);
         }
 
-        Ok(format!("{:x}", hasher.finalize()))
+        let digest = hasher.finalize();
+        Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
     }
 
     /// Generate MD5 checksum
