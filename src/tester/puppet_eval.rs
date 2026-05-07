@@ -127,6 +127,12 @@ impl PuppetEvaluator {
         self.module.defines.contains_key(name)
     }
 
+    pub fn class_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.module.classes.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn evaluate_class(
         &self,
         name: &str,

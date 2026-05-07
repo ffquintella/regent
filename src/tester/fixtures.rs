@@ -186,9 +186,16 @@ impl FixtureManager {
 
             let installed = match &module.source {
                 Some(FixtureSource::Symlink { target }) => {
-                    self.install_symlink(&fixture_path, target)
-                        .with_context(|| format!("symlink fixture {module_name}"))?;
-                    true
+                    match self.install_symlink(&fixture_path, target) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            eprintln!(
+                                "warning: symlink failed for fixture {}: {}; using stub",
+                                module_name, err
+                            );
+                            false
+                        }
+                    }
                 }
                 Some(FixtureSource::Git { repo, ref_value }) => {
                     install_git(&fixture_path, repo, ref_value.as_deref()).unwrap_or_else(|err| {
@@ -214,10 +221,11 @@ impl FixtureManager {
     }
 
     fn install_symlink(&self, fixture_path: &Path, target: &str) -> Result<()> {
-        let resolved = if Path::new(target).is_absolute() {
-            PathBuf::from(target)
+        let expanded = expand_fixture_target(target, &self.module_path);
+        let resolved = if Path::new(&expanded).is_absolute() {
+            PathBuf::from(&expanded)
         } else {
-            self.module_path.join(target)
+            self.module_path.join(&expanded)
         };
         if !resolved.exists() {
             return Err(anyhow!(
@@ -302,6 +310,23 @@ impl FixtureManager {
             .map(|m| !m.is_empty())
             .unwrap_or(false)
     }
+}
+
+/// Expand the standard rspec-puppet-fixtures interpolations in a symlink target.
+///
+/// Recognised tokens (matching the Ruby `puppetlabs_spec_helper` behavior):
+///   - `#{source_dir}` → module under test (canonical path)
+///   - `${source_dir}` → same
+///   - `.`              → module under test
+fn expand_fixture_target(target: &str, module_path: &Path) -> String {
+    let module_str = module_path.to_string_lossy().into_owned();
+    let mut out = target.to_string();
+    out = out.replace("#{source_dir}", &module_str);
+    out = out.replace("${source_dir}", &module_str);
+    if out.trim() == "." {
+        out = module_str;
+    }
+    out
 }
 
 fn install_git(fixture_path: &Path, repo: &str, ref_value: Option<&str>) -> Result<bool> {

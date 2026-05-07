@@ -137,7 +137,22 @@ impl RegentSpecRunner {
         } else {
             self.evaluator
                 .evaluate_class(subject, facts, params)
-                .with_context(|| format!("class {subject}"))
+                .with_context(|| {
+                    let known = self.evaluator.class_names();
+                    if known.is_empty() {
+                        format!(
+                            "class {subject}: no classes were loaded \
+                            (check that manifests/ exists and parses)"
+                        )
+                    } else {
+                        let preview: Vec<String> = known.iter().take(20).cloned().collect();
+                        format!(
+                            "class {subject}: not found among {} loaded classes (e.g. {})",
+                            known.len(),
+                            preview.join(", ")
+                        )
+                    }
+                })
         }
     }
 
