@@ -1,7 +1,7 @@
 use colored::*;
 use std::path::Path;
 
-use regent::tester::{ModuleTester, TestConfig, TestType, TestReporter};
+use regent::tester::{FixtureManager, ModuleTester, TestConfig, TestType, TestReporter};
 use regent::tester::reporter::ReportFormat;
 
 pub struct TestCommand;
@@ -24,6 +24,10 @@ impl TestCommand {
         let module_path = path
             .canonicalize()
             .unwrap_or_else(|_| path.to_path_buf());
+
+        // Auto-prep fixtures if .fixtures.yml is present and `spec/fixtures/modules/` is bare.
+        prep_fixtures_if_needed(&module_path);
+
         let config = TestConfig::new(module_path, TestType::Unit)
             .with_pattern(Some(effective_pattern.to_string()));
         let tester = ModuleTester::new(config);
@@ -79,6 +83,24 @@ impl TestCommand {
         }
 
         Ok(())
+    }
+}
+
+fn prep_fixtures_if_needed(module_path: &Path) {
+    let fixtures_yml = module_path.join(".fixtures.yml");
+    if !fixtures_yml.exists() {
+        return;
+    }
+    let fixtures_dir = module_path.join("spec").join("fixtures").join("modules");
+    let mut manager = FixtureManager::new(module_path, &fixtures_dir);
+    if let Err(err) = manager.parse_fixtures_yml(&fixtures_yml) {
+        eprintln!("warning: parsing .fixtures.yml failed: {err}");
+        return;
+    }
+    match manager.setup_fixtures() {
+        Ok(0) => {}
+        Ok(n) => println!("{} Prepared {} fixture module(s)", "⚙".cyan(), n),
+        Err(err) => eprintln!("warning: fixture setup failed: {err}"),
     }
 }
 

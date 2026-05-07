@@ -868,6 +868,30 @@ begin
   def contain_package(title)
     ContainMatcher.new("package", title.to_s)
   end
+  def contain_service(title)
+    ContainMatcher.new("service", title.to_s)
+  end
+  def contain_exec(title)
+    ContainMatcher.new("exec", title.to_s)
+  end
+  def contain_user(title)
+    ContainMatcher.new("user", title.to_s)
+  end
+  def contain_group(title)
+    ContainMatcher.new("group", title.to_s)
+  end
+  def contain_cron(title)
+    ContainMatcher.new("cron", title.to_s)
+  end
+  def contain_mount(title)
+    ContainMatcher.new("mount", title.to_s)
+  end
+  def contain_notify(title)
+    ContainMatcher.new("notify", title.to_s)
+  end
+  def contain_host(title)
+    ContainMatcher.new("host", title.to_s)
+  end
   def contain_yumrepo(title)
     ContainMatcher.new("yumrepo", title.to_s)
   end

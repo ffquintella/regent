@@ -4,31 +4,76 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
+/// How a fixture module should be installed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FixtureSource {
+    /// Symlink `target` (a path relative to the module root, or absolute) into `spec/fixtures/modules/<name>`.
+    Symlink { target: String },
+    /// `git clone <repo>` (optionally `--branch <ref_value>`) into `spec/fixtures/modules/<name>`.
+    Git { repo: String, ref_value: Option<String> },
+    /// Forge module reference like `puppetlabs/stdlib`. Recognised but installation is skipped
+    /// (regent has no forge client); the user is expected to vendor or symlink these.
+    Forge { slug: String },
+}
+
 /// Represents a fixture module dependency
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FixtureModule {
     pub name: String,
-    pub repo: Option<String>,
-    pub ref_value: Option<String>,
+    pub source: Option<FixtureSource>,
 }
 
 impl FixtureModule {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            repo: None,
-            ref_value: None,
+            source: None,
         }
     }
 
     pub fn with_repo(mut self, repo: impl Into<String>) -> Self {
-        self.repo = Some(repo.into());
+        let repo = repo.into();
+        let ref_value = match &self.source {
+            Some(FixtureSource::Git { ref_value, .. }) => ref_value.clone(),
+            _ => None,
+        };
+        self.source = Some(FixtureSource::Git { repo, ref_value });
         self
     }
 
     pub fn with_ref(mut self, ref_value: impl Into<String>) -> Self {
-        self.ref_value = Some(ref_value.into());
+        let ref_value = Some(ref_value.into());
+        let repo = match &self.source {
+            Some(FixtureSource::Git { repo, .. }) => repo.clone(),
+            _ => String::new(),
+        };
+        self.source = Some(FixtureSource::Git { repo, ref_value });
         self
+    }
+
+    pub fn with_symlink(mut self, target: impl Into<String>) -> Self {
+        self.source = Some(FixtureSource::Symlink { target: target.into() });
+        self
+    }
+
+    pub fn with_forge(mut self, slug: impl Into<String>) -> Self {
+        self.source = Some(FixtureSource::Forge { slug: slug.into() });
+        self
+    }
+
+    /// Backwards-compatibility shim used by callers that read just the repo URL.
+    pub fn repo(&self) -> Option<&str> {
+        match &self.source {
+            Some(FixtureSource::Git { repo, .. }) => Some(repo.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn ref_value(&self) -> Option<&str> {
+        match &self.source {
+            Some(FixtureSource::Git { ref_value, .. }) => ref_value.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -88,7 +133,20 @@ impl FixtureManager {
         }
     }
 
-    /// Parse .fixtures.yml file
+    /// Parse .fixtures.yml file. Supports the standard rspec-puppet-fixtures shape:
+    ///
+    /// ```yaml
+    /// fixtures:
+    ///   symlinks:
+    ///     mymodule: "#{source_dir}"
+    ///   repositories:
+    ///     stdlib:
+    ///       repo: "https://github.com/puppetlabs/puppetlabs-stdlib.git"
+    ///       ref:  "v9.4.1"
+    ///     concat: "https://github.com/puppetlabs/puppetlabs-concat.git"
+    ///   forge_modules:
+    ///     archive: "voxpupuli/archive"
+    /// ```
     pub fn parse_fixtures_yml(&mut self, fixtures_yml_path: &Path) -> Result<()> {
         if !fixtures_yml_path.exists() {
             return Err(anyhow!("fixtures.yml not found at {:?}", fixtures_yml_path));
@@ -97,81 +155,77 @@ impl FixtureManager {
         let content = fs::read_to_string(fixtures_yml_path)
             .context("Failed to read fixtures.yml")?;
 
-        // Simple YAML parsing - for production would use proper yaml parser
-        // For now, just validate the file exists and is readable
-        if content.trim().is_empty() {
-            self.config = FixtureConfig::new();
-        } else {
-            // Parse fixtures: line if present
-            for line in content.lines() {
-                if line.trim().starts_with("fixtures:") {
-                    let parts: Vec<&str> = line.split(':').collect();
-                    if parts.len() > 1 {
-                        self.config.fixtures = Some(parts[1].trim().to_string());
-                    }
-                }
-                // Parse module entries like "module_name:" under modules:
-                if line.contains("modules:") {
-                    // Extract modules section
-                    let mut in_modules = false;
-                    for module_line in content.lines().skip_while(|l| !l.contains("modules:")) {
-                        if module_line.contains("modules:") {
-                            in_modules = true;
-                            continue;
-                        }
-                        if in_modules && module_line.starts_with("  ") && !module_line.starts_with("    ") {
-                            let module_name = module_line.trim().trim_end_matches(':').to_string();
-                            if !module_name.is_empty() && self.config.modules.is_none() {
-                                self.config.modules = Some(HashMap::new());
-                            }
-                            if let Some(ref mut modules) = self.config.modules {
-                                modules.insert(module_name.clone(), FixtureModule::new(module_name));
-                            }
-                        }
-                        if in_modules && !module_line.starts_with("  ") && !module_line.is_empty() {
-                            in_modules = false;
-                        }
-                    }
-                }
-            }
-        }
-
+        self.config = parse_fixtures_yaml(&content)?;
         Ok(())
     }
 
-    /// Setup fixtures (create symlinks)
+    /// Setup fixtures by materialising each module under `spec/fixtures/modules/<name>`.
+    ///
+    /// - `Symlink` targets are resolved relative to `module_path` (or absolute), and a symlink
+    ///   is created. On non-Unix platforms, falls back to creating a directory copy reference.
+    /// - `Git` sources are fetched via `git clone` (with `--branch <ref>` if set). If `git`
+    ///   is unavailable or the clone fails, a stub directory is created so loading does not
+    ///   abort the rest of setup.
+    /// - `Forge` and source-less entries get a stub directory + minimal `metadata.json`.
+    ///
+    /// Returns the number of fixture modules processed (skipping ones already on disk).
     pub fn setup_fixtures(&self) -> Result<usize> {
         fs::create_dir_all(&self.fixtures_dir)
             .context("Failed to create fixtures directory")?;
 
         let mut count = 0;
+        let Some(ref modules) = self.config.modules else {
+            return Ok(0);
+        };
 
-        if let Some(ref modules) = self.config.modules {
-            for (module_name, _module) in modules {
-                let fixture_path = self.fixtures_dir.join(module_name);
-
-                // Create fixture symlink or directory
-                if !fixture_path.exists() {
-                    // For testing, just create a directory
-                    fs::create_dir_all(&fixture_path)
-                        .context(format!("Failed to setup fixture: {}", module_name))?;
-                    
-                    // Create a metadata.json stub
-                    let metadata_path = fixture_path.join("metadata.json");
-                    fs::write(
-                        &metadata_path,
-                        format!(
-                            r#"{{"name":"{}","version":"1.0.0","dependencies":[]}}"#,
-                            module_name
-                        ),
-                    )?;
-
-                    count += 1;
-                }
+        for (module_name, module) in modules {
+            let fixture_path = self.fixtures_dir.join(module_name);
+            if fixture_path.exists() || fixture_path.symlink_metadata().is_ok() {
+                continue;
             }
+
+            let installed = match &module.source {
+                Some(FixtureSource::Symlink { target }) => {
+                    self.install_symlink(&fixture_path, target)
+                        .with_context(|| format!("symlink fixture {module_name}"))?;
+                    true
+                }
+                Some(FixtureSource::Git { repo, ref_value }) => {
+                    install_git(&fixture_path, repo, ref_value.as_deref()).unwrap_or_else(|err| {
+                        eprintln!(
+                            "warning: git install failed for fixture {}: {}; using stub",
+                            module_name, err
+                        );
+                        false
+                    })
+                }
+                _ => false,
+            };
+
+            if !installed {
+                install_stub(&fixture_path, module_name)
+                    .with_context(|| format!("stub fixture {module_name}"))?;
+            }
+
+            count += 1;
         }
 
         Ok(count)
+    }
+
+    fn install_symlink(&self, fixture_path: &Path, target: &str) -> Result<()> {
+        let resolved = if Path::new(target).is_absolute() {
+            PathBuf::from(target)
+        } else {
+            self.module_path.join(target)
+        };
+        if !resolved.exists() {
+            return Err(anyhow!(
+                "symlink target does not exist: {}",
+                resolved.display()
+            ));
+        }
+        symlink_dir(&resolved, fixture_path)
     }
 
     /// Verify fixtures are properly set up
@@ -250,6 +304,213 @@ impl FixtureManager {
     }
 }
 
+fn install_git(fixture_path: &Path, repo: &str, ref_value: Option<&str>) -> Result<bool> {
+    if repo.is_empty() {
+        return Ok(false);
+    }
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("clone").arg("--depth").arg("1");
+    if let Some(reference) = ref_value {
+        cmd.arg("--branch").arg(reference);
+    }
+    cmd.arg(repo).arg(fixture_path);
+    let status = cmd.status().context("invoke git clone")?;
+    if !status.success() {
+        return Err(anyhow!("git clone exited with status {}", status));
+    }
+    Ok(true)
+}
+
+fn install_stub(fixture_path: &Path, module_name: &str) -> Result<()> {
+    fs::create_dir_all(fixture_path)?;
+    let metadata_path = fixture_path.join("metadata.json");
+    fs::write(
+        &metadata_path,
+        format!(
+            r#"{{"name":"{}","version":"1.0.0","dependencies":[]}}"#,
+            module_name
+        ),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link).context("create symlink")
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> Result<()> {
+    std::os::windows::fs::symlink_dir(target, link).context("create symlink")
+}
+
+/// Parse a `.fixtures.yml` document. The parser is intentionally narrow — it understands the
+/// `fixtures:` top-level shape used by rspec-puppet-fixtures (`symlinks`, `repositories`,
+/// `forge_modules`) and ignores anything else without erroring.
+fn parse_fixtures_yaml(content: &str) -> Result<FixtureConfig> {
+    let mut config = FixtureConfig::new();
+    if content.trim().is_empty() {
+        return Ok(config);
+    }
+
+    // Section parser: collect lines indented under `fixtures:` and walk by indentation.
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect();
+
+    let mut idx = 0;
+    while idx < lines.len() {
+        let line = lines[idx];
+        if line.trim_start().starts_with("fixtures:") {
+            idx += 1;
+            // Walk children of `fixtures:` (indent > 0).
+            while idx < lines.len() {
+                let raw = lines[idx];
+                let indent = leading_spaces(raw);
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    idx += 1;
+                    continue;
+                }
+                if indent == 0 {
+                    break;
+                }
+                if indent == 2 {
+                    let section = trimmed.trim_end_matches(':');
+                    idx += 1;
+                    idx = parse_section(&lines, idx, section, &mut config);
+                    continue;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+        idx += 1;
+    }
+
+    Ok(config)
+}
+
+fn parse_section(
+    lines: &[&str],
+    mut idx: usize,
+    section: &str,
+    config: &mut FixtureConfig,
+) -> usize {
+    while idx < lines.len() {
+        let raw = lines[idx];
+        let indent = leading_spaces(raw);
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            idx += 1;
+            continue;
+        }
+        if indent < 4 {
+            break;
+        }
+
+        // Each entry sits at indent == 4: either `name: "value"` or `name:` followed by
+        // a mapping at indent == 6.
+        if indent == 4 {
+            if let Some((key, value)) = split_kv(trimmed) {
+                if value.is_empty() {
+                    // Look ahead for nested mapping.
+                    let mut nested_repo: Option<String> = None;
+                    let mut nested_ref: Option<String> = None;
+                    idx += 1;
+                    while idx < lines.len() {
+                        let nraw = lines[idx];
+                        let nindent = leading_spaces(nraw);
+                        let ntrim = nraw.trim();
+                        if ntrim.is_empty() {
+                            idx += 1;
+                            continue;
+                        }
+                        if nindent < 6 {
+                            break;
+                        }
+                        if let Some((nk, nv)) = split_kv(ntrim) {
+                            match nk.as_str() {
+                                "repo" => nested_repo = Some(strip_quotes(&nv).to_string()),
+                                "ref" => nested_ref = Some(strip_quotes(&nv).to_string()),
+                                _ => {}
+                            }
+                        }
+                        idx += 1;
+                    }
+                    let module = build_fixture_module(section, &key, "", nested_repo, nested_ref);
+                    insert_module(config, module);
+                    continue;
+                } else {
+                    let value = strip_quotes(&value).to_string();
+                    let module = build_fixture_module(section, &key, &value, None, None);
+                    insert_module(config, module);
+                    idx += 1;
+                    continue;
+                }
+            }
+        }
+        idx += 1;
+    }
+    idx
+}
+
+fn build_fixture_module(
+    section: &str,
+    name: &str,
+    value: &str,
+    nested_repo: Option<String>,
+    nested_ref: Option<String>,
+) -> FixtureModule {
+    let module = FixtureModule::new(name);
+    match section {
+        "symlinks" => module.with_symlink(value),
+        "repositories" => {
+            let repo = nested_repo.unwrap_or_else(|| value.to_string());
+            let mut m = module.with_repo(repo);
+            if let Some(r) = nested_ref {
+                m = m.with_ref(r);
+            }
+            m
+        }
+        "forge_modules" => module.with_forge(value),
+        _ => module,
+    }
+}
+
+fn insert_module(config: &mut FixtureConfig, module: FixtureModule) {
+    config
+        .modules
+        .get_or_insert_with(HashMap::new)
+        .insert(module.name.clone(), module);
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
+fn split_kv(text: &str) -> Option<(String, String)> {
+    let mut parts = text.splitn(2, ':');
+    let key = parts.next()?.trim().to_string();
+    let value = parts.next().unwrap_or("").trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, value))
+}
+
+fn strip_quotes(text: &str) -> &str {
+    let trimmed = text.trim();
+    if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,25 +521,53 @@ mod tests {
     fn test_fixture_module_creation() {
         let module = FixtureModule::new("test_module");
         assert_eq!(module.name, "test_module");
-        assert_eq!(module.repo, None);
-        assert_eq!(module.ref_value, None);
+        assert_eq!(module.source, None);
     }
 
     #[test]
     fn test_fixture_module_with_repo() {
         let module = FixtureModule::new("test")
             .with_repo("https://github.com/test/test.git");
-        
+
         assert_eq!(module.name, "test");
-        assert_eq!(module.repo, Some("https://github.com/test/test.git".to_string()));
+        assert_eq!(module.repo(), Some("https://github.com/test/test.git"));
     }
 
     #[test]
     fn test_fixture_module_with_ref() {
         let module = FixtureModule::new("test")
+            .with_repo("https://example.invalid/test.git")
             .with_ref("v1.0.0");
-        
-        assert_eq!(module.ref_value, Some("v1.0.0".to_string()));
+
+        assert_eq!(module.ref_value(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn test_parse_fixtures_yaml_repositories_and_symlinks() {
+        let doc = r##"
+fixtures:
+  symlinks:
+    mymod: "#{source_dir}"
+  repositories:
+    stdlib:
+      repo: "https://github.com/puppetlabs/puppetlabs-stdlib.git"
+      ref:  "v9.4.1"
+    concat: "https://github.com/puppetlabs/puppetlabs-concat.git"
+  forge_modules:
+    archive: "voxpupuli/archive"
+"##;
+        let cfg = parse_fixtures_yaml(doc).unwrap();
+        let modules = cfg.modules.expect("modules parsed");
+        assert_eq!(modules.len(), 4);
+        let stdlib = modules.get("stdlib").unwrap();
+        assert_eq!(stdlib.repo(), Some("https://github.com/puppetlabs/puppetlabs-stdlib.git"));
+        assert_eq!(stdlib.ref_value(), Some("v9.4.1"));
+        let concat = modules.get("concat").unwrap();
+        assert_eq!(concat.repo(), Some("https://github.com/puppetlabs/puppetlabs-concat.git"));
+        let mymod = modules.get("mymod").unwrap();
+        assert!(matches!(mymod.source, Some(FixtureSource::Symlink { .. })));
+        let archive = modules.get("archive").unwrap();
+        assert!(matches!(archive.source, Some(FixtureSource::Forge { .. })));
     }
 
     #[test]

@@ -1,47 +1,58 @@
 use colored::*;
 use std::path::Path;
-use std::fs;
+
+use regent::builder::packager::{PackagerConfig, TarballBuilder};
 
 pub struct BuildCommand;
 
 impl BuildCommand {
     pub fn execute(path: &Path, output: Option<&Path>) -> anyhow::Result<()> {
-        // Check if module exists
-        if !path.join("metadata.json").exists() {
+        let metadata_path = path.join("metadata.json");
+        if !metadata_path.exists() {
             return Err(anyhow::anyhow!("No module found at {:?}", path));
         }
 
-        // Create pkg directory
-        let pkg_dir = path.join("pkg");
-        fs::create_dir_all(&pkg_dir)?;
+        // Anchor everything at the canonical module path so relative invocations
+        // (e.g. `regent build .`) always end up in the module's own pkg/ directory.
+        let module_path = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
 
-        // Read module name from metadata
-        let metadata = fs::read_to_string(path.join("metadata.json"))?;
+        let metadata = std::fs::read_to_string(&metadata_path)?;
         let json: serde_json::Value = serde_json::from_str(&metadata)?;
         let module_name = json["name"].as_str().unwrap_or("module");
         let version = json["version"].as_str().unwrap_or("0.1.0");
 
-        let package_name = format!("{}-{}.tar.gz", module_name, version);
-        
-        let output_path = if let Some(out) = output {
-            out.to_path_buf()
-        } else {
-            pkg_dir.clone()
+        // Resolve the output directory:
+        // - explicit `--output`: respect as-is (absolute) or anchor to the module
+        //   if relative, instead of the user's cwd.
+        // - default: <module_path>/pkg
+        let output_dir = match output {
+            Some(out) if out.is_absolute() => out.to_path_buf(),
+            Some(out) => module_path.join(out),
+            None => module_path.join("pkg"),
         };
 
-        fs::create_dir_all(&output_path)?;
+        let mut config = PackagerConfig::new(&module_path);
+        config = config.with_output_dir(&output_dir);
 
-        println!("{} Creating package: {}", "⚙".cyan(), package_name);
+        let builder = TarballBuilder::new(config)?;
+
         println!(
-            "{} Package would be built at: {:?}",
-            "ℹ".blue(),
-            output_path.join(&package_name)
+            "{} Building {}-{} → {}",
+            "⚙".cyan(),
+            module_name,
+            version,
+            output_dir.display()
         );
 
+        let package_path = builder.build(module_name, version)?;
+
         println!(
-            "\n{} Module '{}' built successfully!",
+            "{} Module '{}' built successfully: {}",
             "✓".green().bold(),
-            module_name
+            module_name,
+            package_path.display()
         );
 
         Ok(())

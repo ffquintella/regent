@@ -118,7 +118,8 @@ pub struct PuppetEvaluator {
 
 impl PuppetEvaluator {
     pub fn new(module_path: &Path) -> Result<Self> {
-        let module = PuppetModule::load(module_path)?;
+        let fixtures = discover_fixture_module_paths(module_path);
+        let module = PuppetModule::load_with_fixtures(module_path, &fixtures)?;
         Ok(Self { module })
     }
 
@@ -157,15 +158,49 @@ struct PuppetModule {
 }
 
 impl PuppetModule {
-    fn load(module_path: &Path) -> Result<Self> {
-        let manifest_dir = module_path.join("manifests");
+    fn load_with_fixtures(module_path: &Path, fixture_module_paths: &[std::path::PathBuf]) -> Result<Self> {
         let mut classes = HashMap::new();
         let mut defines = HashMap::new();
-        for entry in std::fs::read_dir(&manifest_dir)
-            .with_context(|| format!("read manifest dir {}", manifest_dir.display()))?
+
+        // Load fixtures first so the primary module's defs win on conflict.
+        for fixture_path in fixture_module_paths {
+            // Be tolerant: a single broken fixture should not block the run.
+            if let Err(err) = load_manifests_into(fixture_path, &mut classes, &mut defines) {
+                eprintln!(
+                    "warning: skipping fixture module {}: {}",
+                    fixture_path.display(),
+                    err
+                );
+            }
+        }
+
+        load_manifests_into(module_path, &mut classes, &mut defines)
+            .with_context(|| format!("load manifests for {}", module_path.display()))?;
+
+        Ok(Self { classes, defines })
+    }
+}
+
+fn load_manifests_into(
+    module_path: &Path,
+    classes: &mut HashMap<String, ClassDef>,
+    defines: &mut HashMap<String, DefineDef>,
+) -> Result<()> {
+    let manifest_dir = module_path.join("manifests");
+    if !manifest_dir.exists() {
+        return Ok(());
+    }
+    let mut stack = vec![manifest_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("read manifest dir {}", dir.display()))?
         {
             let entry = entry?;
             let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
             if path.extension().and_then(|ext| ext.to_str()) != Some("pp") {
                 continue;
             }
@@ -186,8 +221,32 @@ impl PuppetModule {
                 }
             }
         }
-        Ok(Self { classes, defines })
     }
+    Ok(())
+}
+
+/// Discover modules under `spec/fixtures/modules/` for inclusion in the evaluator's namespace.
+/// Each immediate subdirectory is treated as a separate Puppet module root.
+fn discover_fixture_module_paths(module_path: &Path) -> Vec<std::path::PathBuf> {
+    let modules_dir = module_path.join("spec").join("fixtures").join("modules");
+    let mut result = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&modules_dir) else {
+        return result;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Follow symlinks: they're standard for self-referential fixtures.
+        let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        // Skip the self-symlink to the module being tested.
+        if path.canonicalize().ok() == module_path.canonicalize().ok() {
+            continue;
+        }
+        result.push(path);
+    }
+    result
 }
 
 #[derive(Debug, Clone)]
