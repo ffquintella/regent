@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use std::path::PathBuf;
 
-use cli::{NewCommand, GenerateCommand, ValidateCommand, BuildCommand, TestCommand};
+use cli::{NewCommand, GenerateCommand, ValidateCommand, BuildCommand, TestCommand, BootstrapCommand};
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +73,15 @@ enum Commands {
 
         #[arg(long, help = "Show detailed test case output")]
         detail: bool,
+    },
+
+    /// Install required gems and runtime dependencies for Regent
+    Bootstrap {
+        #[arg(help = "Path to module", default_value = ".")]
+        path: PathBuf,
+
+        #[arg(long, help = "Overwrite an existing Gemfile with a Regent-managed one")]
+        force: bool,
     },
 
     /// Show version
@@ -177,6 +186,10 @@ fn main() -> anyhow::Result<()> {
         } => {
             println!("{}", format!("Running tests at: {:?}", path).cyan());
             TestCommand::execute(&path, pattern.as_deref(), report.as_deref(), detail)?;
+        }
+
+        Commands::Bootstrap { path, force } => {
+            BootstrapCommand::execute(&path, force)?;
         }
 
         Commands::Version => {

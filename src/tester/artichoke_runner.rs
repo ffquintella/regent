@@ -77,7 +77,7 @@ impl<'a> ArtichokeTestRunner<'a> {
                 results.total = if smoke { 1 } else { spec_files.len() };
                 results.failed = if smoke { 1 } else { spec_files.len() };
                 results.stderr = format!(
-                    "Artichoke could not find rspec.rb at {}",
+                    "Artichoke could not find rspec.rb at {}.\nRun `regent bootstrap` in your module directory to install Regent's required gems.",
                     rspec_virtual.display()
                 );
                 return Ok(results);
