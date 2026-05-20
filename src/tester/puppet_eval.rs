@@ -162,15 +162,21 @@ impl PuppetEvaluator {
 struct PuppetModule {
     classes: HashMap<String, ClassDef>,
     defines: HashMap<String, DefineDef>,
+    /// Maps a Puppet module name (the basename of a loaded module dir) to its
+    /// filesystem path, so `epp('foo/bar.epp')` can resolve to
+    /// `<paths["foo"]>/templates/bar.epp`.
+    module_paths: HashMap<String, std::path::PathBuf>,
 }
 
 impl PuppetModule {
     fn load_with_fixtures(module_path: &Path, fixture_module_paths: &[std::path::PathBuf]) -> Result<Self> {
         let mut classes = HashMap::new();
         let mut defines = HashMap::new();
+        let mut module_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
 
         // Load fixtures first so the primary module's defs win on conflict.
         for fixture_path in fixture_module_paths {
+            register_module_path(&mut module_paths, fixture_path);
             // Be tolerant: a single broken fixture should not block the run.
             if let Err(err) = load_manifests_into(fixture_path, &mut classes, &mut defines) {
                 eprintln!(
@@ -181,10 +187,48 @@ impl PuppetModule {
             }
         }
 
+        register_module_path(&mut module_paths, &module_path.to_path_buf());
         load_manifests_into(module_path, &mut classes, &mut defines)
             .with_context(|| format!("load manifests for {}", module_path.display()))?;
 
-        Ok(Self { classes, defines })
+        Ok(Self { classes, defines, module_paths })
+    }
+}
+
+/// Index `module_path` under every plausible Puppet module name so that
+/// template references (`epp('foo/bar.epp')`) resolve regardless of how the
+/// module dir is named on disk. Tries:
+///   * `metadata.json` "name" field (after the last `-` or `/`)
+///   * the dir basename, with a leading `puppet-` stripped
+///   * the raw dir basename
+fn register_module_path(
+    paths: &mut HashMap<String, std::path::PathBuf>,
+    module_path: &std::path::PathBuf,
+) {
+    let mut insert = |name: &str| {
+        if !name.is_empty() {
+            paths
+                .entry(name.to_string())
+                .or_insert_with(|| module_path.clone());
+        }
+    };
+    if let Ok(contents) = std::fs::read_to_string(module_path.join("metadata.json")) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+                let bare = name
+                    .rsplit_once('-')
+                    .map(|(_, tail)| tail)
+                    .or_else(|| name.rsplit_once('/').map(|(_, tail)| tail))
+                    .unwrap_or(name);
+                insert(bare);
+            }
+        }
+    }
+    if let Some(basename) = module_path.file_name().and_then(|n| n.to_str()) {
+        insert(basename);
+        if let Some(stripped) = basename.strip_prefix("puppet-") {
+            insert(stripped);
+        }
     }
 }
 
@@ -335,6 +379,12 @@ enum Expr {
     /// Puppet regex literal: `/pattern/[flags]`. Stored as the inner pattern;
     /// flags are pre-applied as inline modifiers (e.g. `(?i)`).
     Regex(String),
+    /// Puppet selector: `subject ? { case_key => value, ..., default => value }`.
+    /// A bare `Expr::String("default")` case key is the fallback.
+    Selector {
+        subject: Box<Expr>,
+        cases: Vec<(Expr, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -617,7 +667,38 @@ impl<'a> EvalContext<'a> {
                     .map(|arg| self.eval_expr(arg))
                     .collect::<Result<Vec<_>>>()?;
                 match name.as_str() {
-                    "template" | "epp" | "inline_template" | "inline_epp" => {
+                    "epp" => {
+                        let template_ref = arg_values
+                            .first()
+                            .map(|value| value.as_string())
+                            .unwrap_or_default();
+                        let params = arg_values
+                            .get(1)
+                            .cloned()
+                            .unwrap_or_else(|| PuppetValue::Hash(HashMap::new()));
+                        match self.resolve_template_file(&template_ref) {
+                            Some(path) => match std::fs::read_to_string(&path) {
+                                Ok(template) => PuppetValue::String(render_epp(&template, &params)),
+                                Err(_) => PuppetValue::String(format!("<epp:{template_ref}>")),
+                            },
+                            None => PuppetValue::String(format!("<epp:{template_ref}>")),
+                        }
+                    }
+                    "inline_epp" => {
+                        let template = arg_values
+                            .first()
+                            .map(|value| value.as_string())
+                            .unwrap_or_default();
+                        let params = arg_values
+                            .get(1)
+                            .cloned()
+                            .unwrap_or_else(|| PuppetValue::Hash(HashMap::new()));
+                        PuppetValue::String(render_epp(&template, &params))
+                    }
+                    "template" | "inline_template" => {
+                        // ERB templates aren't supported yet; fall back to a
+                        // placeholder so failures surface as content mismatches
+                        // rather than crashes.
                         let source = arg_values
                             .first()
                             .map(|value| value.as_string())
@@ -630,7 +711,46 @@ impl<'a> EvalContext<'a> {
             // Regex literals evaluate to their pattern string; comparison ops
             // `=~` / `!~` compile and apply the pattern.
             Expr::Regex(pattern) => PuppetValue::String(pattern.clone()),
+            Expr::Selector { subject, cases } => {
+                let subject_value = self.eval_expr(subject)?;
+                let mut default_value: Option<&Expr> = None;
+                let mut matched: Option<&Expr> = None;
+                for (key, value) in cases {
+                    if let Expr::String(literal) = key {
+                        if literal == "default" {
+                            default_value = Some(value);
+                            continue;
+                        }
+                    }
+                    if let Expr::Regex(_) = key {
+                        let pattern = self.eval_expr(key)?;
+                        if eval_regex_match(&subject_value, &pattern).unwrap_or(false) {
+                            matched = Some(value);
+                            break;
+                        }
+                        continue;
+                    }
+                    let case_value = self.eval_expr(key)?;
+                    if case_value == subject_value {
+                        matched = Some(value);
+                        break;
+                    }
+                }
+                let chosen = matched.or(default_value);
+                match chosen {
+                    Some(expr) => self.eval_expr(expr)?,
+                    None => PuppetValue::Undef,
+                }
+            }
         })
+    }
+
+    /// Resolve a Puppet template reference like `"rustion/rustion.toml.epp"`
+    /// to an absolute filesystem path of the form `<module>/templates/<rest>`.
+    fn resolve_template_file(&self, reference: &str) -> Option<std::path::PathBuf> {
+        let (module_name, rest) = reference.split_once('/')?;
+        let module_root = self.module.module_paths.get(module_name)?;
+        Some(module_root.join("templates").join(rest))
     }
 
     fn resolve_var(&self, var: &VarRef) -> PuppetValue {
@@ -976,6 +1096,25 @@ impl<'a> PuppetParser<'a> {
                 expr = Expr::MethodCall { target: Box::new(expr), name };
                 continue;
             }
+            if self.consume(TokenKind::Question) {
+                self.consume(TokenKind::LBrace);
+                let mut cases = Vec::new();
+                while !self.consume(TokenKind::RBrace) && !self.is_eof() {
+                    if self.peek_kind() == Some(TokenKind::Comma) {
+                        self.index += 1;
+                        continue;
+                    }
+                    let key = self.parse_expr()?;
+                    self.consume(TokenKind::FatArrow);
+                    let value = self.parse_expr()?;
+                    cases.push((key, value));
+                }
+                expr = Expr::Selector {
+                    subject: Box::new(expr),
+                    cases,
+                };
+                continue;
+            }
             break;
         }
         Ok(expr)
@@ -1176,6 +1315,7 @@ impl Expr {
             Expr::ResourceRef { rtype, .. } => rtype.clone(),
             Expr::FunctionCall { name, .. } => name.clone(),
             Expr::Regex(pattern) => pattern.clone(),
+            Expr::Selector { .. } => "selector".to_string(),
         }
     }
 
@@ -1204,6 +1344,7 @@ enum TokenKind {
     Match,
     NotMatch,
     Regex,
+    Question,
 }
 
 #[derive(Debug, Clone)]
@@ -1267,6 +1408,10 @@ impl<'a> Lexer<'a> {
                 }
                 ',' => {
                     tokens.push(self.make(TokenKind::Comma, ",", offset));
+                    self.index += 1;
+                }
+                '?' => {
+                    tokens.push(self.make(TokenKind::Question, "?", offset));
                     self.index += 1;
                 }
                 ':' => {
@@ -1513,6 +1658,209 @@ fn can_start_regex(prev: Option<&Token>) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+/// Minimal EPP template renderer. Supports:
+///   * Plain text passthrough
+///   * `<%= expr %>` output tags (variable / literal / boolean / integer / undef)
+///   * `<% if cond { %> ... <% } else { %> ... <% } %>` conditionals
+///     (and `} elsif cond { %>` chains)
+///   * Optional `-` markers (`<%-`, `-%>`) trimming surrounding whitespace
+///   * Skips the `<%- | params | -%>` parameter header
+///
+/// Anything richer (function calls, arithmetic, iteration) renders the literal
+/// text of the surrounding template — close enough for content-regex matchers
+/// in unit tests.
+fn render_epp(template: &str, params: &PuppetValue) -> String {
+    let tokens = tokenize_epp(template);
+    let params_map: HashMap<String, PuppetValue> = match params {
+        PuppetValue::Hash(m) => m.clone(),
+        _ => HashMap::new(),
+    };
+    let mut out = String::new();
+    // Each entry is (emitting?, branch_already_taken_in_this_if?). The branch
+    // flag is only meaningful for `if`/`elsif`/`else` chains.
+    let mut stack: Vec<(bool, bool)> = Vec::new();
+    let emitting = |s: &[(bool, bool)]| s.iter().all(|(e, _)| *e);
+
+    for tok in tokens {
+        match tok {
+            EppToken::Text(text) => {
+                if emitting(&stack) {
+                    out.push_str(&text);
+                }
+            }
+            EppToken::Output(expr) => {
+                if emitting(&stack) {
+                    out.push_str(&epp_eval(expr.trim(), &params_map).as_string());
+                }
+            }
+            EppToken::Code(code) => {
+                let trimmed = code.trim();
+                if trimmed.starts_with('|') {
+                    continue;
+                }
+                if let Some(rest) = trimmed.strip_prefix("if ") {
+                    let cond_expr = rest.trim_end_matches('{').trim();
+                    let parent = emitting(&stack);
+                    let cond = parent && epp_truthy(&epp_eval(cond_expr, &params_map));
+                    stack.push((cond, cond));
+                    continue;
+                }
+                if trimmed.starts_with("unless ") {
+                    let cond_expr = trimmed["unless ".len()..].trim_end_matches('{').trim();
+                    let parent = emitting(&stack);
+                    let cond = parent && !epp_truthy(&epp_eval(cond_expr, &params_map));
+                    stack.push((cond, cond));
+                    continue;
+                }
+                if trimmed == "} else {" || trimmed.starts_with("} else") {
+                    if let Some((_, taken)) = stack.pop() {
+                        let parent = emitting(&stack);
+                        let next = parent && !taken;
+                        stack.push((next, taken || next));
+                    }
+                    continue;
+                }
+                if let Some(rest) = trimmed.strip_prefix("} elsif ") {
+                    if let Some((_, taken)) = stack.pop() {
+                        let cond_src = rest.trim_end_matches('{').trim();
+                        let parent = emitting(&stack);
+                        let next = parent && !taken && epp_truthy(&epp_eval(cond_src, &params_map));
+                        stack.push((next, taken || next));
+                    }
+                    continue;
+                }
+                if trimmed == "}" {
+                    stack.pop();
+                    continue;
+                }
+                // Unknown code tag — ignore (no error, mirrors tolerant style
+                // used elsewhere in the evaluator).
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+enum EppToken {
+    Text(String),
+    Output(String),
+    Code(String),
+}
+
+fn tokenize_epp(template: &str) -> Vec<EppToken> {
+    let chars: Vec<char> = template.chars().collect();
+    let mut tokens = Vec::new();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' && chars.get(i + 1) == Some(&'%') {
+            let mut start = i + 2;
+            let trim_left = chars.get(start) == Some(&'-');
+            if trim_left {
+                start += 1;
+            }
+            let is_output = chars.get(start) == Some(&'=');
+            if is_output {
+                start += 1;
+            }
+            // Find closing %> (handle -%>)
+            let mut end = start;
+            let mut trim_right = false;
+            let mut found = false;
+            while end < chars.len() {
+                if chars[end] == '-'
+                    && chars.get(end + 1) == Some(&'%')
+                    && chars.get(end + 2) == Some(&'>')
+                {
+                    trim_right = true;
+                    found = true;
+                    break;
+                }
+                if chars[end] == '%' && chars.get(end + 1) == Some(&'>') {
+                    found = true;
+                    break;
+                }
+                end += 1;
+            }
+            if !found {
+                // Unterminated tag — bail out and emit as literal text.
+                text.extend(chars[i..].iter());
+                break;
+            }
+            if trim_left {
+                while let Some(c) = text.chars().last() {
+                    if c == ' ' || c == '\t' {
+                        text.pop();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !text.is_empty() {
+                tokens.push(EppToken::Text(std::mem::take(&mut text)));
+            }
+            let content: String = chars[start..end].iter().collect();
+            if is_output {
+                tokens.push(EppToken::Output(content));
+            } else {
+                tokens.push(EppToken::Code(content));
+            }
+            i = if trim_right { end + 3 } else { end + 2 };
+            if trim_right {
+                while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == '\n' {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        text.push(chars[i]);
+        i += 1;
+    }
+    if !text.is_empty() {
+        tokens.push(EppToken::Text(text));
+    }
+    tokens
+}
+
+fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue {
+    let s = source.trim();
+    if let Some(name) = s.strip_prefix('$') {
+        return params.get(name).cloned().unwrap_or(PuppetValue::Undef);
+    }
+    if s.len() >= 2 {
+        if s.starts_with('"') && s.ends_with('"') {
+            return PuppetValue::String(s[1..s.len() - 1].to_string());
+        }
+        if s.starts_with('\'') && s.ends_with('\'') {
+            return PuppetValue::String(s[1..s.len() - 1].to_string());
+        }
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return PuppetValue::Integer(n);
+    }
+    match s {
+        "true" => PuppetValue::Bool(true),
+        "false" => PuppetValue::Bool(false),
+        "undef" => PuppetValue::Undef,
+        _ => PuppetValue::Undef,
+    }
+}
+
+fn epp_truthy(value: &PuppetValue) -> bool {
+    match value {
+        PuppetValue::Bool(b) => *b,
+        PuppetValue::Undef => false,
+        PuppetValue::String(s) => !s.is_empty(),
+        PuppetValue::Array(a) => !a.is_empty(),
+        PuppetValue::Hash(h) => !h.is_empty(),
+        PuppetValue::Integer(_) => true,
+    }
 }
 
 #[cfg(test)]
