@@ -45,12 +45,38 @@ fn find_bundled_gems_path() -> Result<Option<PathBuf>> {
         }
     }
 
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join(BUNDLED_GEMS_DIRNAME);
-    if dev_path.is_dir() {
-        return Ok(Some(dev_path));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dev_candidates = [
+        manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME),
+        manifest_dir.join("vendor").join("bundle"),
+    ];
+    for candidate in dev_candidates {
+        if has_gem_layout(&candidate) {
+            return Ok(Some(candidate));
+        }
     }
 
     Ok(None)
+}
+
+/// A directory counts as a Regent gem cache when it either contains gems
+/// directly (Bundler `ruby/x.y.z/gems/...` layout) or wraps that layout.
+fn has_gem_layout(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    let ruby_dir = dir.join("ruby");
+    if ruby_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&ruby_dir) {
+            for entry in entries.flatten() {
+                if entry.path().join("gems").is_dir() {
+                    return true;
+                }
+            }
+        }
+    }
+    // Allow REGENT_BUNDLED_GEMS to point at a populated-but-empty fallback.
+    std::fs::read_dir(dir)
+        .map(|mut it| it.next().is_some())
+        .unwrap_or(false)
 }

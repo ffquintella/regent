@@ -2,12 +2,25 @@
 
 ## Overview
 
-Regent is now integrated with Artichoke Ruby, a Ruby VM implementation written in Rust. This provides several advantages:
+Regent is integrated with Artichoke Ruby, a Ruby VM implementation written in Rust. This provides several advantages:
 
 1. **Performance**: Ruby code runs at near-native speed through Rust compilation
 2. **Compatibility**: Full support for Ruby language features and gems
 3. **Interoperability**: Seamless calling between Rust and Ruby code
 4. **Distribution**: Single standalone binary with no external Ruby dependency
+
+## Core Principle: Embedded Ruby Only — No Host Ruby
+
+Regent is a self-contained Rust binary with an **embedded Ruby runner (Artichoke)**. It must run on machines that have no `ruby`, `gem`, or `bundle` on PATH.
+
+Rules contributors and AI agents must follow:
+
+- **Do not shell out to host Ruby tooling.** No `Command::new("ruby")`, `Command::new("gem")`, `Command::new("bundle")`, or `Command::new("rspec")` from Rust code paths used during normal operation.
+- **Gem dependencies ship with Regent.** Required gems (rspec, rspec-puppet, puppetlabs_spec_helper, etc.) are bundled in a gem cache that's discovered via `REGENT_BUNDLED_GEMS`, packaged alongside the binary (`share/regent/bundled_gems`), or — in dev — found under `assets/bundled_gems` or `vendor/bundle` in the repo.
+- **`regent bootstrap` only copies — it never installs from rubygems.org.** It populates the module's `vendor/bundle` from the Regent-shipped cache; if a gem is missing from that cache, that's a packaging bug, not a user-fixable one.
+- **Errors point at `regent bootstrap`.** When the embedded runner can't find rspec or another required gem, the user is told to run `regent bootstrap` — never to install gems on the host.
+
+Anything that requires host Ruby is a regression. If a new feature appears to need it, find an Artichoke-compatible solution or ship the gem in the bundled cache.
 
 ## Architecture Diagram
 

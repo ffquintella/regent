@@ -2,6 +2,16 @@
 
 A high-performance, modern implementation of Puppet Development Kit (PDK) features in Rust with Ruby interoperability.
 
+## ⚙️ Runtime Principle: Embedded Ruby Only
+
+**Regent uses its embedded Artichoke Ruby runtime — implemented in Rust — for all Ruby execution. It does NOT depend on a host `ruby`, `gem`, or `bundle` install.**
+
+- All required gems (rspec, rspec-puppet, etc.) ship with Regent in a bundled gem cache and are installed into a module's `vendor/bundle` by `regent bootstrap`.
+- Regent must never shell out to a host Bundler or Rubygems for normal operation.
+- If a required gem is missing at runtime, the user is told to run `regent bootstrap` — never to `gem install` or `bundle install` on the host.
+
+See [docs/ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md) for details.
+
 ## 📚 Documentation
 
 All project documentation has been organized in the [`docs/`](docs/) folder. Start with:
