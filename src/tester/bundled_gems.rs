@@ -188,3 +188,116 @@ fn same_path(a: &Path, b: &Path) -> bool {
 pub fn ensure_bundled_gems(_module_path: &Path) -> Result<Option<PathBuf>> {
     ensure_user_bundle()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// Build a minimal but realistic Bundler-style gem cache under `root`:
+    ///
+    /// ```text
+    /// root/
+    ///   ruby/2.6.0/gems/rspec-3.13.2/lib/rspec.rb
+    ///   ruby/2.6.0/gems/rspec-core-3.13.6/lib/rspec/core.rb
+    ///   ruby/2.6.0/specifications/rspec-3.13.2.gemspec
+    /// ```
+    fn populate_fake_gem_cache(root: &Path) {
+        let gems = root.join("ruby").join("2.6.0").join("gems");
+        for gem in ["rspec-3.13.2", "rspec-core-3.13.6"] {
+            let lib = gems.join(gem).join("lib");
+            fs::create_dir_all(&lib).unwrap();
+            fs::write(lib.join("placeholder.rb"), b"# placeholder").unwrap();
+        }
+        let specs = root.join("ruby").join("2.6.0").join("specifications");
+        fs::create_dir_all(&specs).unwrap();
+        fs::write(specs.join("rspec-3.13.2.gemspec"), b"# spec").unwrap();
+    }
+
+    #[test]
+    fn copy_contents_into_does_not_nest_source_dir() {
+        // Regression test for the v0.5.3 bug where fs_extra's
+        // `copy_inside = true` produced `<target>/<source_basename>/ruby/...`
+        // instead of `<target>/ruby/...`, which then failed gem verification.
+        let src = tempdir().unwrap();
+        let dst = tempdir().unwrap();
+        populate_fake_gem_cache(src.path());
+
+        copy_contents_into(src.path(), dst.path()).unwrap();
+
+        // Expected (flat) layout:
+        assert!(dst.path().join("ruby").join("2.6.0").join("gems").join("rspec-3.13.2").is_dir());
+        assert!(dst.path().join("ruby").join("2.6.0").join("specifications").is_dir());
+
+        // Must NOT have nested the source dir under the target:
+        let nested = dst.path().join(src.path().file_name().unwrap()).join("ruby");
+        assert!(!nested.exists(), "source dir was nested under target at {nested:?}");
+    }
+
+    #[test]
+    fn copy_contents_into_is_idempotent() {
+        let src = tempdir().unwrap();
+        let dst = tempdir().unwrap();
+        populate_fake_gem_cache(src.path());
+
+        copy_contents_into(src.path(), dst.path()).unwrap();
+        // Second invocation should not fail even though files already exist.
+        copy_contents_into(src.path(), dst.path()).unwrap();
+
+        assert!(dst.path().join("ruby").join("2.6.0").join("gems").join("rspec-core-3.13.6").is_dir());
+    }
+
+    #[test]
+    fn has_gem_layout_accepts_bundler_tree() {
+        let dir = tempdir().unwrap();
+        populate_fake_gem_cache(dir.path());
+        assert!(has_gem_layout(dir.path()));
+    }
+
+    #[test]
+    fn has_gem_layout_rejects_readme_only_dir() {
+        // The original assets/bundled_gems shipped with only a README. That
+        // should not count as a valid gem cache.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), b"placeholder").unwrap();
+        assert!(!has_gem_layout(dir.path()));
+    }
+
+    #[test]
+    fn has_gem_layout_rejects_empty_dir() {
+        let dir = tempdir().unwrap();
+        assert!(!has_gem_layout(dir.path()));
+    }
+
+    #[test]
+    fn has_gem_layout_rejects_ruby_dir_without_gems_subdir() {
+        let dir = tempdir().unwrap();
+        // Looks Bundler-shaped but has no `gems/` underneath.
+        fs::create_dir_all(dir.path().join("ruby").join("2.6.0").join("specifications")).unwrap();
+        assert!(!has_gem_layout(dir.path()));
+    }
+
+    #[test]
+    fn verify_required_gems_layout_matches_copy_output() {
+        // The verify step that runs during `regent bootstrap` reads
+        // `<bundle>/ruby/*/gems/<name>-<version>`. Ensure the layout produced
+        // by copy_contents_into is exactly what that check expects.
+        let src = tempdir().unwrap();
+        let dst = tempdir().unwrap();
+        populate_fake_gem_cache(src.path());
+
+        copy_contents_into(src.path(), dst.path()).unwrap();
+
+        let ruby_root = dst.path().join("ruby");
+        let mut found_rspec = false;
+        for entry in fs::read_dir(&ruby_root).unwrap().flatten() {
+            for gem in fs::read_dir(entry.path().join("gems")).unwrap().flatten() {
+                if gem.file_name().to_string_lossy().starts_with("rspec-") {
+                    found_rspec = true;
+                }
+            }
+        }
+        assert!(found_rspec, "verify_required_gems would have missed rspec in {ruby_root:?}");
+    }
+}
