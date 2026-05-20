@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashSet;
 use std::collections::HashMap;
 use std::path::Path;
@@ -310,6 +311,8 @@ enum Cond {
 enum CompareOp {
     Eq,
     NotEq,
+    Match,
+    NotMatch,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +327,9 @@ enum Expr {
     MethodCall { target: Box<Expr>, name: String },
     ResourceRef { rtype: String, title: Box<Expr> },
     FunctionCall { name: String, args: Vec<Expr> },
+    /// Puppet regex literal: `/pattern/[flags]`. Stored as the inner pattern;
+    /// flags are pre-applied as inline modifiers (e.g. `(?i)`).
+    Regex(String),
 }
 
 #[derive(Debug, Clone)]
@@ -521,11 +527,17 @@ impl<'a> EvalContext<'a> {
                 self.catalog.contains(&rtype, title)
             }
             Cond::Compare { left, op, right } => {
-                let left = self.eval_expr(left)?;
-                let right = self.eval_expr(right)?;
                 match op {
-                    CompareOp::Eq => left == right,
-                    CompareOp::NotEq => left != right,
+                    CompareOp::Eq => self.eval_expr(left)? == self.eval_expr(right)?,
+                    CompareOp::NotEq => self.eval_expr(left)? != self.eval_expr(right)?,
+                    CompareOp::Match => eval_regex_match(
+                        &self.eval_expr(left)?,
+                        &self.eval_expr(right)?,
+                    )?,
+                    CompareOp::NotMatch => !eval_regex_match(
+                        &self.eval_expr(left)?,
+                        &self.eval_expr(right)?,
+                    )?,
                 }
             }
             Cond::Truthy(expr) => self.eval_expr(expr)?.is_truthy(),
@@ -580,17 +592,26 @@ impl<'a> EvalContext<'a> {
                     _ => PuppetValue::Undef,
                 }
             }
+            // Regex literals evaluate to their pattern string; comparison ops
+            // `=~` / `!~` compile and apply the pattern.
+            Expr::Regex(pattern) => PuppetValue::String(pattern.clone()),
         })
     }
 
     fn resolve_var(&self, var: &VarRef) -> PuppetValue {
+        // Strip the legacy top-scope `::` prefix (e.g. `$::osfamily`).
+        let normalized = var.name.trim_start_matches(':').to_string();
         let mut value = if var.name == "facts" {
             self.facts.clone()
+        } else if let Some(v) = self.vars.get(&var.name).cloned() {
+            v
+        } else if let Some(v) = self.vars.get(&normalized).cloned() {
+            v
+        } else if let PuppetValue::Hash(facts) = &self.facts {
+            // Legacy top-scope fact references: `$::osfamily` → `$facts['osfamily']`.
+            facts.get(&normalized).cloned().unwrap_or(PuppetValue::Undef)
         } else {
-            self.vars
-                .get(&var.name)
-                .cloned()
-                .unwrap_or(PuppetValue::Undef)
+            PuppetValue::Undef
         };
         for segment in &var.path {
             value = match value {
@@ -855,6 +876,14 @@ impl<'a> PuppetParser<'a> {
             let right = self.parse_expr()?;
             return Ok(Cond::Compare { left, op: CompareOp::NotEq, right });
         }
+        if self.consume(TokenKind::Match) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::Match, right });
+        }
+        if self.consume(TokenKind::NotMatch) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::NotMatch, right });
+        }
         Ok(Cond::Truthy(left))
     }
 
@@ -880,6 +909,11 @@ impl<'a> PuppetParser<'a> {
         if self.peek_kind() == Some(TokenKind::String) {
             let value = self.expect_string()?;
             return Ok(Expr::String(value));
+        }
+        if self.peek_kind() == Some(TokenKind::Regex) {
+            let token = self.tokens[self.index].clone();
+            self.index += 1;
+            return Ok(Expr::Regex(token.text));
         }
         if self.peek_kind() == Some(TokenKind::Number) {
             let value = self.expect_number()?;
@@ -1060,6 +1094,7 @@ impl Expr {
             Expr::MethodCall { name, .. } => name.clone(),
             Expr::ResourceRef { rtype, .. } => rtype.clone(),
             Expr::FunctionCall { name, .. } => name.clone(),
+            Expr::Regex(pattern) => pattern.clone(),
         }
     }
 
@@ -1085,6 +1120,9 @@ enum TokenKind {
     EqEq,
     NotEq,
     Bang,
+    Match,
+    NotMatch,
+    Regex,
 }
 
 #[derive(Debug, Clone)]
@@ -1165,6 +1203,9 @@ impl<'a> Lexer<'a> {
                     } else if self.peek_next() == Some('=') {
                         tokens.push(self.make(TokenKind::EqEq, "==", offset));
                         self.index += 2;
+                    } else if self.peek_next() == Some('~') {
+                        tokens.push(self.make(TokenKind::Match, "=~", offset));
+                        self.index += 2;
                     } else {
                         tokens.push(self.make(TokenKind::Equal, "=", offset));
                         self.index += 1;
@@ -1174,10 +1215,17 @@ impl<'a> Lexer<'a> {
                     if self.peek_next() == Some('=') {
                         tokens.push(self.make(TokenKind::NotEq, "!=", offset));
                         self.index += 2;
+                    } else if self.peek_next() == Some('~') {
+                        tokens.push(self.make(TokenKind::NotMatch, "!~", offset));
+                        self.index += 2;
                     } else {
                         tokens.push(self.make(TokenKind::Bang, "!", offset));
                         self.index += 1;
                     }
+                }
+                '/' if can_start_regex(tokens.last()) => {
+                    let text = self.consume_regex();
+                    tokens.push(self.make(TokenKind::Regex, &text, offset));
                 }
                 '"' => {
                     let text = self.consume_string('"');
@@ -1266,6 +1314,49 @@ impl<'a> Lexer<'a> {
         self.input[start..self.index].to_string()
     }
 
+    /// Consume a `/pattern/[flags]` regex literal. Returns the pattern with
+    /// any flags applied as Rust regex inline modifiers (e.g. `(?i)pattern`).
+    fn consume_regex(&mut self) -> String {
+        self.index += 1; // opening '/'
+        let mut pattern = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == '\\' {
+                // Preserve the escape sequence verbatim.
+                pattern.push(ch);
+                self.index += 1;
+                if let Some(next) = self.peek() {
+                    pattern.push(next);
+                    self.index += 1;
+                }
+                continue;
+            }
+            if ch == '/' {
+                self.index += 1;
+                break;
+            }
+            if ch == '\n' {
+                // Unterminated: bail out so we don't swallow the file.
+                break;
+            }
+            pattern.push(ch);
+            self.index += 1;
+        }
+        let mut flags = String::new();
+        while let Some(ch) = self.peek() {
+            if matches!(ch, 'i' | 'm' | 's' | 'x') {
+                flags.push(ch);
+                self.index += 1;
+            } else {
+                break;
+            }
+        }
+        if flags.is_empty() {
+            pattern
+        } else {
+            format!("(?{flags}){pattern}")
+        }
+    }
+
     fn consume_number(&mut self) -> String {
         let start = self.index;
         self.index += 1;
@@ -1288,8 +1379,41 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Evaluate `subject =~ pattern`. The pattern's `as_string()` is compiled
+/// as a `regex::Regex` and matched (substring match — Puppet semantics).
+fn eval_regex_match(subject: &PuppetValue, pattern: &PuppetValue) -> Result<bool> {
+    let subject = subject.as_string();
+    let pattern = pattern.as_string();
+    let re = Regex::new(&pattern)
+        .with_context(|| format!("invalid regex pattern: /{pattern}/"))?;
+    Ok(re.is_match(&subject))
+}
+
 fn is_ident_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
+}
+
+/// Heuristic to disambiguate `/` between regex-start and arithmetic.
+/// Regent's parser doesn't currently model division, but we still want to
+/// avoid surprising lexes — only treat `/` as a regex when the preceding
+/// token leaves us in an "operand expected" position.
+fn can_start_regex(prev: Option<&Token>) -> bool {
+    let Some(prev) = prev else { return true };
+    matches!(
+        prev.kind,
+        TokenKind::Match
+            | TokenKind::NotMatch
+            | TokenKind::EqEq
+            | TokenKind::NotEq
+            | TokenKind::Equal
+            | TokenKind::FatArrow
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Comma
+            | TokenKind::Colon
+            | TokenKind::Bang
+    )
 }
 
 fn is_ident_continue(ch: char) -> bool {
@@ -1329,6 +1453,101 @@ mod tests {
             resource.attributes.get("mode"),
             Some(&PuppetValue::String("0644".to_string()))
         );
+    }
+
+    #[test]
+    fn regex_match_inside_if_includes_resource() {
+        // `=~` against a regex literal must parse and evaluate to true,
+        // including the resource declared in the matching branch.
+        let manifest = r#"
+            class foo {
+              if $::osfamily =~ /^(Red ?Hat|Cent|Fedora)/ {
+                file { '/etc/rhel-only': ensure => file }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = HashMap::new();
+        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("manifest with =~ /.../ must parse");
+        assert!(catalog.contains("file", "/etc/rhel-only"));
+    }
+
+    #[test]
+    fn regex_non_match_inside_if_excludes_resource() {
+        let manifest = r#"
+            class foo {
+              if $::osfamily !~ /Debian/ {
+                file { '/etc/non-debian': ensure => file }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = HashMap::new();
+        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("manifest with !~ /.../ must parse");
+        assert!(catalog.contains("file", "/etc/non-debian"));
+    }
+
+    #[test]
+    fn regex_with_case_insensitive_flag() {
+        let manifest = r#"
+            class foo {
+              if $::osfamily =~ /redhat/i {
+                file { '/etc/match': ensure => file }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = HashMap::new();
+        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("/.../i flag must compile");
+        assert!(catalog.contains("file", "/etc/match"));
+    }
+
+    #[test]
+    fn regex_non_match_when_subject_matches_excludes_resource() {
+        // Confirms !~ returns false when the pattern actually matches.
+        let manifest = r#"
+            class foo {
+              if $::osfamily !~ /Red ?Hat/ {
+                file { '/etc/should-not-exist': ensure => file }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = HashMap::new();
+        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("manifest must parse");
+        assert!(!catalog.contains("file", "/etc/should-not-exist"));
     }
 
     #[test]
