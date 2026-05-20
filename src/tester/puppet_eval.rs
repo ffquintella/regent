@@ -302,8 +302,13 @@ enum Stmt {
 #[derive(Debug, Clone)]
 enum Cond {
     Not(Box<Cond>),
+    And(Box<Cond>, Box<Cond>),
+    Or(Box<Cond>, Box<Cond>),
     Defined { rtype: String, title: String },
     Compare { left: Expr, op: CompareOp, right: Expr },
+    /// `<needle> in <haystack>` — membership test against arrays, hash keys, or
+    /// substring of a string.
+    In { needle: Expr, haystack: Expr },
     Truthy(Expr),
 }
 
@@ -500,8 +505,7 @@ impl<'a> EvalContext<'a> {
                     let value = self.eval_expr(expr)?;
                     let mut matched = false;
                     for (branch_expr, body) in branches {
-                        let branch_value = self.eval_expr(branch_expr)?;
-                        if branch_value == value {
+                        if self.case_branch_matches(branch_expr, &value)? {
                             self.evaluate_statements(body)?;
                             matched = true;
                             break;
@@ -519,9 +523,35 @@ impl<'a> EvalContext<'a> {
         Ok(())
     }
 
+    /// Match a `case` branch pattern against the subject value.
+    ///
+    /// Supported branch patterns:
+    /// - bare regex literal `/.../[imsx]` — substring match on the subject
+    /// - array of patterns `[a, b, /c/, ...]` — true if any element matches
+    /// - any other expression — equality after evaluation
+    fn case_branch_matches(&mut self, pattern: &Expr, subject: &PuppetValue) -> Result<bool> {
+        match pattern {
+            Expr::Regex(regex_src) => eval_regex_match(
+                subject,
+                &PuppetValue::String(regex_src.clone()),
+            ),
+            Expr::Array(items) => {
+                for item in items {
+                    if self.case_branch_matches(item, subject)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            other => Ok(self.eval_expr(other)? == *subject),
+        }
+    }
+
     fn eval_cond(&mut self, cond: &Cond) -> Result<bool> {
         Ok(match cond {
             Cond::Not(inner) => !self.eval_cond(inner)?,
+            Cond::And(left, right) => self.eval_cond(left)? && self.eval_cond(right)?,
+            Cond::Or(left, right) => self.eval_cond(left)? || self.eval_cond(right)?,
             Cond::Defined { rtype, title } => {
                 let rtype = normalize_rtype(rtype);
                 self.catalog.contains(&rtype, title)
@@ -539,6 +569,11 @@ impl<'a> EvalContext<'a> {
                         &self.eval_expr(right)?,
                     )?,
                 }
+            }
+            Cond::In { needle, haystack } => {
+                let needle = self.eval_expr(needle)?;
+                let haystack = self.eval_expr(haystack)?;
+                eval_in(&needle, &haystack)
             }
             Cond::Truthy(expr) => self.eval_expr(expr)?.is_truthy(),
         })
@@ -766,6 +801,21 @@ impl<'a> PuppetParser<'a> {
             };
             return Ok(Some(Stmt::If { cond, then_body, else_body }));
         }
+        if self.consume_keyword("unless") {
+            // `unless C { … } [else { … }]` is `if !C { … } else { … }`.
+            let cond = self.parse_cond()?;
+            let then_body = self.parse_block()?;
+            let else_body = if self.consume_keyword("else") {
+                self.parse_block()?
+            } else {
+                Vec::new()
+            };
+            return Ok(Some(Stmt::If {
+                cond: Cond::Not(Box::new(cond)),
+                then_body,
+                else_body,
+            }));
+        }
         if self.consume_keyword("case") {
             let expr = self.parse_expr()?;
             self.expect(TokenKind::LBrace)?;
@@ -846,15 +896,42 @@ impl<'a> PuppetParser<'a> {
         Ok(attrs)
     }
 
+    /// Top-level: `or` (lowest precedence).
     fn parse_cond(&mut self) -> Result<Cond> {
+        let mut left = self.parse_cond_and()?;
+        while self.consume_keyword("or") {
+            let right = self.parse_cond_and()?;
+            left = Cond::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// Next level: `and`.
+    fn parse_cond_and(&mut self) -> Result<Cond> {
+        let mut left = self.parse_cond_unary()?;
+        while self.consume_keyword("and") {
+            let right = self.parse_cond_unary()?;
+            left = Cond::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// Unary `!` and parenthesised compound conditions.
+    fn parse_cond_unary(&mut self) -> Result<Cond> {
         if self.consume(TokenKind::LParen) {
             let cond = self.parse_cond()?;
             self.consume(TokenKind::RParen);
             return Ok(cond);
         }
         if self.consume(TokenKind::Bang) {
-            return Ok(Cond::Not(Box::new(self.parse_cond()?)));
+            return Ok(Cond::Not(Box::new(self.parse_cond_unary()?)));
         }
+        self.parse_cond_atom()
+    }
+
+    /// Atomic condition: `defined(...)`, comparison (`==`/`!=`/`=~`/`!~`),
+    /// `in` membership, or a bare expression treated as truthiness.
+    fn parse_cond_atom(&mut self) -> Result<Cond> {
         if self.consume_keyword("defined") {
             self.consume(TokenKind::LParen);
             let rtype = self.expect_ident()?;
@@ -883,6 +960,10 @@ impl<'a> PuppetParser<'a> {
         if self.consume(TokenKind::NotMatch) {
             let right = self.parse_expr()?;
             return Ok(Cond::Compare { left, op: CompareOp::NotMatch, right });
+        }
+        if self.consume_keyword("in") {
+            let right = self.parse_expr()?;
+            return Ok(Cond::In { needle: left, haystack: right });
         }
         Ok(Cond::Truthy(left))
     }
@@ -1379,6 +1460,20 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Evaluate `<needle> in <haystack>`:
+/// - haystack `Array` → element membership (value equality)
+/// - haystack `Hash`  → key membership (needle stringified)
+/// - haystack `String` → substring match
+/// - everything else → false
+fn eval_in(needle: &PuppetValue, haystack: &PuppetValue) -> bool {
+    match haystack {
+        PuppetValue::Array(items) => items.iter().any(|item| item == needle),
+        PuppetValue::Hash(map) => map.contains_key(&needle.as_string()),
+        PuppetValue::String(text) => text.contains(&needle.as_string()),
+        _ => false,
+    }
+}
+
 /// Evaluate `subject =~ pattern`. The pattern's `as_string()` is compiled
 /// as a `regex::Regex` and matched (substring match — Puppet semantics).
 fn eval_regex_match(subject: &PuppetValue, pattern: &PuppetValue) -> Result<bool> {
@@ -1548,6 +1643,160 @@ mod tests {
             )
             .expect("manifest must parse");
         assert!(!catalog.contains("file", "/etc/should-not-exist"));
+    }
+
+    fn eval_with_osfamily(manifest: &str, osfamily: &str) -> PuppetCatalog {
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = HashMap::new();
+        facts.insert("osfamily".to_string(), PuppetValue::String(osfamily.to_string()));
+        evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("manifest must parse")
+    }
+
+    #[test]
+    fn unless_with_truthy_condition_skips_body() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  unless $::osfamily == 'RedHat' {
+                    file { '/etc/non-rhel': ensure => file }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(!catalog.contains("file", "/etc/non-rhel"));
+    }
+
+    #[test]
+    fn unless_with_falsy_condition_runs_body() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  unless $::osfamily == 'Debian' {
+                    file { '/etc/not-debian': ensure => file }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/not-debian"));
+    }
+
+    #[test]
+    fn and_or_short_circuit_compose() {
+        // `(osfamily == RedHat) and ($::osfamily =~ /Red/)` → true
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  if $::osfamily == 'RedHat' and $::osfamily =~ /Red/ {
+                    file { '/etc/and-true': ensure => file }
+                  }
+                  if $::osfamily == 'Debian' or $::osfamily =~ /Hat/ {
+                    file { '/etc/or-true': ensure => file }
+                  }
+                  if $::osfamily == 'Debian' or $::osfamily == 'Suse' {
+                    file { '/etc/or-false': ensure => file }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/and-true"));
+        assert!(catalog.contains("file", "/etc/or-true"));
+        assert!(!catalog.contains("file", "/etc/or-false"));
+    }
+
+    #[test]
+    fn case_with_regex_branch_matches() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  case $::osfamily {
+                    /^Red/: { file { '/etc/case-regex': ensure => file } }
+                    default: { file { '/etc/case-default': ensure => file } }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/case-regex"));
+        assert!(!catalog.contains("file", "/etc/case-default"));
+    }
+
+    #[test]
+    fn case_with_array_pattern_matches_any_member() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  case $::osfamily {
+                    ['RedHat', 'CentOS', 'Fedora']: { file { '/etc/rhel-like': ensure => file } }
+                    ['Debian', 'Ubuntu']:           { file { '/etc/debian-like': ensure => file } }
+                    default:                         { file { '/etc/other': ensure => file } }
+                  }
+                }
+            "#,
+            "Fedora",
+        );
+        assert!(catalog.contains("file", "/etc/rhel-like"));
+        assert!(!catalog.contains("file", "/etc/debian-like"));
+        assert!(!catalog.contains("file", "/etc/other"));
+    }
+
+    #[test]
+    fn case_falls_through_to_default_when_no_branch_matches() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  case $::osfamily {
+                    /Debian/: { file { '/etc/deb': ensure => file } }
+                    default:  { file { '/etc/default-branch': ensure => file } }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/default-branch"));
+        assert!(!catalog.contains("file", "/etc/deb"));
+    }
+
+    #[test]
+    fn in_operator_against_array() {
+        let manifest = r#"
+            class foo {
+              $oses = ['RedHat', 'CentOS', 'Fedora']
+              if $::osfamily in $oses {
+                file { '/etc/in-array': ensure => file }
+              }
+              if 'Debian' in $oses {
+                file { '/etc/in-debian': ensure => file }
+              }
+            }
+        "#;
+        let catalog = eval_with_osfamily(manifest, "RedHat");
+        assert!(catalog.contains("file", "/etc/in-array"));
+        assert!(!catalog.contains("file", "/etc/in-debian"));
+    }
+
+    #[test]
+    fn in_operator_against_string() {
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  if 'Hat' in $::osfamily {
+                    file { '/etc/substring-match': ensure => file }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/substring-match"));
     }
 
     #[test]
