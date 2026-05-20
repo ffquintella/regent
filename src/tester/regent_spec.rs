@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -26,13 +27,18 @@ pub struct RegentTest {
 #[serde(tag = "kind")]
 pub enum Expectation {
     #[serde(rename = "compile")]
-    Compile,
+    Compile {
+        #[serde(default)]
+        negate: bool,
+    },
     #[serde(rename = "contain")]
     Contain {
         resource_type: String,
         title: String,
         #[serde(default)]
         attributes: HashMap<String, JsonValue>,
+        #[serde(default)]
+        negate: bool,
     },
 }
 
@@ -71,36 +77,52 @@ impl RegentSpecRunner {
         let facts = PuppetValue::from_json_map(test.facts.as_ref());
         let params = PuppetValue::from_json_map(test.params.as_ref());
 
-        let catalog = match self.evaluate_subject(test, &facts, &params) {
-            Ok(catalog) => catalog,
-            Err(err) => {
+        let catalog_result = self.evaluate_subject(test, &facts, &params);
+
+        let mut failures = Vec::new();
+        for expectation in &test.expectations {
+            match expectation {
+                Expectation::Compile { negate } => match (&catalog_result, *negate) {
+                    (Ok(_), false) | (Err(_), true) => {}
+                    (Err(err), false) => failures.push(format!("compile failed: {err}")),
+                    (Ok(_), true) => failures.push("expected compile to fail, but it succeeded".to_string()),
+                },
+                Expectation::Contain {
+                    resource_type,
+                    title,
+                    attributes,
+                    negate,
+                } => {
+                    let Ok(catalog) = &catalog_result else {
+                        if !*negate {
+                            failures.push(format!(
+                                "compile failed: {}",
+                                catalog_result.as_ref().err().unwrap()
+                            ));
+                        }
+                        continue;
+                    };
+                    let check = self.check_resource(catalog, resource_type, title, attributes);
+                    match (check, *negate) {
+                        (Ok(()), false) | (Err(_), true) => {}
+                        (Err(err), false) => failures.push(err.to_string()),
+                        (Ok(()), true) => failures.push(format!(
+                            "expected catalog NOT to contain {}[{}] (with matching attrs), but it did",
+                            resource_type, title
+                        )),
+                    }
+                }
+            }
+        }
+
+        if test.expectations.is_empty() {
+            if let Err(err) = &catalog_result {
                 return Ok(TestCase {
                     name: test.name.clone(),
                     status: TestStatus::Failed,
                     duration_ms: 0,
                     message: Some(format!("compile failed: {err}")),
                 });
-            }
-        };
-
-        let mut failures = Vec::new();
-        for expectation in &test.expectations {
-            match expectation {
-                Expectation::Compile => {}
-                Expectation::Contain {
-                    resource_type,
-                    title,
-                    attributes,
-                } => {
-                    if let Err(err) = self.check_resource(
-                        &catalog,
-                        resource_type,
-                        title,
-                        attributes,
-                    ) {
-                        failures.push(err.to_string());
-                    }
-                }
             }
         }
 
@@ -172,12 +194,35 @@ impl RegentSpecRunner {
             ));
         };
         for (key, value) in attributes {
-            let expected = PuppetValue::from_json(value);
             let actual = resource
                 .attributes
                 .get(key)
                 .cloned()
                 .unwrap_or(PuppetValue::Undef);
+            if let Some(pattern) = regex_marker(value) {
+                let regex = Regex::new(pattern).map_err(|err| {
+                    anyhow::anyhow!(
+                        "resource {}[{}] attribute {}: invalid regex {:?}: {}",
+                        resource_type,
+                        title,
+                        key,
+                        pattern,
+                        err
+                    )
+                })?;
+                if !regex.is_match(&actual.as_string()) {
+                    return Err(anyhow::anyhow!(
+                        "resource {}[{}] attribute {} expected to match /{}/ but got {:?}",
+                        resource_type,
+                        title,
+                        key,
+                        pattern,
+                        actual.as_string()
+                    ));
+                }
+                continue;
+            }
+            let expected = PuppetValue::from_json(value);
             if expected != actual {
                 return Err(anyhow::anyhow!(
                     "resource {}[{}] attribute {} expected {:?} got {:?}",
@@ -191,4 +236,12 @@ impl RegentSpecRunner {
         }
         Ok(())
     }
+}
+
+fn regex_marker(value: &JsonValue) -> Option<&str> {
+    let obj = value.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    obj.get("__regex__").and_then(|v| v.as_str())
 }

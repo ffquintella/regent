@@ -794,13 +794,14 @@ begin
           "params" => example.params,
           "expectations" => example.expectations.map do |exp|
             if exp.kind == "compile"
-              {{ "kind" => "compile" }}
+              {{ "kind" => "compile", "negate" => exp.negate }}
             else
               {{
                 "kind" => "contain",
                 "resource_type" => exp.resource_type,
                 "title" => exp.title,
-                "attributes" => normalize_value(exp.attributes || {{}})
+                "attributes" => normalize_value(exp.attributes || {{}}),
+                "negate" => exp.negate
               }}
             end
           end
@@ -818,6 +819,8 @@ begin
         value.map {{ |item| normalize_value(item) }}
       when Symbol
         value.to_s
+      when Regexp
+        {{ "__regex__" => value.source }}
       else
         value
       end
@@ -845,40 +848,99 @@ begin
     end
 
     def self.escape_json(text)
-      text.gsub("\\\\", "\\\\\\\\").gsub("\"", "\\\\\"").gsub("\n", "\\\\n")
+      text.gsub(/\\/) {{ '\\\\' }}
+          .gsub(/"/) {{ '\\"' }}
+          .gsub(/\n/) {{ '\\n' }}
+          .gsub(/\r/) {{ '\\r' }}
+          .gsub(/\t/) {{ '\\t' }}
     end
   end
 
   class ExpectationTarget
     def to(matcher)
+      matcher.instance_variable_set(:@negate, false) if matcher
       RegentSpec.add_expectation(matcher)
     end
+
+    def not_to(matcher)
+      matcher.instance_variable_set(:@negate, true) if matcher
+      RegentSpec.add_expectation(matcher)
+    end
+    alias to_not not_to
   end
 
   class ContainMatcher
-    attr_reader :resource_type, :title, :attributes
+    attr_reader :resource_type, :title, :attributes, :absent_attributes
 
     def initialize(resource_type, title)
       @resource_type = resource_type
       @title = title
       @attributes = {{}}
+      @absent_attributes = []
     end
 
     def with(attrs = nil, **kwargs)
       attrs = attrs || {{}}
       attrs = attrs.merge(kwargs) unless kwargs.empty?
-      @attributes = attrs
+      attrs.each {{ |k, v| @attributes[k.to_s] = v }}
       self
+    end
+
+    def without(attrs = nil, **kwargs)
+      attrs = attrs || {{}}
+      attrs = attrs.merge(kwargs) unless kwargs.empty?
+      attrs.each {{ |k, _v| @absent_attributes << k.to_s }}
+      self
+    end
+
+    def that_requires(*); self; end
+    def that_comes_before(*); self; end
+    def that_notifies(*); self; end
+    def that_subscribes_to(*); self; end
+    def only_with(attrs = nil, **kwargs)
+      with(attrs, **kwargs)
+    end
+
+    def method_missing(name, *args, &block)
+      str = name.to_s
+      if str.start_with?("with_")
+        attr = str.sub("with_", "")
+        @attributes[attr] = args.length == 1 ? args.first : args
+        self
+      elsif str.start_with?("without_")
+        attr = str.sub("without_", "")
+        @absent_attributes << attr
+        self
+      elsif str.start_with?("only_with_")
+        attr = str.sub("only_with_", "")
+        @attributes[attr] = args.length == 1 ? args.first : args
+        self
+      else
+        super
+      end
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      str = name.to_s
+      str.start_with?("with_") || str.start_with?("without_") || str.start_with?("only_with_") || super
     end
 
     def kind
       "contain"
+    end
+
+    def negate
+      @negate ? true : false
     end
   end
 
   class CompileMatcher
     def kind
       "compile"
+    end
+
+    def negate
+      @negate ? true : false
     end
   end
 
