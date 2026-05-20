@@ -206,6 +206,15 @@ impl FixtureManager {
                         false
                     })
                 }
+                Some(FixtureSource::Forge { slug }) => {
+                    install_forge(&fixture_path, slug).unwrap_or_else(|err| {
+                        eprintln!(
+                            "warning: forge install failed for fixture {} ({}): {}; using stub",
+                            module_name, slug, err
+                        );
+                        false
+                    })
+                }
                 _ => false,
             };
 
@@ -344,6 +353,108 @@ fn install_git(fixture_path: &Path, repo: &str, ref_value: Option<&str>) -> Resu
         return Err(anyhow!("git clone exited with status {}", status));
     }
     Ok(true)
+}
+
+/// Download and extract a Puppet Forge module into `fixture_path`.
+///
+/// `slug` is a forge module identifier in either `author/module` or
+/// `author-module` form. Optionally `<slug>:<version>` pins a specific
+/// release; omitting the version uses the module's current release.
+///
+/// The implementation:
+/// 1. GET `https://forgeapi.puppet.com/v3/modules/<author>-<module>`
+/// 2. Parse `current_release.file_uri` (or the matching version's file_uri)
+/// 3. Download the tarball at `https://forgeapi.puppet.com<file_uri>`
+/// 4. Extract into `fixture_path`, stripping the leading
+///    `<author>-<module>-<version>/` directory.
+pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
+    let (slug_part, version_pin) = match slug.split_once(':') {
+        Some((s, v)) if !v.is_empty() => (s, Some(v)),
+        _ => (slug, None),
+    };
+    let normalized = slug_part.replace('/', "-");
+    if normalized.is_empty() || !normalized.contains('-') {
+        return Err(anyhow!("invalid forge slug `{}` (expected author/module)", slug));
+    }
+
+    let metadata_url = format!("https://forgeapi.puppet.com/v3/modules/{normalized}");
+    let metadata: serde_json::Value = ureq::get(&metadata_url)
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .with_context(|| format!("GET {metadata_url}"))?
+        .into_json()
+        .with_context(|| format!("parse JSON from {metadata_url}"))?;
+
+    let file_uri = forge_file_uri(&metadata, version_pin)
+        .ok_or_else(|| anyhow!("forge metadata for {normalized} did not include a downloadable release"))?;
+
+    let download_url = format!("https://forgeapi.puppet.com{file_uri}");
+    let mut reader = ureq::get(&download_url)
+        .timeout(std::time::Duration::from_secs(120))
+        .call()
+        .with_context(|| format!("GET {download_url}"))?
+        .into_reader();
+
+    // Buffer the tarball to a tempfile before extracting so a slow link can't
+    // leave a half-extracted module directory on disk.
+    let mut tarball = tempfile::NamedTempFile::new().context("create tempfile for forge tarball")?;
+    std::io::copy(&mut reader, tarball.as_file_mut()).context("download forge tarball")?;
+    tarball.as_file_mut().sync_all().ok();
+    let path = tarball.path().to_path_buf();
+
+    extract_forge_tarball(&path, fixture_path)?;
+    Ok(true)
+}
+
+fn forge_file_uri<'a>(metadata: &'a serde_json::Value, version: Option<&str>) -> Option<String> {
+    if let Some(version) = version {
+        if let Some(releases) = metadata.get("releases").and_then(|v| v.as_array()) {
+            for release in releases {
+                if release.get("version").and_then(|v| v.as_str()) == Some(version) {
+                    if let Some(uri) = release.get("file_uri").and_then(|v| v.as_str()) {
+                        return Some(uri.to_string());
+                    }
+                }
+            }
+        }
+        return None;
+    }
+    metadata
+        .get("current_release")
+        .and_then(|r| r.get("file_uri"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn extract_forge_tarball(tarball: &Path, fixture_path: &Path) -> Result<()> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let file = fs::File::open(tarball).with_context(|| format!("open {}", tarball.display()))?;
+    let gz = GzDecoder::new(file);
+    let mut archive = Archive::new(gz);
+
+    fs::create_dir_all(fixture_path)
+        .with_context(|| format!("create {}", fixture_path.display()))?;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let raw_path = entry.path()?.into_owned();
+        // Strip the leading `<author>-<module>-<version>/` directory so the
+        // module contents land directly in `fixture_path/`.
+        let mut components = raw_path.components();
+        components.next();
+        let rel: PathBuf = components.as_path().to_path_buf();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = fixture_path.join(&rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        entry.unpack(&dest).with_context(|| format!("unpack {}", dest.display()))?;
+    }
+    Ok(())
 }
 
 fn install_stub(fixture_path: &Path, module_name: &str) -> Result<()> {
@@ -732,6 +843,108 @@ fixtures:
 
         assert!(manager.config.modules.is_none() || manager.config.modules.as_ref().unwrap().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn forge_file_uri_picks_current_release_when_unpinned() {
+        let metadata = serde_json::json!({
+            "current_release": {
+                "version": "9.4.1",
+                "file_uri": "/v3/files/puppetlabs-stdlib-9.4.1.tar.gz"
+            }
+        });
+        assert_eq!(
+            forge_file_uri(&metadata, None),
+            Some("/v3/files/puppetlabs-stdlib-9.4.1.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn forge_file_uri_picks_matching_pinned_version() {
+        let metadata = serde_json::json!({
+            "current_release": {
+                "version": "9.4.1",
+                "file_uri": "/v3/files/puppetlabs-stdlib-9.4.1.tar.gz"
+            },
+            "releases": [
+                { "version": "9.4.1", "file_uri": "/v3/files/puppetlabs-stdlib-9.4.1.tar.gz" },
+                { "version": "9.0.0", "file_uri": "/v3/files/puppetlabs-stdlib-9.0.0.tar.gz" },
+                { "version": "8.6.0", "file_uri": "/v3/files/puppetlabs-stdlib-8.6.0.tar.gz" }
+            ]
+        });
+        assert_eq!(
+            forge_file_uri(&metadata, Some("9.0.0")),
+            Some("/v3/files/puppetlabs-stdlib-9.0.0.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn forge_file_uri_returns_none_for_unknown_pinned_version() {
+        let metadata = serde_json::json!({
+            "current_release": { "file_uri": "/v3/files/x-y-1.0.0.tar.gz" },
+            "releases": [ { "version": "1.0.0", "file_uri": "/v3/files/x-y-1.0.0.tar.gz" } ]
+        });
+        assert_eq!(forge_file_uri(&metadata, Some("99.0.0")), None);
+    }
+
+    #[test]
+    fn install_forge_rejects_invalid_slug() {
+        let dir = TempDir::new().unwrap();
+        let err = install_forge(&dir.path().join("bogus"), "not-a-valid-form-without-slash").err();
+        // No slash AND no dash → invalid. Construct one that has neither:
+        let err2 = install_forge(&dir.path().join("bogus2"), "noseparators").err();
+        assert!(err2.is_some(), "slug without separators should error");
+        // The dashed variant is actually valid (author-module), so don't assert on err here.
+        let _ = err;
+    }
+
+    /// Extracting a tarball laid out like a forge release strips the leading
+    /// `<author>-<module>-<version>/` directory.
+    #[test]
+    fn extract_forge_tarball_strips_top_level_dir() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let work = TempDir::new().unwrap();
+        let tarball_path = work.path().join("module.tar.gz");
+
+        // Build a tarball whose top dir is `author-mod-1.0.0/` and contains
+        // a metadata.json and a manifests/init.pp.
+        {
+            let file = fs::File::create(&tarball_path).unwrap();
+            let gz = GzEncoder::new(file, Compression::default());
+            let mut tar = Builder::new(gz);
+
+            let src_dir = work.path().join("author-mod-1.0.0");
+            fs::create_dir_all(src_dir.join("manifests")).unwrap();
+            fs::write(src_dir.join("metadata.json"), r#"{"name":"author-mod"}"#).unwrap();
+            fs::write(src_dir.join("manifests/init.pp"), "class mod {}").unwrap();
+
+            tar.append_dir_all("author-mod-1.0.0", &src_dir).unwrap();
+            tar.finish().unwrap();
+        }
+
+        let dest = work.path().join("installed");
+        extract_forge_tarball(&tarball_path, &dest).unwrap();
+
+        assert!(dest.join("metadata.json").exists(), "metadata.json must be at the top level");
+        assert!(dest.join("manifests").join("init.pp").exists());
+        assert!(!dest.join("author-mod-1.0.0").exists(),
+            "the leading <author-mod-version>/ directory must be stripped");
+    }
+
+    /// Live network test — only runs when REGENT_NETWORK_TESTS=1 is set.
+    #[test]
+    fn install_forge_downloads_real_stdlib() {
+        if std::env::var("REGENT_NETWORK_TESTS").ok().as_deref() != Some("1") {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let fixture = dir.path().join("stdlib");
+        install_forge(&fixture, "puppetlabs/stdlib").expect("forge download succeeds");
+        assert!(fixture.join("metadata.json").exists());
+        assert!(fixture.join("manifests").exists());
     }
 
     #[test]

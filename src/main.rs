@@ -84,6 +84,15 @@ enum Commands {
         force: bool,
     },
 
+    /// Download and install fixture modules declared in .fixtures.yml
+    Fixtures {
+        #[arg(help = "Path to module", default_value = ".")]
+        path: PathBuf,
+
+        #[arg(long, help = "Remove existing fixtures before downloading")]
+        clean: bool,
+    },
+
     /// Show version
     Version,
 }
@@ -190,6 +199,11 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Bootstrap { path, force } => {
             BootstrapCommand::execute(&path, force)?;
+        }
+
+        Commands::Fixtures { path, clean } => {
+            println!("{}", format!("Installing fixtures at: {:?}", path).cyan());
+            cli::FixturesCommand::execute(&path, clean)?;
         }
 
         Commands::Version => {
