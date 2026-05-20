@@ -3,7 +3,7 @@ use std::path::Path;
 
 use regent::tester::{FixtureManager, ModuleTester, TestConfig, TestType, TestReporter};
 use regent::tester::reporter::ReportFormat;
-use regent::tester::bundled_gems::ensure_bundled_gems;
+use regent::tester::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
 
 use super::bootstrap::missing_dependency_hint;
 
@@ -28,9 +28,9 @@ impl TestCommand {
             .canonicalize()
             .unwrap_or_else(|_| path.to_path_buf());
 
-        // Populate vendor/bundle from the Regent-shipped gem cache (if any) so the
-        // dependency check below can find rspec without re-running the interpreter.
-        let _ = ensure_bundled_gems(&module_path);
+        // Populate the per-user bundle (~/.regent/bundle) from the Regent-shipped
+        // gem cache, if one is available and the user bundle is bare.
+        let _ = ensure_user_bundle();
 
         // Bail out early with a useful hint when required gems aren't installed.
         if let Some(missing) = detect_missing_runtime_dependency(&module_path) {
@@ -106,28 +106,25 @@ impl TestCommand {
 /// Return `Some("rspec")` (or similar) when a required gem can't be located so the
 /// caller can print a `regent bootstrap` hint without running the test interpreter.
 fn detect_missing_runtime_dependency(module_path: &Path) -> Option<String> {
-    let bundle_root = module_path.join("vendor").join("bundle").join("ruby");
-    if !bundle_root.exists() {
-        return Some("rspec (vendor/bundle is empty)".to_string());
-    }
-    let mut has_rspec = false;
-    if let Ok(entries) = std::fs::read_dir(&bundle_root) {
+    let mut roots = discover_bundle_roots();
+    // Also accept legacy per-module bundle from older Regent versions.
+    roots.push(module_path.join("vendor").join("bundle"));
+    for root in roots {
+        let ruby_root = root.join("ruby");
+        let Ok(entries) = std::fs::read_dir(&ruby_root) else { continue };
         for entry in entries.flatten() {
             let gems_dir = entry.path().join("gems");
             let Ok(gems) = std::fs::read_dir(&gems_dir) else { continue };
             for gem in gems.flatten() {
                 if let Some(name) = gem.file_name().to_str() {
                     if name.starts_with("rspec-") || name == "rspec" || name.starts_with("rspec_") {
-                        has_rspec = true;
+                        return None;
                     }
                 }
             }
         }
     }
-    if !has_rspec {
-        return Some("rspec".to_string());
-    }
-    None
+    Some("rspec".to_string())
 }
 
 fn prep_fixtures_if_needed(module_path: &Path) {

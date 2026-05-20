@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 
 use super::{RegentPlan, RegentSpecRunner, TestConfig, TestResults, TestCase, TestStatus};
-use super::bundled_gems::ensure_bundled_gems;
+use super::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
 use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
@@ -29,7 +29,7 @@ impl<'a> ArtichokeTestRunner<'a> {
         }
 
         eprintln!("Artichoke runner: ensure bundled gems");
-        let _ = ensure_bundled_gems(&self.config.module_path)?;
+        let _ = ensure_user_bundle()?;
 
         let spec_dir = self.config.module_path.join("spec");
         if !spec_dir.exists() {
@@ -156,21 +156,20 @@ impl<'a> ArtichokeTestRunner<'a> {
 
     fn build_load_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        let bundle_root = self
-            .config
-            .module_path
-            .join("vendor")
-            .join("bundle")
-            .join("ruby");
-        if let Ok(entries) = std::fs::read_dir(bundle_root) {
+        let mut roots: Vec<PathBuf> = discover_bundle_roots();
+        // Legacy per-module location, for users that previously ran the older
+        // bootstrap which wrote into the module's vendor/bundle.
+        roots.push(self.config.module_path.join("vendor").join("bundle"));
+        for root in roots {
+            let ruby_root = root.join("ruby");
+            let Ok(entries) = std::fs::read_dir(&ruby_root) else { continue };
             for entry in entries.flatten() {
                 let gem_root = entry.path().join("gems");
-                if let Ok(gems) = std::fs::read_dir(gem_root) {
-                    for gem in gems.flatten() {
-                        let lib = gem.path().join("lib");
-                        if lib.is_dir() {
-                            paths.push(lib);
-                        }
+                let Ok(gems) = std::fs::read_dir(gem_root) else { continue };
+                for gem in gems.flatten() {
+                    let lib = gem.path().join("lib");
+                    if lib.is_dir() {
+                        paths.push(lib);
                     }
                 }
             }

@@ -12,12 +12,13 @@ Regent is a self-contained Rust binary with an **embedded Ruby runner (Artichoke
 
 1. **No shelling out to host Ruby tooling.** Do not introduce `Command::new("ruby")`, `Command::new("gem")`, `Command::new("bundle")`, `Command::new("rspec")`, `Command::new("rake")`, or similar in any Rust code path that runs during normal user operation.
 2. **All Ruby execution goes through Artichoke** via `RubyEnvironment` / `crate::ruby_interop`. If a feature needs Ruby, it must run inside the embedded interpreter.
-3. **Gems ship with Regent.** Required gems (rspec, rspec-core, rspec-expectations, rspec-support, rspec-puppet, puppetlabs_spec_helper, …) are distributed as a pre-built gem cache discovered in this order:
+3. **Gems live in a per-user bundle: `~/.regent/bundle`.** This is the single canonical location for installed gems; the embedded Ruby runner reads from it for every module. Required gems (rspec, rspec-core, rspec-expectations, rspec-support, …) are distributed as a pre-built gem cache discovered in this order:
    - `$REGENT_BUNDLED_GEMS`
+   - `~/.regent/bundle`
    - `<exe_dir>/bundled_gems`, `<exe_dir>/../share/regent/bundled_gems`, `<exe_dir>/../bundled_gems`
    - Dev fallbacks: `assets/bundled_gems`, `vendor/bundle` in the repo
    See [src/tester/bundled_gems.rs](src/tester/bundled_gems.rs).
-4. **`regent bootstrap` copies, it never installs from rubygems.org.** It populates the module's `vendor/bundle` from the Regent-shipped cache. If a gem is missing, that's a Regent packaging bug — fix the cache, do not ask the user to `gem install`.
+4. **`regent bootstrap` copies into `~/.regent/bundle`, never installs from rubygems.org.** It populates the per-user bundle from the Regent-shipped cache and writes `export REGENT_BUNDLED_GEMS=…` into the user's shell rc files. If a gem is missing from the shipped cache, that's a Regent packaging bug — fix the cache, do not ask the user to `gem install`.
 5. **Missing-dependency errors point at `regent bootstrap`.** When the embedded runner can't find rspec or another required gem, surface `missing_dependency_hint(...)` from [src/cli/bootstrap.rs](src/cli/bootstrap.rs). Never tell the user to install a host Ruby, gem, or bundler.
 6. **Test scripts and CI must work without host Ruby.** Any new tests, fixtures, or CI jobs that require Ruby must drive Artichoke through the regent binary — not call `bundle exec` / `rspec` directly.
 

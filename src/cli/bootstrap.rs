@@ -1,7 +1,9 @@
 use colored::*;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-use regent::tester::bundled_gems::ensure_bundled_gems;
+use regent::tester::bundled_gems::{ensure_user_bundle, user_bundle_dir};
 
 pub struct BootstrapCommand;
 
@@ -11,22 +13,24 @@ pub struct BootstrapCommand;
 const REQUIRED_GEMS: &[&str] = &["rspec", "rspec-core", "rspec-expectations", "rspec-support"];
 
 impl BootstrapCommand {
-    pub fn execute(path: &Path, _force: bool) -> anyhow::Result<()> {
-        let module_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+    pub fn execute(_path: &Path, _force: bool) -> anyhow::Result<()> {
+        let Some(bundle_dir) = user_bundle_dir() else {
+            return Err(anyhow::anyhow!(
+                "Could not determine the per-user Regent bundle dir (is $HOME set?)."
+            ));
+        };
 
         println!(
-            "{} Bootstrapping Regent dependencies in {}",
+            "{} Bootstrapping Regent into {}",
             "⚙".cyan(),
-            module_path.display()
+            bundle_dir.display()
         );
         println!(
             "  {} Regent uses its embedded Artichoke Ruby runtime — no host Ruby or Bundler required.",
             "•".cyan()
         );
 
-        match ensure_bundled_gems(&module_path) {
+        match ensure_user_bundle() {
             Ok(Some(src)) => println!(
                 "{} Installed Regent-shipped gem cache from {}",
                 "✓".green().bold(),
@@ -42,23 +46,31 @@ impl BootstrapCommand {
             Err(err) => {
                 return Err(anyhow::anyhow!(
                     "Could not install shipped gem cache into {}: {err}",
-                    module_path.join("vendor").join("bundle").display()
+                    bundle_dir.display()
                 ));
             }
         }
 
-        verify_required_gems(&module_path)?;
+        verify_required_gems(&bundle_dir)?;
+
+        update_shell_profiles(&bundle_dir);
 
         println!(
-            "{} Regent is ready. You can now run `regent test`.",
+            "{} Regent is ready. You can now run `regent test` in any module directory.",
             "✓".green().bold()
+        );
+        println!(
+            "  {} To activate REGENT_BUNDLED_GEMS in this shell, run: \
+             {}",
+            "•".cyan(),
+            format!("export REGENT_BUNDLED_GEMS={}", bundle_dir.display()).bold()
         );
         Ok(())
     }
 }
 
-fn verify_required_gems(module_path: &Path) -> anyhow::Result<()> {
-    let bundle_root = module_path.join("vendor").join("bundle").join("ruby");
+fn verify_required_gems(bundle_dir: &Path) -> anyhow::Result<()> {
+    let bundle_root = bundle_dir.join("ruby");
     let mut missing = Vec::new();
     for name in REQUIRED_GEMS {
         if !gem_present(&bundle_root, name) {
@@ -93,11 +105,49 @@ fn gem_present(bundle_root: &Path, gem_name: &str) -> bool {
     false
 }
 
+/// Append `export REGENT_BUNDLED_GEMS=<bundle_dir>` to each shell rc file
+/// found in $HOME, guarded by a marker line so we never duplicate it.
+fn update_shell_profiles(bundle_dir: &Path) {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+
+    let marker = "# >>> regent bundle <<<";
+    let block = format!(
+        "\n{marker}\nexport REGENT_BUNDLED_GEMS=\"{path}\"\n# <<< regent bundle >>>\n",
+        path = bundle_dir.display()
+    );
+
+    for rc in [".zshrc", ".bashrc", ".bash_profile", ".profile"] {
+        let rc_path = home.join(rc);
+        if !rc_path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(&rc_path) {
+            Ok(content) if content.contains(marker) => {
+                // Already configured.
+            }
+            Ok(_) => {
+                if let Ok(mut file) = OpenOptions::new().append(true).open(&rc_path) {
+                    if file.write_all(block.as_bytes()).is_ok() {
+                        println!(
+                            "{} Updated {} to export REGENT_BUNDLED_GEMS",
+                            "✓".green().bold(),
+                            rc_path.display()
+                        );
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 /// Hint shown by other commands when a Regent dependency is missing at runtime.
 pub fn missing_dependency_hint(what: &str) -> String {
     format!(
         "{what} was not found in the embedded Ruby's gem cache.\n\
-         Run `regent bootstrap` in your module directory to install Regent's required gems.\n\
+         Run `regent bootstrap` to install Regent's required gems into ~/.regent/bundle.\n\
          Regent uses its embedded Artichoke Ruby runtime — no host Ruby or Bundler is involved."
     )
 }

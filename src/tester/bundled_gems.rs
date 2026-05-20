@@ -1,82 +1,145 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fs_extra::dir::{copy, CopyOptions};
 use std::path::{Path, PathBuf};
 
 const BUNDLED_GEMS_DIRNAME: &str = "bundled_gems";
 
-pub fn ensure_bundled_gems(module_path: &Path) -> Result<Option<PathBuf>> {
-    let bundled_path = find_bundled_gems_path()?;
-    let Some(bundled_path) = bundled_path else {
+/// Per-user Regent bundle directory: `~/.regent/bundle`.
+///
+/// This is the canonical location where `regent bootstrap` installs gems and
+/// where the embedded Artichoke runner looks for them at test time. Sharing
+/// one cache across all modules avoids per-module copies and keeps Regent
+/// self-contained (no host Ruby/Bundler involvement).
+pub fn user_bundle_dir() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".regent").join("bundle"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Ensure the per-user bundle (`~/.regent/bundle`) is populated from the
+/// Regent-shipped gem cache. Returns the source path that was copied from,
+/// or `None` if no source cache could be located.
+pub fn ensure_user_bundle() -> Result<Option<PathBuf>> {
+    let Some(target) = user_bundle_dir() else {
         return Ok(None);
     };
-
-    let target = module_path.join("vendor").join("bundle");
-    std::fs::create_dir_all(&target)?;
-
+    let Some(source) = find_bundled_gems_source()? else {
+        return Ok(None);
+    };
+    if same_path(&source, &target) {
+        return Ok(Some(source));
+    }
+    std::fs::create_dir_all(&target).with_context(|| {
+        format!("creating Regent user bundle dir {}", target.display())
+    })?;
     let mut options = CopyOptions::new();
     options.overwrite = false;
     options.copy_inside = true;
     options.skip_exist = true;
-    copy(&bundled_path, &target, &options)?;
-
-    Ok(Some(bundled_path))
+    copy(&source, &target, &options)?;
+    Ok(Some(source))
 }
 
-fn find_bundled_gems_path() -> Result<Option<PathBuf>> {
-    if let Ok(path) = std::env::var("REGENT_BUNDLED_GEMS") {
-        let candidate = PathBuf::from(path);
-        if candidate.is_dir() {
-            return Ok(Some(candidate));
+/// Locations to search for an existing populated gem cache when running tests.
+/// Order: env override → per-user bundle → exe-relative install layouts →
+/// repo dev fallbacks.
+pub fn discover_bundle_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let push = |p: PathBuf, roots: &mut Vec<PathBuf>| {
+        if has_gem_layout(&p) && !roots.iter().any(|existing| same_path(existing, &p)) {
+            roots.push(p);
         }
-    }
+    };
 
+    if let Ok(env_path) = std::env::var("REGENT_BUNDLED_GEMS") {
+        push(PathBuf::from(env_path), &mut roots);
+    }
+    if let Some(user) = user_bundle_dir() {
+        push(user, &mut roots);
+    }
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidates = [
+            for candidate in [
                 exe_dir.join(BUNDLED_GEMS_DIRNAME),
                 exe_dir.join("..").join("share").join("regent").join(BUNDLED_GEMS_DIRNAME),
                 exe_dir.join("..").join(BUNDLED_GEMS_DIRNAME),
-            ];
-            for candidate in candidates {
-                if candidate.is_dir() {
+            ] {
+                push(candidate, &mut roots);
+            }
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push(manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME), &mut roots);
+    push(manifest_dir.join("vendor").join("bundle"), &mut roots);
+    roots
+}
+
+/// Find a source gem cache to copy *from* during bootstrap. This excludes the
+/// per-user bundle itself (which is the destination).
+fn find_bundled_gems_source() -> Result<Option<PathBuf>> {
+    if let Ok(env_path) = std::env::var("REGENT_BUNDLED_GEMS") {
+        let candidate = PathBuf::from(env_path);
+        if has_gem_layout(&candidate) {
+            return Ok(Some(candidate));
+        }
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            for candidate in [
+                exe_dir.join(BUNDLED_GEMS_DIRNAME),
+                exe_dir.join("..").join("share").join("regent").join(BUNDLED_GEMS_DIRNAME),
+                exe_dir.join("..").join(BUNDLED_GEMS_DIRNAME),
+            ] {
+                if has_gem_layout(&candidate) {
                     return Ok(Some(candidate));
                 }
             }
         }
     }
-
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dev_candidates = [
+    for candidate in [
         manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME),
         manifest_dir.join("vendor").join("bundle"),
-    ];
-    for candidate in dev_candidates {
+    ] {
         if has_gem_layout(&candidate) {
             return Ok(Some(candidate));
         }
     }
-
     Ok(None)
 }
 
-/// A directory counts as a Regent gem cache when it either contains gems
-/// directly (Bundler `ruby/x.y.z/gems/...` layout) or wraps that layout.
+/// A directory counts as a Regent gem cache only when it follows the Bundler
+/// `ruby/<x.y.z>/gems/...` layout. Bare or README-only directories don't
+/// count — otherwise we'd "succeed" while copying nothing useful.
 fn has_gem_layout(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
     let ruby_dir = dir.join("ruby");
-    if ruby_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&ruby_dir) {
-            for entry in entries.flatten() {
-                if entry.path().join("gems").is_dir() {
-                    return true;
-                }
-            }
+    let Ok(entries) = std::fs::read_dir(&ruby_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.path().join("gems").is_dir() {
+            return true;
         }
     }
-    // Allow REGENT_BUNDLED_GEMS to point at a populated-but-empty fallback.
-    std::fs::read_dir(dir)
-        .map(|mut it| it.next().is_some())
-        .unwrap_or(false)
+    false
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    let ac = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let bc = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    ac == bc
+}
+
+// ---------------------------------------------------------------------------
+// Legacy per-module API (deprecated): kept so the older code paths still
+// compile. New code should call `ensure_user_bundle` / `discover_bundle_roots`.
+// ---------------------------------------------------------------------------
+
+pub fn ensure_bundled_gems(_module_path: &Path) -> Result<Option<PathBuf>> {
+    ensure_user_bundle()
 }
