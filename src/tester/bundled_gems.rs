@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use fs_extra::dir::{copy, CopyOptions};
+use fs_extra::dir::{copy as copy_dir, CopyOptions};
+use fs_extra::file::{copy as copy_file, CopyOptions as FileCopyOptions};
 use std::path::{Path, PathBuf};
 
 const BUNDLED_GEMS_DIRNAME: &str = "bundled_gems";
@@ -54,12 +55,36 @@ pub fn ensure_user_bundle() -> Result<Option<PathBuf>> {
     std::fs::create_dir_all(&target).with_context(|| {
         format!("creating Regent user bundle dir {}", target.display())
     })?;
-    let mut options = CopyOptions::new();
-    options.overwrite = false;
-    options.copy_inside = true;
-    options.skip_exist = true;
-    copy(&source, &target, &options)?;
+    copy_contents_into(&source, &target)
+        .with_context(|| format!("copying gem cache {} -> {}", source.display(), target.display()))?;
     Ok(Some(source))
+}
+
+/// Copy each immediate child of `source` into `target`. fs_extra's
+/// `copy_inside = true` does NOT do this — it nests the source dir under the
+/// target. Doing it ourselves keeps the layout predictable.
+fn copy_contents_into(source: &Path, target: &Path) -> Result<()> {
+    let mut dir_opts = CopyOptions::new();
+    dir_opts.overwrite = false;
+    dir_opts.skip_exist = true;
+    dir_opts.copy_inside = false;
+
+    let mut file_opts = FileCopyOptions::new();
+    file_opts.overwrite = false;
+    file_opts.skip_exist = true;
+
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir(&from, target, &dir_opts)?;
+        } else {
+            let to = target.join(entry.file_name());
+            copy_file(&from, &to, &file_opts)?;
+        }
+    }
+    Ok(())
 }
 
 /// Locations to search for an existing populated gem cache when running tests.
