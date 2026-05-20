@@ -55,10 +55,11 @@ impl<'a> ArtichokeTestRunner<'a> {
         }
         eprintln!("Artichoke runner: map spec files");
         let virtual_spec_files = self.build_virtual_spec_files(&spec_files, &spec_dir);
+        let supported_os = self.load_supported_os();
         let ruby_script = if smoke {
             self.build_rspec_smoke_script(&load_paths)
         } else if use_regent {
-            self.build_regent_plan_script(&load_paths, &virtual_spec_files)
+            self.build_regent_plan_script(&load_paths, &virtual_spec_files, &supported_os)
         } else {
             self.build_rspec_script(&load_paths, &virtual_spec_files)
         };
@@ -109,15 +110,28 @@ impl<'a> ArtichokeTestRunner<'a> {
         };
 
         if use_regent {
-            let plan: RegentPlan = match serde_json::from_str(&output) {
-                Ok(plan) => plan,
-                Err(err) => {
-                    results.exit_code = 1;
-                    results.total = spec_files.len();
-                    results.failed = spec_files.len();
-                    results.stderr = format!("failed to parse regent plan: {err}\n{output}");
-                    return Ok(results);
+            let trimmed = output.trim_start();
+            let plan: RegentPlan = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                match serde_json::from_str(&output) {
+                    Ok(plan) => plan,
+                    Err(err) => {
+                        results.exit_code = 1;
+                        results.total = spec_files.len();
+                        results.failed = spec_files.len();
+                        results.stderr = format!("failed to parse regent plan: {err}\n{output}");
+                        return Ok(results);
+                    }
                 }
+            } else {
+                // The plan script's top-level rescue returns a non-JSON
+                // "ClassName: message\nbacktrace" string. Surface that as the
+                // Ruby error it is, instead of burying it inside a misleading
+                // JSON parse error.
+                results.exit_code = 1;
+                results.total = spec_files.len();
+                results.failed = spec_files.len();
+                results.stderr = output;
+                return Ok(results);
             };
             let runner = RegentSpecRunner::new(&self.config.module_path)?;
             let regent_results = runner.run_plan(plan)?;
@@ -152,6 +166,43 @@ impl<'a> ArtichokeTestRunner<'a> {
         results.stdout = summary.stdout;
         results.stderr = summary.stderr;
         Ok(results)
+    }
+
+    fn load_supported_os(&self) -> Vec<SupportedOs> {
+        let metadata_path = self.config.module_path.join("metadata.json");
+        let Ok(contents) = std::fs::read_to_string(&metadata_path) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            return Vec::new();
+        };
+        let Some(entries) = value.get("operatingsystem_support").and_then(|v| v.as_array())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let Some(os) = entry.get("operatingsystem").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let releases: Vec<String> = entry
+                .get("operatingsystemrelease")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if releases.is_empty() {
+                out.push(SupportedOs::new(os, ""));
+            } else {
+                for release in releases {
+                    out.push(SupportedOs::new(os, &release));
+                }
+            }
+        }
+        out
     }
 
     fn build_load_paths(&self) -> Vec<PathBuf> {
@@ -604,13 +655,19 @@ end
         )
     }
 
-    fn build_regent_plan_script(&self, _load_paths: &[PathBuf], spec_files: &[PathBuf]) -> String {
+    fn build_regent_plan_script(
+        &self,
+        _load_paths: &[PathBuf],
+        spec_files: &[PathBuf],
+        supported_os: &[SupportedOs],
+    ) -> String {
         let load_path_literal = format!("{:?}", VIRTUAL_ROOT);
         let spec_file_literals = spec_files
             .iter()
             .map(|path| format!("{:?}", path.display().to_string()))
             .collect::<Vec<String>>()
             .join(", ");
+        let supported_os_literal = render_supported_os_ruby(supported_os);
         format!(
             r##"
 begin
@@ -907,6 +964,15 @@ begin
   def after(*); end
   def subject(*); end
   def expect(*); end
+  # rspec-puppet-facts stub: returns an OS hash derived from the module's
+  # metadata.json (operatingsystem_support), so generated specs that wrap
+  # their examples in `on_supported_os.each do |os, os_facts|` produce one
+  # context per supported OS/release. Falls back to a single "default" entry
+  # if metadata.json is missing, malformed, or empty.
+  REGENT_SUPPORTED_OS = {supported_os_literal}
+  def on_supported_os(_opts = nil)
+    REGENT_SUPPORTED_OS
+  end
   def private_class_method(*); end
   def public_class_method(*); end
   def module_function(*); end
@@ -1494,6 +1560,71 @@ struct Summary {
     passed: usize,
     stdout: String,
     stderr: String,
+}
+
+#[derive(Debug, Clone)]
+struct SupportedOs {
+    os: String,
+    release: String,
+}
+
+impl SupportedOs {
+    fn new(os: &str, release: &str) -> Self {
+        Self {
+            os: os.to_string(),
+            release: release.to_string(),
+        }
+    }
+
+    fn osfamily(&self) -> &'static str {
+        match self.os.to_lowercase().as_str() {
+            "redhat" | "centos" | "rocky" | "almalinux" | "oraclelinux" | "fedora" | "scientific" => "RedHat",
+            "debian" | "ubuntu" => "Debian",
+            "sles" | "suse" | "opensuse" => "Suse",
+            "solaris" => "Solaris",
+            "freebsd" => "FreeBSD",
+            "openbsd" => "OpenBSD",
+            "darwin" => "Darwin",
+            "windows" => "windows",
+            "archlinux" | "arch" => "Archlinux",
+            "gentoo" => "Gentoo",
+            _ => "RedHat",
+        }
+    }
+
+    fn key(&self) -> String {
+        if self.release.is_empty() {
+            format!("{}-x86_64", self.os.to_lowercase())
+        } else {
+            format!("{}-{}-x86_64", self.os.to_lowercase(), self.release)
+        }
+    }
+}
+
+fn render_supported_os_ruby(entries: &[SupportedOs]) -> String {
+    if entries.is_empty() {
+        return "{ \"default\" => {} }".to_string();
+    }
+    let mut buf = String::from("{ ");
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        let key = ruby_string_literal(&entry.key());
+        let os = ruby_string_literal(&entry.os.to_lowercase());
+        let release = ruby_string_literal(&entry.release);
+        let family = ruby_string_literal(entry.osfamily());
+        buf.push_str(&format!(
+            "{key} => {{ \"os\" => {{ \"family\" => {family}, \"name\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }} }}, \"osfamily\" => {family}, \"operatingsystem\" => {os}, \"operatingsystemrelease\" => {release}, \"operatingsystemmajrelease\" => {release}, \"architecture\" => \"x86_64\", \"kernel\" => {family} }}"
+        ));
+    }
+    buf.push_str(" }");
+    buf
+}
+
+fn ruby_string_literal(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 impl Default for Summary {
