@@ -2,7 +2,7 @@
   "name": "regent",
   "displayName": "Regent - OpenVox Development Kit",
   "description": "Lightweight Puppet development toolkit powered by Rust. Build, test, and validate Puppet modules with speed.",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "publisher": "regent",
   "icon": "icon.png",
   "engines": {

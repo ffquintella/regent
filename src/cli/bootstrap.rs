@@ -11,7 +11,16 @@ pub struct BootstrapCommand;
 /// Gems Regent's embedded Artichoke Ruby runner needs in order to execute
 /// `regent test`. These are sourced from the Regent-shipped gem cache — we do
 /// not shell out to a host Ruby or Bundler.
-const REQUIRED_GEMS: &[&str] = &["rspec", "rspec-core", "rspec-expectations", "rspec-support"];
+const REQUIRED_GEMS: &[&str] = &[
+    "rspec",
+    "rspec-core",
+    "rspec-expectations",
+    "rspec-support",
+    "rspec-puppet",
+    "rspec-puppet-facts",
+    "facterdb",
+    "deep_merge",
+];
 
 impl BootstrapCommand {
     pub fn execute(_path: &Path, _force: bool) -> anyhow::Result<()> {

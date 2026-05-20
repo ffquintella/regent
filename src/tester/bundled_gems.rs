@@ -278,6 +278,49 @@ mod tests {
         assert!(!has_gem_layout(dir.path()));
     }
 
+    /// The Regent repo's own `vendor/bundle` is the canonical shipped cache.
+    /// If anything in REQUIRED_GEMS is missing from it, `regent bootstrap`
+    /// will fail for end users — fail the build instead so we notice first.
+    #[test]
+    fn shipped_vendor_bundle_contains_all_required_gems() {
+        let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("vendor")
+            .join("bundle");
+        if !has_gem_layout(&bundle) {
+            // No shipped cache in the dev tree — skip rather than fail; CI
+            // environments may build without it.
+            return;
+        }
+        let ruby_root = bundle.join("ruby");
+        let required = [
+            "rspec",
+            "rspec-core",
+            "rspec-expectations",
+            "rspec-support",
+            "rspec-puppet",
+            "rspec-puppet-facts",
+            "facterdb",
+            "deep_merge",
+        ];
+        let mut found: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for entry in fs::read_dir(&ruby_root).unwrap().flatten() {
+            let Ok(gems) = fs::read_dir(entry.path().join("gems")) else { continue };
+            for gem in gems.flatten() {
+                let Some(name) = gem.file_name().to_str().map(str::to_owned) else { continue };
+                for req in &required {
+                    if name.starts_with(&format!("{req}-")) {
+                        found.insert(req);
+                    }
+                }
+            }
+        }
+        let missing: Vec<&&str> = required.iter().filter(|r| !found.contains(*r)).collect();
+        assert!(
+            missing.is_empty(),
+            "shipped vendor/bundle is missing required gem(s): {missing:?}"
+        );
+    }
+
     #[test]
     fn verify_required_gems_layout_matches_copy_output() {
         // The verify step that runs during `regent bootstrap` reads
