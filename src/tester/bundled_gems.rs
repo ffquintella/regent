@@ -4,18 +4,38 @@ use std::path::{Path, PathBuf};
 
 const BUNDLED_GEMS_DIRNAME: &str = "bundled_gems";
 
-/// Per-user Regent bundle directory: `~/.regent/bundle`.
+/// Per-user Regent bundle directory.
+///
+/// Layout:
+/// - Unix / macOS: `$HOME/.regent/bundle`
+/// - Windows: `%APPDATA%\Regent\bundle` (falls back to `%LOCALAPPDATA%\Regent\bundle`,
+///   then `%USERPROFILE%\.regent\bundle`).
 ///
 /// This is the canonical location where `regent bootstrap` installs gems and
 /// where the embedded Artichoke runner looks for them at test time. Sharing
 /// one cache across all modules avoids per-module copies and keeps Regent
 /// self-contained (no host Ruby/Bundler involvement).
 pub fn user_bundle_dir() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".regent").join("bundle"))
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return Some(PathBuf::from(appdata).join("Regent").join("bundle"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return Some(PathBuf::from(local).join("Regent").join("bundle"));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile).join(".regent").join("bundle"));
+        }
+        None
+    } else {
+        home_dir().map(|h| h.join(".regent").join("bundle"))
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
 /// Ensure the per-user bundle (`~/.regent/bundle`) is populated from the

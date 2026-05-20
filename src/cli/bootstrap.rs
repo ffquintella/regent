@@ -2,6 +2,7 @@ use colored::*;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use regent::tester::bundled_gems::{ensure_user_bundle, user_bundle_dir};
 
@@ -53,18 +54,28 @@ impl BootstrapCommand {
 
         verify_required_gems(&bundle_dir)?;
 
-        update_shell_profiles(&bundle_dir);
+        persist_env_var(&bundle_dir);
 
         println!(
             "{} Regent is ready. You can now run `regent test` in any module directory.",
             "✓".green().bold()
         );
-        println!(
-            "  {} To activate REGENT_BUNDLED_GEMS in this shell, run: \
-             {}",
-            "•".cyan(),
-            format!("export REGENT_BUNDLED_GEMS={}", bundle_dir.display()).bold()
-        );
+        if cfg!(windows) {
+            println!(
+                "  {} To activate REGENT_BUNDLED_GEMS in this shell, run: {}",
+                "•".cyan(),
+                format!("set REGENT_BUNDLED_GEMS={}", bundle_dir.display()).bold()
+            );
+            println!(
+                "    (or open a new shell — `setx` has already updated the persistent value.)"
+            );
+        } else {
+            println!(
+                "  {} To activate REGENT_BUNDLED_GEMS in this shell, run: {}",
+                "•".cyan(),
+                format!("export REGENT_BUNDLED_GEMS={}", bundle_dir.display()).bold()
+            );
+        }
         Ok(())
     }
 }
@@ -105,9 +116,20 @@ fn gem_present(bundle_root: &Path, gem_name: &str) -> bool {
     false
 }
 
-/// Append `export REGENT_BUNDLED_GEMS=<bundle_dir>` to each shell rc file
-/// found in $HOME, guarded by a marker line so we never duplicate it.
-fn update_shell_profiles(bundle_dir: &Path) {
+/// Persist REGENT_BUNDLED_GEMS for future shells.
+///
+/// On Unix/macOS: append a guarded `export REGENT_BUNDLED_GEMS=…` block to
+/// every shell rc file found under `$HOME`.
+/// On Windows: use `setx` to write the value to the user-level environment.
+fn persist_env_var(bundle_dir: &Path) {
+    if cfg!(windows) {
+        persist_env_var_windows(bundle_dir);
+    } else {
+        persist_env_var_unix(bundle_dir);
+    }
+}
+
+fn persist_env_var_unix(bundle_dir: &Path) {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
@@ -124,9 +146,7 @@ fn update_shell_profiles(bundle_dir: &Path) {
             continue;
         }
         match std::fs::read_to_string(&rc_path) {
-            Ok(content) if content.contains(marker) => {
-                // Already configured.
-            }
+            Ok(content) if content.contains(marker) => {}
             Ok(_) => {
                 if let Ok(mut file) = OpenOptions::new().append(true).open(&rc_path) {
                     if file.write_all(block.as_bytes()).is_ok() {
@@ -139,6 +159,37 @@ fn update_shell_profiles(bundle_dir: &Path) {
                 }
             }
             Err(_) => {}
+        }
+    }
+}
+
+fn persist_env_var_windows(bundle_dir: &Path) {
+    let value = bundle_dir.display().to_string();
+    let result = Command::new("setx")
+        .arg("REGENT_BUNDLED_GEMS")
+        .arg(&value)
+        .status();
+    match result {
+        Ok(status) if status.success() => {
+            println!(
+                "{} Set user environment variable REGENT_BUNDLED_GEMS via `setx`",
+                "✓".green().bold()
+            );
+        }
+        Ok(status) => {
+            eprintln!(
+                "{} `setx` returned exit code {:?}; set REGENT_BUNDLED_GEMS={} manually.",
+                "!".yellow(),
+                status.code(),
+                value
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "{} could not invoke `setx` ({err}); set REGENT_BUNDLED_GEMS={} manually.",
+                "!".yellow(),
+                value
+            );
         }
     }
 }

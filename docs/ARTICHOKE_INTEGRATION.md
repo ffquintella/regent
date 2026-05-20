@@ -16,8 +16,16 @@ Regent is a self-contained Rust binary with an **embedded Ruby runner (Artichoke
 Rules contributors and AI agents must follow:
 
 - **Do not shell out to host Ruby tooling.** No `Command::new("ruby")`, `Command::new("gem")`, `Command::new("bundle")`, or `Command::new("rspec")` from Rust code paths used during normal operation.
-- **Gem dependencies ship with Regent and live in a per-user bundle (`~/.regent/bundle`).** The embedded runner reads from there for every module. Required gems (rspec, rspec-core, rspec-expectations, rspec-support, …) come from a pre-built gem cache discovered via `REGENT_BUNDLED_GEMS`, `~/.regent/bundle`, the binary's neighboring `share/regent/bundled_gems`, or — in dev — `assets/bundled_gems`/`vendor/bundle` in the repo.
-- **`regent bootstrap` copies into `~/.regent/bundle` — never installs from rubygems.org.** It also writes `export REGENT_BUNDLED_GEMS=…` into the user's shell rc files (`.zshrc`, `.bashrc`, `.bash_profile`, `.profile`) under a guarded `# >>> regent bundle <<<` block. If a gem is missing from the shipped cache, that's a packaging bug, not a user-fixable one.
+- **Gem dependencies ship with Regent and live in a per-user bundle.** The embedded runner reads from there for every module. Location is OS-aware:
+  - Unix / macOS: `$HOME/.regent/bundle`
+  - Windows: `%APPDATA%\Regent\bundle` (falls back to `%LOCALAPPDATA%\Regent\bundle`, then `%USERPROFILE%\.regent\bundle`)
+
+  Required gems (rspec, rspec-core, rspec-expectations, rspec-support, …) come from a pre-built gem cache discovered via `REGENT_BUNDLED_GEMS`, the per-user bundle, the binary's neighboring `share/regent/bundled_gems`, or — in dev — `assets/bundled_gems`/`vendor/bundle` in the repo.
+- **`regent bootstrap` copies into the per-user bundle — never installs from rubygems.org.** It also persists `REGENT_BUNDLED_GEMS`:
+  - Unix/macOS: appends a guarded `# >>> regent bundle <<<` block to `~/.zshrc`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`.
+  - Windows: calls `setx REGENT_BUNDLED_GEMS …` to write the user-level environment variable (takes effect in new shells).
+
+  If a gem is missing from the shipped cache, that's a packaging bug, not a user-fixable one.
 - **Errors point at `regent bootstrap`.** When the embedded runner can't find rspec or another required gem, the user is told to run `regent bootstrap` — never to install gems on the host.
 
 Anything that requires host Ruby is a regression. If a new feature appears to need it, find an Artichoke-compatible solution or ship the gem in the bundled cache.
