@@ -39,6 +39,9 @@ enum Commands {
 
         #[arg(long, help = "Module description")]
         description: Option<String>,
+
+        #[arg(long, help = "Short summary for metadata.json (required by Puppet)")]
+        summary: Option<String>,
     },
 
     /// Generate component (class, task, plan, etc)
@@ -147,12 +150,19 @@ fn main() -> anyhow::Result<()> {
             author,
             license,
             description,
+            summary,
         } => {
             println!(
                 "{}",
                 format!("Creating new Puppet module: {}", name).cyan().bold()
             );
-            NewCommand::execute(&name, author.as_deref(), &license, description.as_deref())?;
+            NewCommand::execute(
+                &name,
+                author.as_deref(),
+                &license,
+                description.as_deref(),
+                summary.as_deref(),
+            )?;
         }
 
         Commands::Generate(subcmd) => match subcmd {

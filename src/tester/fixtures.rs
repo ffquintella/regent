@@ -463,8 +463,8 @@ fn install_stub(fixture_path: &Path, module_name: &str) -> Result<()> {
     fs::write(
         &metadata_path,
         format!(
-            r#"{{"name":"{}","version":"1.0.0","dependencies":[]}}"#,
-            module_name
+            r#"{{"name":"{name}","version":"1.0.0","summary":"Regent stub fixture for {name}","dependencies":[]}}"#,
+            name = module_name
         ),
     )?;
     Ok(())
