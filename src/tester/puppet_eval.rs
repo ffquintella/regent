@@ -2148,6 +2148,53 @@ mod tests {
     }
 
     #[test]
+    fn loader_picks_up_sibling_manifest_files() {
+        // Puppet's manifest autoloader resolves `mod::foo` to `manifests/foo.pp`.
+        // The loader must read every .pp in the manifests dir, not just init.pp.
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(manifests.join("init.pp"), "class mymod { include mymod::foo }").unwrap();
+        std::fs::write(
+            manifests.join("foo.pp"),
+            "class mymod::foo { file { '/etc/sibling-loaded': ensure => file } }",
+        )
+        .unwrap();
+
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        assert!(
+            evaluator.class_names().iter().any(|n| n == "mymod::foo"),
+            "sibling manifests/foo.pp must be autoloaded, got: {:?}",
+            evaluator.class_names()
+        );
+        let catalog = evaluator
+            .evaluate_class("mymod", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .expect("evaluating mymod (which includes mymod::foo) must succeed");
+        assert!(catalog.contains("file", "/etc/sibling-loaded"));
+    }
+
+    #[test]
+    fn loader_picks_up_nested_manifest_files() {
+        // `mod::sub::leaf` should autoload from manifests/sub/leaf.pp.
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        std::fs::create_dir_all(manifests.join("sub")).unwrap();
+        std::fs::write(manifests.join("init.pp"), "class mymod { include mymod::sub::leaf }").unwrap();
+        std::fs::write(
+            manifests.join("sub").join("leaf.pp"),
+            "class mymod::sub::leaf { file { '/etc/nested-loaded': ensure => file } }",
+        )
+        .unwrap();
+
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        assert!(
+            evaluator.class_names().iter().any(|n| n == "mymod::sub::leaf"),
+            "nested manifests/sub/leaf.pp must be autoloaded, got: {:?}",
+            evaluator.class_names()
+        );
+    }
+
+    #[test]
     fn epp_call_with_trailing_comma() {
         let manifest = r#"
             class foo {
