@@ -385,6 +385,9 @@ enum Expr {
         subject: Box<Expr>,
         cases: Vec<(Expr, Expr)>,
     },
+    /// Boolean/comparison expression used in value position (e.g. RHS of
+    /// `$x = $a and $b == 'foo'`). Evaluates to a `Bool`.
+    Condition(Box<Cond>),
 }
 
 #[derive(Debug, Clone)]
@@ -650,6 +653,7 @@ impl<'a> EvalContext<'a> {
                 PuppetValue::Hash(map)
             }
             Expr::Var(var) => self.resolve_var(var),
+            Expr::Condition(cond) => PuppetValue::Bool(self.eval_cond(cond)?),
             Expr::MethodCall { target, name } => {
                 let value = self.eval_expr(target)?;
                 match name.as_str() {
@@ -968,7 +972,7 @@ impl<'a> PuppetParser<'a> {
         if self.peek_kind() == Some(TokenKind::Var) {
             let name = self.expect_var()?;
             if self.consume(TokenKind::Equal) {
-                let expr = self.parse_expr()?;
+                let expr = self.parse_value_expr()?;
                 return Ok(Some(Stmt::VarAssign(name, expr)));
             }
         }
@@ -1086,6 +1090,19 @@ impl<'a> PuppetParser<'a> {
             return Ok(Cond::In { needle: left, haystack: right });
         }
         Ok(Cond::Truthy(left))
+    }
+
+    /// Parse an expression that may include boolean (`and`/`or`) and
+    /// comparison (`==`, `!=`, `=~`, `!~`, `in`) operators — used in value
+    /// positions like the RHS of a variable assignment. Falls through to a
+    /// plain `parse_expr` when no boolean/comparison operator is present, so
+    /// the resulting `Expr` tree stays minimal for simple cases.
+    fn parse_value_expr(&mut self) -> Result<Expr> {
+        let cond = self.parse_cond()?;
+        Ok(match cond {
+            Cond::Truthy(expr) => expr,
+            other => Expr::Condition(Box::new(other)),
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
@@ -1316,6 +1333,7 @@ impl Expr {
             Expr::FunctionCall { name, .. } => name.clone(),
             Expr::Regex(pattern) => pattern.clone(),
             Expr::Selector { .. } => "selector".to_string(),
+            Expr::Condition(_) => "condition".to_string(),
         }
     }
 
@@ -2059,6 +2077,30 @@ mod tests {
         assert!(catalog.contains("file", "/etc/and-true"));
         assert!(catalog.contains("file", "/etc/or-true"));
         assert!(!catalog.contains("file", "/etc/or-false"));
+    }
+
+    #[test]
+    fn assignment_with_boolean_and_comparison_chain() {
+        // RHS of `$x = ...` may use `and`/`or` and comparisons. Previously the
+        // parser only accepted bare expressions here, so multi-clause gates
+        // had to be rewritten as `if`/`else` blocks.
+        let catalog = eval_with_osfamily(
+            r#"
+                class foo {
+                  $is_red = $::osfamily == 'RedHat' and $::osfamily =~ /Red/
+                  $is_other = $::osfamily == 'Debian' or $::osfamily == 'Suse'
+                  if $is_red {
+                    file { '/etc/red': ensure => file }
+                  }
+                  if $is_other {
+                    file { '/etc/other': ensure => file }
+                  }
+                }
+            "#,
+            "RedHat",
+        );
+        assert!(catalog.contains("file", "/etc/red"));
+        assert!(!catalog.contains("file", "/etc/other"));
     }
 
     #[test]
