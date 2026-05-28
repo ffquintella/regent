@@ -1517,15 +1517,52 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_string(&mut self, quote: char) -> String {
+        // Skip opening quote.
         self.index += 1;
-        let start = self.index;
+        let mut out = String::new();
         while let Some(ch) = self.peek() {
-            self.index += 1;
             if ch == quote {
+                self.index += 1;
                 break;
             }
+            if ch == '\\' {
+                if let Some(next) = self.peek_next() {
+                    self.index += 2;
+                    if quote == '"' {
+                        match next {
+                            'n' => out.push('\n'),
+                            't' => out.push('\t'),
+                            'r' => out.push('\r'),
+                            's' => out.push(' '),
+                            '0' => out.push('\0'),
+                            '"' | '\\' | '$' => out.push(next),
+                            other => {
+                                out.push('\\');
+                                out.push(other);
+                            }
+                        }
+                    } else {
+                        // Single-quoted: only '\\' and "\'" are escapes; otherwise the
+                        // backslash is preserved literally.
+                        match next {
+                            '\\' | '\'' => out.push(next),
+                            other => {
+                                out.push('\\');
+                                out.push(other);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Trailing backslash at EOF — keep it and stop.
+                out.push('\\');
+                self.index += 1;
+                break;
+            }
+            out.push(ch);
+            self.index += 1;
         }
-        self.input[start..self.index - 1].to_string()
+        out
     }
 
     fn consume_variable(&mut self) -> String {
@@ -1892,6 +1929,29 @@ mod tests {
         fs::create_dir_all(&manifests).unwrap();
         fs::write(manifests.join(format!("{name}.pp")), manifest).unwrap();
         dir
+    }
+
+    #[test]
+    fn double_quoted_string_handles_escaped_quote_and_braces() {
+        // Escaped quotes inside `"..."` must not terminate the string early —
+        // otherwise literal `}` characters inside an embedded JSON blob (e.g.
+        // a `concat::fragment` content) tokenize as RBrace and break parsing.
+        let manifest = r#"
+            class foo {
+              $payload = "{\"k\": \"v\", \"nested\": {\"a\": 1}}"
+              notify { $payload: }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("manifest with escaped quotes and embedded braces must parse");
+        assert!(catalog.contains("notify", "{\"k\": \"v\", \"nested\": {\"a\": 1}}"));
     }
 
     #[test]
