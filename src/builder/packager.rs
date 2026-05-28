@@ -141,35 +141,95 @@ impl TarballBuilder {
         Ok(())
     }
 
-    /// Check if a path should be ignored based on ignore patterns
+    /// Check if a path should be ignored based on ignore patterns.
+    ///
+    /// Patterns follow gitignore-style semantics:
+    /// - A leading `/` anchors the pattern to the module root (relative path start).
+    /// - A trailing `/` matches directories only (but here we also match anything under it).
+    /// - `*` matches any sequence of characters within a path segment.
+    /// - Without a leading `/`, the pattern matches at any depth.
     fn should_ignore(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-        
+        // Normalize to forward slashes so patterns work on Windows too.
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        let path_str = path_str.trim_start_matches("./");
+
         for pattern in &self.ignore_patterns {
-            // Simple pattern matching (supports * wildcards and directory matches)
-            if pattern.ends_with('/') {
-                // Directory pattern
-                let dir_pattern = pattern.trim_end_matches('/');
-                if path_str.contains(dir_pattern) {
-                    return true;
+            let (anchored, pat) = if let Some(rest) = pattern.strip_prefix('/') {
+                (true, rest)
+            } else {
+                (false, pattern.as_str())
+            };
+
+            let (is_dir_pattern, pat) = if let Some(rest) = pat.strip_suffix('/') {
+                (true, rest)
+            } else {
+                (false, pat)
+            };
+
+            if pat.is_empty() {
+                continue;
+            }
+
+            if pat.contains('*') || pat.contains('?') {
+                // Translate glob to regex. `*` matches anything except `/` (single segment);
+                // `**` matches across segments.
+                let mut regex_src = String::new();
+                regex_src.push('^');
+                if !anchored {
+                    // Allow matching at any depth.
+                    regex_src.push_str("(?:.*/)?");
                 }
-            } else if pattern.contains('*') {
-                // Wildcard pattern (basic support)
-                let pattern_regex = pattern.replace(".", "\\.").replace("*", ".*");
-                if regex::Regex::new(&pattern_regex)
-                    .map(|re| re.is_match(&path_str))
-                    .unwrap_or(false)
+                let mut chars = pat.chars().peekable();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '*' => {
+                            if chars.peek() == Some(&'*') {
+                                chars.next();
+                                regex_src.push_str(".*");
+                            } else {
+                                regex_src.push_str("[^/]*");
+                            }
+                        }
+                        '?' => regex_src.push_str("[^/]"),
+                        '.' | '+' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '\\' => {
+                            regex_src.push('\\');
+                            regex_src.push(c);
+                        }
+                        _ => regex_src.push(c),
+                    }
+                }
+                if is_dir_pattern {
+                    regex_src.push_str("(?:/.*)?$");
+                } else {
+                    regex_src.push_str("(?:/.*)?$");
+                }
+                if let Ok(re) = regex::Regex::new(&regex_src) {
+                    if re.is_match(path_str) {
+                        return true;
+                    }
+                }
+            } else if anchored {
+                // Anchored literal: must match at the start of the relative path,
+                // either exactly or as a path prefix.
+                if path_str == pat
+                    || path_str.starts_with(&format!("{}/", pat))
                 {
                     return true;
                 }
             } else {
-                // Exact match or contains
-                if path_str.contains(pattern) {
+                // Unanchored literal: match any path segment equal to `pat`,
+                // or any subtree rooted at such a segment.
+                let matches_segment = path_str == pat
+                    || path_str.starts_with(&format!("{}/", pat))
+                    || path_str.ends_with(&format!("/{}", pat))
+                    || path_str.contains(&format!("/{}/", pat));
+                if matches_segment {
                     return true;
                 }
             }
+            let _ = is_dir_pattern; // semantics: we match files under a dir pattern too
         }
-        
+
         false
     }
 
@@ -477,6 +537,31 @@ mod tests {
         assert!(builder.should_ignore(Path::new(".git/config")));
         assert!(builder.should_ignore(Path::new("pkg/module.tar.gz")));
         assert!(!builder.should_ignore(Path::new("manifests/init.pp")));
+    }
+
+    #[test]
+    fn test_should_ignore_leading_slash_anchored() {
+        // Regression: anchored gitignore-style patterns like `/vendor/` and `/bin/`
+        // must actually filter the corresponding top-level directories.
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join(".pdkignore"),
+            "/vendor/\n/bin/\n/spec/fixtures/modules/*\n/pkg/\n",
+        ).unwrap();
+
+        let config = PackagerConfig::new(temp_dir.path());
+        let builder = TarballBuilder::new(config).unwrap();
+
+        assert!(builder.should_ignore(Path::new("vendor/bundle/ruby/foo.rb")));
+        assert!(builder.should_ignore(Path::new("bin/something")));
+        assert!(builder.should_ignore(Path::new("pkg/module.tar.gz")));
+        assert!(builder.should_ignore(Path::new("spec/fixtures/modules/stdlib")));
+        // Anchored: must not match nested occurrences.
+        assert!(!builder.should_ignore(Path::new("manifests/bin/file.pp")));
+        assert!(!builder.should_ignore(Path::new("files/vendor/x.txt")));
+        // Real module content stays in.
+        assert!(!builder.should_ignore(Path::new("manifests/init.pp")));
+        assert!(!builder.should_ignore(Path::new("metadata.json")));
     }
 
     #[test]
