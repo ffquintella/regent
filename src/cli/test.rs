@@ -15,6 +15,8 @@ impl TestCommand {
         pattern: Option<&str>,
         report: Option<&Path>,
         detail: bool,
+        coverage: bool,
+        coverage_dir: Option<&Path>,
     ) -> anyhow::Result<()> {
         let effective_pattern = pattern.unwrap_or("spec/{aliases,classes,defines,functions,hosts,integration,plans,tasks,type_aliases,types,unit}/**/*_spec.rb");
         println!("{} Running tests with pattern: {}", "⚙".cyan(), effective_pattern);
@@ -40,8 +42,9 @@ impl TestCommand {
         // Auto-prep fixtures if .fixtures.yml is present and `spec/fixtures/modules/` is bare.
         prep_fixtures_if_needed(&module_path);
 
-        let config = TestConfig::new(module_path, TestType::Unit)
-            .with_pattern(Some(effective_pattern.to_string()));
+        let config = TestConfig::new(module_path.clone(), TestType::Unit)
+            .with_pattern(Some(effective_pattern.to_string()))
+            .coverage(coverage);
         let tester = ModuleTester::new(config);
         let results = tester.run_tests()?;
 
@@ -71,6 +74,56 @@ impl TestCommand {
                 if let Some(message) = &test_case.message {
                     println!("    {}", message);
                 }
+            }
+        }
+
+        if coverage {
+            if let Some(report) = &results.coverage {
+                let dir = coverage_dir
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| module_path.join("coverage"));
+                if let Err(err) = std::fs::create_dir_all(&dir) {
+                    eprintln!("warning: could not create coverage dir {}: {err}", dir.display());
+                } else {
+                    let json_path = dir.join("coverage.json");
+                    match serde_json::to_string_pretty(report) {
+                        Ok(json) => {
+                            if let Err(err) = std::fs::write(&json_path, json) {
+                                eprintln!(
+                                    "warning: could not write {}: {err}",
+                                    json_path.display()
+                                );
+                            } else {
+                                println!(
+                                    "{} Coverage report written to {}",
+                                    "✓".green().bold(),
+                                    json_path.display()
+                                );
+                            }
+                        }
+                        Err(err) => eprintln!("warning: serializing coverage report: {err}"),
+                    }
+                }
+                let touched = report
+                    .file_coverage
+                    .values()
+                    .filter(|f| f.lines_covered > 0)
+                    .count();
+                let total_files = report.file_coverage.len();
+                println!(
+                    "{} Coverage: {:.1}% ({}/{} lines, {}/{} manifests touched)",
+                    "ℹ".cyan(),
+                    report.overall_coverage,
+                    report.lines_covered,
+                    report.lines_total,
+                    touched,
+                    total_files,
+                );
+            } else {
+                println!(
+                    "{}",
+                    "Coverage requested but the runner produced no report.".yellow()
+                );
             }
         }
 

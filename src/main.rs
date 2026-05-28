@@ -76,6 +76,16 @@ enum Commands {
 
         #[arg(long, help = "Show detailed test case output")]
         detail: bool,
+
+        #[arg(long, help = "Emit a code coverage report for the module's manifests/")]
+        coverage: bool,
+
+        #[arg(
+            long,
+            help = "Directory to write coverage report into (default: <module>/coverage)",
+            requires = "coverage"
+        )]
+        coverage_dir: Option<PathBuf>,
     },
 
     /// Install required gems and runtime dependencies for Regent
@@ -202,9 +212,18 @@ fn main() -> anyhow::Result<()> {
             pattern,
             report,
             detail,
+            coverage,
+            coverage_dir,
         } => {
             println!("{}", format!("Running tests at: {:?}", path).cyan());
-            TestCommand::execute(&path, pattern.as_deref(), report.as_deref(), detail)?;
+            TestCommand::execute(
+                &path,
+                pattern.as_deref(),
+                report.as_deref(),
+                detail,
+                coverage,
+                coverage_dir.as_deref(),
+            )?;
         }
 
         Commands::Bootstrap { path, force } => {

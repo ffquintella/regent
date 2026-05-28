@@ -153,6 +153,8 @@ pub struct TestResults {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coverage: Option<CoverageReport>,
 }
 
 impl TestResults {
@@ -169,6 +171,7 @@ impl TestResults {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: 0,
+            coverage: None,
         }
     }
 

@@ -1022,6 +1022,22 @@ begin
   def contain_docker_network(title)
     ContainMatcher.new("docker_network", title.to_s)
   end
+  # Dynamic fallback for `contain_<type>` matchers so that defined types
+  # (e.g. `contain_apache__vhost('foo')` -> `apache::vhost`) and any other
+  # resource type not hardcoded above produce a working ContainMatcher.
+  # `__` in the method name maps to `::` in the resource type, matching the
+  # rspec-puppet convention.
+  def method_missing(name, *args, &block)
+    str = name.to_s
+    if str.start_with?("contain_") && args.length == 1
+      resource_type = str.sub("contain_", "").gsub("__", "::")
+      return ContainMatcher.new(resource_type, args.first.to_s)
+    end
+    super
+  end
+  def respond_to_missing?(name, include_private = false)
+    name.to_s.start_with?("contain_") || super
+  end
   def before(*); end
   def after(*); end
   def subject(*); end
