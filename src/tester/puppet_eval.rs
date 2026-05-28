@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PuppetValue {
@@ -117,6 +117,14 @@ pub struct PuppetEvaluator {
     module: PuppetModule,
 }
 
+/// Names of Puppet classes and defines actually entered during a single
+/// catalog evaluation. Used to attribute coverage back to source files.
+#[derive(Debug, Default, Clone)]
+pub struct EvaluationTrace {
+    pub classes: HashSet<String>,
+    pub defines: HashSet<String>,
+}
+
 impl PuppetEvaluator {
     pub fn new(module_path: &Path) -> Result<Self> {
         let fixtures = discover_fixture_module_paths(module_path);
@@ -134,15 +142,37 @@ impl PuppetEvaluator {
         names
     }
 
+    /// `.pp` files discovered under the primary module's `manifests/` tree.
+    /// Fixture modules are excluded — coverage only reports on code owned by
+    /// the module under test.
+    pub fn primary_manifest_files(&self) -> &[PathBuf] {
+        &self.module.primary_manifest_files
+    }
+
+    /// Returns the source file that defined the named class, if any.
+    /// `None` for classes that came in via a fixture module (no origin recorded
+    /// for fixtures) or for unknown names.
+    pub fn class_origin_file(&self, name: &str) -> Option<&Path> {
+        self.module
+            .classes
+            .get(name)
+            .and_then(|def| def.origin_file.as_deref())
+    }
+
+    pub fn define_origin_file(&self, name: &str) -> Option<&Path> {
+        self.module
+            .defines
+            .get(name)
+            .and_then(|def| def.origin_file.as_deref())
+    }
+
     pub fn evaluate_class(
         &self,
         name: &str,
         facts: &PuppetValue,
         params: &PuppetValue,
     ) -> Result<PuppetCatalog> {
-        let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
-        ctx.evaluate_class(name)?;
-        Ok(ctx.catalog)
+        self.evaluate_class_traced(name, facts, params).map(|(c, _)| c)
     }
 
     pub fn evaluate_define(
@@ -152,9 +182,33 @@ impl PuppetEvaluator {
         facts: &PuppetValue,
         params: &PuppetValue,
     ) -> Result<PuppetCatalog> {
+        self.evaluate_define_traced(name, title, facts, params)
+            .map(|(c, _)| c)
+    }
+
+    pub fn evaluate_class_traced(
+        &self,
+        name: &str,
+        facts: &PuppetValue,
+        params: &PuppetValue,
+    ) -> Result<(PuppetCatalog, EvaluationTrace)> {
+        let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
+        ctx.evaluate_class(name)?;
+        let catalog = std::mem::take(&mut ctx.catalog);
+        Ok((catalog, ctx.into_trace()))
+    }
+
+    pub fn evaluate_define_traced(
+        &self,
+        name: &str,
+        title: &str,
+        facts: &PuppetValue,
+        params: &PuppetValue,
+    ) -> Result<(PuppetCatalog, EvaluationTrace)> {
         let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
         ctx.evaluate_define(name, title)?;
-        Ok(ctx.catalog)
+        let catalog = std::mem::take(&mut ctx.catalog);
+        Ok((catalog, ctx.into_trace()))
     }
 }
 
@@ -166,6 +220,10 @@ struct PuppetModule {
     /// filesystem path, so `epp('foo/bar.epp')` can resolve to
     /// `<paths["foo"]>/templates/bar.epp`.
     module_paths: HashMap<String, std::path::PathBuf>,
+    /// All `.pp` manifest files discovered under the primary module's
+    /// manifests/ tree (fixture modules excluded). Used to compute the coverage
+    /// denominator.
+    primary_manifest_files: Vec<PathBuf>,
 }
 
 impl PuppetModule {
@@ -178,7 +236,8 @@ impl PuppetModule {
         for fixture_path in fixture_module_paths {
             register_module_path(&mut module_paths, fixture_path);
             // Be tolerant: a single broken fixture should not block the run.
-            if let Err(err) = load_manifests_into(fixture_path, &mut classes, &mut defines) {
+            let mut sink = Vec::new();
+            if let Err(err) = load_manifests_into(fixture_path, &mut classes, &mut defines, &mut sink) {
                 eprintln!(
                     "warning: skipping fixture module {}: {}",
                     fixture_path.display(),
@@ -188,10 +247,12 @@ impl PuppetModule {
         }
 
         register_module_path(&mut module_paths, &module_path.to_path_buf());
-        load_manifests_into(module_path, &mut classes, &mut defines)
+        let mut primary_manifest_files = Vec::new();
+        load_manifests_into(module_path, &mut classes, &mut defines, &mut primary_manifest_files)
             .with_context(|| format!("load manifests for {}", module_path.display()))?;
+        primary_manifest_files.sort();
 
-        Ok(Self { classes, defines, module_paths })
+        Ok(Self { classes, defines, module_paths, primary_manifest_files })
     }
 }
 
@@ -236,6 +297,7 @@ fn load_manifests_into(
     module_path: &Path,
     classes: &mut HashMap<String, ClassDef>,
     defines: &mut HashMap<String, DefineDef>,
+    discovered_files: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let manifest_dir = module_path.join("manifests");
     if !manifest_dir.exists() {
@@ -255,18 +317,31 @@ fn load_manifests_into(
             if path.extension().and_then(|ext| ext.to_str()) != Some("pp") {
                 continue;
             }
+            discovered_files.push(path.clone());
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("read manifest {}", path.display()))?;
             let mut parser = PuppetParser::new(&content);
             let defs = parser.parse_definitions().with_context(|| {
                 format!("parse manifest {}:{}", path.display(), parser.position())
             })?;
+            for warning in &parser.warnings {
+                let (line, col) = source_line_col(&content, warning.offset);
+                eprintln!(
+                    "warning: {}:{}:{}: {}",
+                    path.display(),
+                    line,
+                    col,
+                    warning.message
+                );
+            }
             for def in defs {
                 match def {
-                    PuppetDef::Class(def) => {
+                    PuppetDef::Class(mut def) => {
+                        def.origin_file = Some(path.clone());
                         classes.insert(def.name.clone(), def);
                     }
-                    PuppetDef::Define(def) => {
+                    PuppetDef::Define(mut def) => {
+                        def.origin_file = Some(path.clone());
                         defines.insert(def.name.clone(), def);
                     }
                 }
@@ -306,6 +381,7 @@ struct ClassDef {
     params: HashMap<String, Expr>,
     parent: Option<String>,
     body: Vec<Stmt>,
+    origin_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +389,7 @@ struct DefineDef {
     name: String,
     params: HashMap<String, Expr>,
     body: Vec<Stmt>,
+    origin_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -341,6 +418,10 @@ enum Stmt {
         default: Vec<Stmt>,
     },
     Fail(String),
+    /// Placeholder for statements the parser recognises and consumes but the
+    /// evaluator does not need to act on (e.g. resource collectors
+    /// `Foo<| ... |>`).
+    Noop,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +443,10 @@ enum CompareOp {
     NotEq,
     Match,
     NotMatch,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +473,22 @@ enum Expr {
     /// Boolean/comparison expression used in value position (e.g. RHS of
     /// `$x = $a and $b == 'foo'`). Evaluates to a `Bool`.
     Condition(Box<Cond>),
+    /// Binary arithmetic (`+ - * /`). For integer operands the result is
+    /// computed; otherwise we fall back to the left-hand value so the parse
+    /// succeeds and the evaluator stays usable for downstream code paths.
+    Arith {
+        op: ArithOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +506,7 @@ struct EvalContext<'a> {
     in_progress: Vec<String>,
     class_stack: Vec<String>,
     evaluated_classes: HashSet<String>,
+    evaluated_defines: HashSet<String>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -418,6 +520,14 @@ impl<'a> EvalContext<'a> {
             in_progress: Vec::new(),
             class_stack: Vec::new(),
             evaluated_classes: HashSet::new(),
+            evaluated_defines: HashSet::new(),
+        }
+    }
+
+    fn into_trace(self) -> EvaluationTrace {
+        EvaluationTrace {
+            classes: self.evaluated_classes,
+            defines: self.evaluated_defines,
         }
     }
 
@@ -463,6 +573,41 @@ impl<'a> EvalContext<'a> {
         Ok(())
     }
 
+    /// Expand a defined-type resource declared inside a class/define body.
+    /// Saves/restores the surrounding scope's vars so this works recursively.
+    fn instantiate_define(
+        &mut self,
+        name: &str,
+        title: &str,
+        attrs: &HashMap<String, PuppetValue>,
+    ) -> Result<()> {
+        let key = format!("{name}[{title}]");
+        if self.in_progress.contains(&key) {
+            return Ok(());
+        }
+        let define_def = self
+            .module
+            .defines
+            .get(name)
+            .with_context(|| format!("define {name} not found"))?
+            .clone();
+        self.in_progress.push(key.clone());
+        let saved_vars = self.vars.clone();
+        self.vars.insert("title".to_string(), PuppetValue::String(title.to_string()));
+        self.vars.insert("name".to_string(), PuppetValue::String(title.to_string()));
+        let mut local_vars = HashMap::new();
+        self.apply_param_defaults(&define_def.params, &mut local_vars)?;
+        for (key, value) in attrs {
+            local_vars.insert(key.clone(), value.clone());
+        }
+        self.vars.extend(local_vars);
+        let result = self.evaluate_statements(&define_def.body);
+        self.vars = saved_vars;
+        self.in_progress.retain(|item| item != &key);
+        self.evaluated_defines.insert(name.to_string());
+        result
+    }
+
     fn evaluate_define(&mut self, name: &str, title: &str) -> Result<()> {
         let define_def = self
             .module
@@ -470,6 +615,7 @@ impl<'a> EvalContext<'a> {
             .get(name)
             .with_context(|| format!("define {name} not found"))?
             .clone();
+        self.evaluated_defines.insert(name.to_string());
         self.vars
             .insert("title".to_string(), PuppetValue::String(title.to_string()));
         let mut local_vars = HashMap::new();
@@ -541,6 +687,8 @@ impl<'a> EvalContext<'a> {
                         self.catalog.add(resource);
                         if resource_type == "class" {
                             let _ = self.evaluate_class(&title);
+                        } else if self.module.defines.contains_key(&resource_type) {
+                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
                         }
                     }
                 }
@@ -571,6 +719,7 @@ impl<'a> EvalContext<'a> {
                 Stmt::Fail(message) => {
                     return Err(anyhow::anyhow!(message.clone()));
                 }
+                Stmt::Noop => {}
             }
         }
         Ok(())
@@ -621,6 +770,9 @@ impl<'a> EvalContext<'a> {
                         &self.eval_expr(left)?,
                         &self.eval_expr(right)?,
                     )?,
+                    CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq => {
+                        eval_ordered_compare(&self.eval_expr(left)?, *op, &self.eval_expr(right)?)
+                    }
                 }
             }
             Cond::In { needle, haystack } => {
@@ -654,6 +806,11 @@ impl<'a> EvalContext<'a> {
             }
             Expr::Var(var) => self.resolve_var(var),
             Expr::Condition(cond) => PuppetValue::Bool(self.eval_cond(cond)?),
+            Expr::Arith { op, left, right } => {
+                let l = self.eval_expr(left)?;
+                let r = self.eval_expr(right)?;
+                eval_arith(&l, *op, &r)
+            }
             Expr::MethodCall { target, name } => {
                 let value = self.eval_expr(target)?;
                 match name.as_str() {
@@ -810,6 +967,13 @@ struct PuppetParser<'a> {
     tokens: Vec<Token>,
     index: usize,
     allow_bare_vars: bool,
+    warnings: Vec<ParseWarning>,
+}
+
+#[derive(Debug, Clone)]
+struct ParseWarning {
+    offset: usize,
+    message: String,
 }
 
 impl<'a> PuppetParser<'a> {
@@ -820,7 +984,36 @@ impl<'a> PuppetParser<'a> {
             tokens,
             index: 0,
             allow_bare_vars: false,
+            warnings: Vec::new(),
         }
+    }
+
+    /// If the next two tokens are `:` `:`, consume them and record a deprecation
+    /// warning. Returns `true` when a legacy leading `::` prefix was stripped.
+    ///
+    /// Puppet historically allowed a leading `::` to mean "top-level scope" on
+    /// class names and type references (`include ::ntp`, `inherits ::base`,
+    /// `::apache::vhost { ... }`). Modern Puppet treats the prefix as a no-op
+    /// and lint rules flag it. Regent accepts it for compatibility but warns so
+    /// the user can clean it up.
+    fn consume_leading_namespace_prefix(&mut self) -> bool {
+        let first = self.tokens.get(self.index);
+        let second = self.tokens.get(self.index + 1);
+        let (Some(a), Some(b)) = (first, second) else {
+            return false;
+        };
+        if a.kind != TokenKind::Colon || b.kind != TokenKind::Colon {
+            return false;
+        }
+        let offset = a.offset;
+        self.index += 2;
+        self.warnings.push(ParseWarning {
+            offset,
+            message:
+                "deprecated leading `::` namespace prefix; modern Puppet treats it as a no-op"
+                    .to_string(),
+        });
+        true
     }
 
     fn position(&self) -> usize {
@@ -849,19 +1042,20 @@ impl<'a> PuppetParser<'a> {
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         let parent = if self.consume_keyword("inherits") {
+            self.consume_leading_namespace_prefix();
             Some(self.expect_ident()?)
         } else {
             None
         };
         let body = self.parse_block()?;
-        Ok(ClassDef { name, params, parent, body })
+        Ok(ClassDef { name, params, parent, body, origin_file: None })
     }
 
     fn parse_define_def(&mut self) -> Result<DefineDef> {
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         let body = self.parse_block()?;
-        Ok(DefineDef { name, params, body })
+        Ok(DefineDef { name, params, body, origin_file: None })
     }
 
     fn parse_param_list(&mut self) -> Result<HashMap<String, Expr>> {
@@ -897,6 +1091,21 @@ impl<'a> PuppetParser<'a> {
         Ok(params)
     }
 
+    /// Parse the `else`/`elsif` tail of an `if`/`unless` chain. `elsif C { … }`
+    /// is desugared into `else { if C { … } [else { … }] }`.
+    fn parse_else_chain(&mut self) -> Result<Vec<Stmt>> {
+        if self.consume_keyword("elsif") {
+            let cond = self.parse_cond()?;
+            let then_body = self.parse_block()?;
+            let else_body = self.parse_else_chain()?;
+            return Ok(vec![Stmt::If { cond, then_body, else_body }]);
+        }
+        if self.consume_keyword("else") {
+            return self.parse_block();
+        }
+        Ok(Vec::new())
+    }
+
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
         self.expect(TokenKind::LBrace)?;
         let mut stmts = Vec::new();
@@ -912,28 +1121,21 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_statement(&mut self) -> Result<Option<Stmt>> {
         if self.consume_keyword("include") {
+            self.consume_leading_namespace_prefix();
             let name = self.expect_ident()?;
             return Ok(Some(Stmt::Include(name)));
         }
         if self.consume_keyword("if") {
             let cond = self.parse_cond()?;
             let then_body = self.parse_block()?;
-            let else_body = if self.consume_keyword("else") {
-                self.parse_block()?
-            } else {
-                Vec::new()
-            };
+            let else_body = self.parse_else_chain()?;
             return Ok(Some(Stmt::If { cond, then_body, else_body }));
         }
         if self.consume_keyword("unless") {
             // `unless C { … } [else { … }]` is `if !C { … } else { … }`.
             let cond = self.parse_cond()?;
             let then_body = self.parse_block()?;
-            let else_body = if self.consume_keyword("else") {
-                self.parse_block()?
-            } else {
-                Vec::new()
-            };
+            let else_body = self.parse_else_chain()?;
             return Ok(Some(Stmt::If {
                 cond: Cond::Not(Box::new(cond)),
                 then_body,
@@ -976,6 +1178,11 @@ impl<'a> PuppetParser<'a> {
                 return Ok(Some(Stmt::VarAssign(name, expr)));
             }
         }
+        // Accept a legacy leading `::` on resource-type references
+        // (e.g. `::apache::vhost { ... }`). Modern Puppet drops the prefix;
+        // we strip it and warn.
+        let saved_index = self.index;
+        let stripped_prefix = self.consume_leading_namespace_prefix();
         if self.peek_kind() == Some(TokenKind::Ident) {
             let rtype = self.expect_ident()?;
             if self.consume(TokenKind::LBrace) {
@@ -984,6 +1191,22 @@ impl<'a> PuppetParser<'a> {
                 self.consume(TokenKind::RBrace);
                 return Ok(Some(Stmt::Resource { rtype, titles, attrs }));
             }
+            // Resource collector: `Foo::Bar<| expr |>`. We don't model
+            // virtual/exported-resource realisation, so just skip the body.
+            if self.consume(TokenKind::LtPipe) {
+                let _ = rtype;
+                while !self.consume(TokenKind::PipeGt) && !self.is_eof() {
+                    self.index += 1;
+                }
+                return Ok(Some(Stmt::Noop));
+            }
+        }
+        if stripped_prefix {
+            // The `::` didn't actually introduce a resource declaration — roll
+            // the index back and drop the warning we queued so the caller can
+            // try other statement shapes without spurious noise.
+            self.index = saved_index;
+            self.warnings.pop();
         }
         Ok(None)
     }
@@ -1008,13 +1231,20 @@ impl<'a> PuppetParser<'a> {
                 self.index += 1;
                 continue;
             }
-            let key = match self.parse_expr()? {
-                Expr::String(value) => value,
-                Expr::Var(var) => var.name,
-                expr => expr.as_string(),
+            // `* => $hash` — splat-attributes merge. We don't model merging in
+            // the evaluator, but we must accept the syntax so manifests using
+            // it parse.
+            let key = if self.consume(TokenKind::Star) {
+                "*".to_string()
+            } else {
+                match self.parse_expr()? {
+                    Expr::String(value) => value,
+                    Expr::Var(var) => var.name,
+                    expr => expr.as_string(),
+                }
             };
             self.consume(TokenKind::FatArrow);
-            let value = self.parse_expr()?;
+            let value = self.parse_value_expr()?;
             attrs.insert(key, value);
         }
         Ok(attrs)
@@ -1058,6 +1288,19 @@ impl<'a> PuppetParser<'a> {
     fn parse_cond_atom(&mut self) -> Result<Cond> {
         if self.consume_keyword("defined") {
             self.consume(TokenKind::LParen);
+            // `defined('$var')` / `defined($var)` — strict-vars guard.
+            // We can't statically prove a variable is set during fixture-module
+            // parsing, so treat this as always-false (which routes apt::pin into
+            // its safe fallback branch). The point is to accept the syntax.
+            if matches!(self.peek_kind(), Some(TokenKind::String) | Some(TokenKind::Var)) {
+                self.index += 1;
+                self.consume(TokenKind::RParen);
+                return Ok(Cond::Compare {
+                    left: Expr::Bool(false),
+                    op: CompareOp::Eq,
+                    right: Expr::Bool(true),
+                });
+            }
             let rtype = self.expect_ident()?;
             self.consume(TokenKind::LBracket);
             let title = match self.parse_expr()? {
@@ -1085,6 +1328,22 @@ impl<'a> PuppetParser<'a> {
             let right = self.parse_expr()?;
             return Ok(Cond::Compare { left, op: CompareOp::NotMatch, right });
         }
+        if self.consume(TokenKind::LtEq) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::LtEq, right });
+        }
+        if self.consume(TokenKind::GtEq) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::GtEq, right });
+        }
+        if self.consume(TokenKind::Lt) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::Lt, right });
+        }
+        if self.consume(TokenKind::Gt) {
+            let right = self.parse_expr()?;
+            return Ok(Cond::Compare { left, op: CompareOp::Gt, right });
+        }
         if self.consume_keyword("in") {
             let right = self.parse_expr()?;
             return Ok(Cond::In { needle: left, haystack: right });
@@ -1111,6 +1370,19 @@ impl<'a> PuppetParser<'a> {
             if self.consume(TokenKind::Dot) {
                 let name = self.expect_ident()?;
                 expr = Expr::MethodCall { target: Box::new(expr), name };
+                continue;
+            }
+            let arith_op = match self.peek_kind() {
+                Some(TokenKind::Plus) => Some(ArithOp::Add),
+                Some(TokenKind::Minus) => Some(ArithOp::Sub),
+                Some(TokenKind::Star) => Some(ArithOp::Mul),
+                Some(TokenKind::Slash) => Some(ArithOp::Div),
+                _ => None,
+            };
+            if let Some(op) = arith_op {
+                self.index += 1;
+                let right = self.parse_primary()?;
+                expr = Expr::Arith { op, left: Box::new(expr), right: Box::new(right) };
                 continue;
             }
             if self.consume(TokenKind::Question) {
@@ -1334,6 +1606,7 @@ impl Expr {
             Expr::Regex(pattern) => pattern.clone(),
             Expr::Selector { .. } => "selector".to_string(),
             Expr::Condition(_) => "condition".to_string(),
+            Expr::Arith { .. } => "arith".to_string(),
         }
     }
 
@@ -1363,6 +1636,26 @@ enum TokenKind {
     NotMatch,
     Regex,
     Question,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    /// `<|` — opening delimiter of a resource collector expression
+    /// (e.g. `Apt::Key<| title == $title |>`).
+    LtPipe,
+    /// `|>` — closing delimiter of a resource collector expression.
+    PipeGt,
+    /// `|` — used as a parameter delimiter in lambda blocks and inside
+    /// collector expressions.
+    Pipe,
+    /// `->` — ordering arrow between resources.
+    Arrow,
+    /// `~>` — notify arrow between resources.
+    TildeArrow,
 }
 
 #[derive(Debug, Clone)]
@@ -1467,9 +1760,70 @@ impl<'a> Lexer<'a> {
                         self.index += 1;
                     }
                 }
+                '<' => {
+                    if self.peek_next() == Some('=') {
+                        tokens.push(self.make(TokenKind::LtEq, "<=", offset));
+                        self.index += 2;
+                    } else if self.peek_next() == Some('|') {
+                        tokens.push(self.make(TokenKind::LtPipe, "<|", offset));
+                        self.index += 2;
+                    } else {
+                        tokens.push(self.make(TokenKind::Lt, "<", offset));
+                        self.index += 1;
+                    }
+                }
+                '>' => {
+                    if self.peek_next() == Some('=') {
+                        tokens.push(self.make(TokenKind::GtEq, ">=", offset));
+                        self.index += 2;
+                    } else {
+                        tokens.push(self.make(TokenKind::Gt, ">", offset));
+                        self.index += 1;
+                    }
+                }
                 '/' if can_start_regex(tokens.last()) => {
                     let text = self.consume_regex();
                     tokens.push(self.make(TokenKind::Regex, &text, offset));
+                }
+                '/' => {
+                    tokens.push(self.make(TokenKind::Slash, "/", offset));
+                    self.index += 1;
+                }
+                '+' => {
+                    tokens.push(self.make(TokenKind::Plus, "+", offset));
+                    self.index += 1;
+                }
+                '-' => {
+                    if self.peek_next() == Some('>') {
+                        tokens.push(self.make(TokenKind::Arrow, "->", offset));
+                        self.index += 2;
+                    } else {
+                        tokens.push(self.make(TokenKind::Minus, "-", offset));
+                        self.index += 1;
+                    }
+                }
+                '~' => {
+                    if self.peek_next() == Some('>') {
+                        tokens.push(self.make(TokenKind::TildeArrow, "~>", offset));
+                        self.index += 2;
+                    } else {
+                        // Unrecognized solo `~` — skip to preserve prior
+                        // lexer behavior.
+                        self.index += 1;
+                    }
+                }
+                '|' => {
+                    if self.peek_next() == Some('>') {
+                        tokens.push(self.make(TokenKind::PipeGt, "|>", offset));
+                        self.index += 2;
+                    } else {
+                        tokens.push(self.make(TokenKind::Pipe, "|", offset));
+                        self.index += 1;
+                    }
+                }
+                '*' => {
+                    tokens.push(self.make(TokenKind::Star, "*", offset));
+                    self.index += 1;
                 }
                 '"' => {
                     let text = self.consume_string('"');
@@ -1665,6 +2019,44 @@ impl<'a> Lexer<'a> {
 /// - haystack `Hash`  → key membership (needle stringified)
 /// - haystack `String` → substring match
 /// - everything else → false
+fn eval_arith(left: &PuppetValue, op: ArithOp, right: &PuppetValue) -> PuppetValue {
+    if let (PuppetValue::Integer(a), PuppetValue::Integer(b)) = (left, right) {
+        let result = match op {
+            ArithOp::Add => a.checked_add(*b),
+            ArithOp::Sub => a.checked_sub(*b),
+            ArithOp::Mul => a.checked_mul(*b),
+            ArithOp::Div => (*b != 0).then(|| a / b),
+        };
+        if let Some(value) = result {
+            return PuppetValue::Integer(value);
+        }
+    }
+    // Hash-minus (`$h - 'key'`) and other non-integer combinations: keep the
+    // left-hand value so downstream code still sees something sensible.
+    left.clone()
+}
+
+fn eval_ordered_compare(left: &PuppetValue, op: CompareOp, right: &PuppetValue) -> bool {
+    fn to_int(v: &PuppetValue) -> Option<i64> {
+        match v {
+            PuppetValue::Integer(n) => Some(*n),
+            PuppetValue::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+    let ordering = match (to_int(left), to_int(right)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => left.as_string().cmp(&right.as_string()),
+    };
+    match op {
+        CompareOp::Lt => ordering.is_lt(),
+        CompareOp::Gt => ordering.is_gt(),
+        CompareOp::LtEq => ordering.is_le(),
+        CompareOp::GtEq => ordering.is_ge(),
+        _ => false,
+    }
+}
+
 fn eval_in(needle: &PuppetValue, haystack: &PuppetValue) -> bool {
     match haystack {
         PuppetValue::Array(items) => items.iter().any(|item| item == needle),
@@ -1705,6 +2097,9 @@ fn can_start_regex(prev: Option<&Token>) -> bool {
             | TokenKind::LParen
             | TokenKind::LBracket
             | TokenKind::LBrace
+            // `}` ends a block and is followed by another `case` pattern in
+            // `case` bodies, e.g. `} /^absent$/: { … }`.
+            | TokenKind::RBrace
             | TokenKind::Comma
             | TokenKind::Colon
             | TokenKind::Bang
@@ -1713,6 +2108,14 @@ fn can_start_regex(prev: Option<&Token>) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+}
+
+fn source_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let clamped = byte_offset.min(source.len());
+    let prefix = &source[..clamped];
+    let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
+    let col = prefix.rsplit_once('\n').map(|(_, tail)| tail.len()).unwrap_or(prefix.len()) + 1;
+    (line, col)
 }
 
 /// Minimal EPP template renderer. Supports:
@@ -1929,6 +2332,102 @@ mod tests {
         fs::create_dir_all(&manifests).unwrap();
         fs::write(manifests.join(format!("{name}.pp")), manifest).unwrap();
         dir
+    }
+
+    #[test]
+    fn parser_accepts_resource_collector_chain_and_case_regex_after_brace() {
+        // Exercises the constructs that previously caused apt/manifests/key.pp
+        // to be skipped: chain operators between resources, resource
+        // collectors, and a case branch whose regex pattern follows `}`.
+        let mut parser = PuppetParser::new(
+            r#"
+class foo {
+  case $bar {
+    /^a$/: {
+      thing { 'x': } -> anchor { 'a': }
+      thing { 'y': } ~> anchor { 'b': }
+      Apt::Key<| title == $title |>
+    }
+    /^b$/: {}
+    default: {}
+  }
+}
+"#,
+        );
+        let defs = parser.parse_definitions().expect("parse");
+        assert_eq!(defs.len(), 1);
+        match &defs[0] {
+            PuppetDef::Class(c) => match &c.body[..] {
+                [Stmt::Case { branches, .. }] => {
+                    assert_eq!(branches.len(), 2, "expected two regex branches");
+                    let first_body = &branches[0].1;
+                    // Two `Resource` declarations + `Noop` collector.
+                    assert!(matches!(first_body[0], Stmt::Resource { .. }));
+                    assert!(matches!(first_body[1], Stmt::Resource { .. }));
+                    assert!(matches!(first_body[2], Stmt::Resource { .. }));
+                    assert!(matches!(first_body[3], Stmt::Resource { .. }));
+                    assert!(matches!(first_body[4], Stmt::Noop));
+                }
+                other => panic!("unexpected body: {other:?}"),
+            },
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_legacy_leading_namespace_prefix_in_include() {
+        let mut parser = PuppetParser::new(
+            "class foo {\n  include ::stdlib\n}\n",
+        );
+        let defs = parser.parse_definitions().expect("parse");
+        assert_eq!(defs.len(), 1);
+        let warnings: Vec<String> = parser.warnings.iter().map(|w| w.message.clone()).collect();
+        assert_eq!(warnings.len(), 1, "expected one deprecation warning");
+        assert!(warnings[0].contains("leading `::`"));
+        match &defs[0] {
+            PuppetDef::Class(c) => match &c.body[..] {
+                [Stmt::Include(name)] => assert_eq!(name, "stdlib"),
+                other => panic!("unexpected body: {other:?}"),
+            },
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_legacy_leading_namespace_prefix_in_inherits() {
+        let mut parser = PuppetParser::new("class child inherits ::base {}\n");
+        let defs = parser.parse_definitions().expect("parse");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(parser.warnings.len(), 1);
+        match &defs[0] {
+            PuppetDef::Class(c) => assert_eq!(c.parent.as_deref(), Some("base")),
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn parser_accepts_legacy_leading_namespace_prefix_on_resource_type() {
+        let mut parser = PuppetParser::new(
+            "class foo {\n  ::apache::vhost { 'site': port => 80 }\n}\n",
+        );
+        let defs = parser.parse_definitions().expect("parse");
+        assert_eq!(parser.warnings.len(), 1);
+        match &defs[0] {
+            PuppetDef::Class(c) => match &c.body[..] {
+                [Stmt::Resource { rtype, .. }] => assert_eq!(rtype, "apache::vhost"),
+                other => panic!("unexpected body: {other:?}"),
+            },
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn parser_does_not_warn_when_no_leading_prefix_present() {
+        let mut parser = PuppetParser::new(
+            "class foo {\n  include stdlib\n}\n",
+        );
+        let _ = parser.parse_definitions().expect("parse");
+        assert!(parser.warnings.is_empty());
     }
 
     #[test]
