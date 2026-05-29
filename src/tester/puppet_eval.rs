@@ -418,6 +418,25 @@ enum Stmt {
         default: Vec<Stmt>,
     },
     Fail(String),
+    /// `$iterable.each |$a[, $b]| { body }` — iterates an array or hash,
+    /// binding the lambda parameters to each element (or key/value pair) and
+    /// running the body. Modeled as a first-class statement so that resource
+    /// declarations inside the body land in the catalog.
+    EachLoop {
+        iterable: Expr,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    /// `create_resources('rtype', $hash[, $defaults])` — iterates the hash
+    /// and declares one resource per entry. Modeled as a first-class statement
+    /// so the evaluator can autoload the target defined type and expand its
+    /// body into the catalog (otherwise child resources of `mod::foo` would
+    /// never appear under e.g. `contain_exec(...)`).
+    CreateResources {
+        rtype_expr: Expr,
+        hash_expr: Expr,
+        defaults_expr: Option<Expr>,
+    },
     /// Placeholder for statements the parser recognises and consumes but the
     /// evaluator does not need to act on (e.g. resource collectors
     /// `Foo<| ... |>`).
@@ -718,6 +737,83 @@ impl<'a> EvalContext<'a> {
                 }
                 Stmt::Fail(message) => {
                     return Err(anyhow::anyhow!(message.clone()));
+                }
+                Stmt::EachLoop { iterable, params, body } => {
+                    let value = self.eval_expr(iterable)?;
+                    // Snapshot bindings the loop may overwrite so the
+                    // surrounding scope is restored once iteration ends.
+                    let saved: Vec<(String, Option<PuppetValue>)> = params
+                        .iter()
+                        .map(|name| (name.clone(), self.vars.get(name).cloned()))
+                        .collect();
+                    match value {
+                        PuppetValue::Array(items) => {
+                            for item in items {
+                                if let Some(name) = params.first() {
+                                    self.vars.insert(name.clone(), item);
+                                }
+                                self.evaluate_statements(body)?;
+                            }
+                        }
+                        PuppetValue::Hash(entries) => {
+                            for (key, val) in entries {
+                                match params.as_slice() {
+                                    [k] => {
+                                        self.vars.insert(k.clone(), PuppetValue::String(key));
+                                    }
+                                    [k, v, ..] => {
+                                        self.vars.insert(k.clone(), PuppetValue::String(key));
+                                        self.vars.insert(v.clone(), val);
+                                    }
+                                    [] => {}
+                                }
+                                self.evaluate_statements(body)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    for (name, prior) in saved {
+                        match prior {
+                            Some(v) => {
+                                self.vars.insert(name, v);
+                            }
+                            None => {
+                                self.vars.remove(&name);
+                            }
+                        }
+                    }
+                }
+                Stmt::CreateResources { rtype_expr, hash_expr, defaults_expr } => {
+                    let resource_type = normalize_rtype(&self.eval_expr(rtype_expr)?.as_string());
+                    let entries = match self.eval_expr(hash_expr)? {
+                        PuppetValue::Hash(entries) => entries,
+                        _ => continue,
+                    };
+                    let defaults = match defaults_expr {
+                        Some(expr) => match self.eval_expr(expr)? {
+                            PuppetValue::Hash(map) => map,
+                            _ => HashMap::new(),
+                        },
+                        None => HashMap::new(),
+                    };
+                    for (title, attrs_value) in entries {
+                        let mut attributes: HashMap<String, PuppetValue> = defaults.clone();
+                        if let PuppetValue::Hash(attrs) = attrs_value {
+                            for (key, value) in attrs {
+                                attributes.insert(key, value);
+                            }
+                        }
+                        self.catalog.add(PuppetResource {
+                            resource_type: resource_type.clone(),
+                            title: title.clone(),
+                            attributes: attributes.clone(),
+                        });
+                        if resource_type == "class" {
+                            let _ = self.evaluate_class(&title);
+                        } else if self.module.defines.contains_key(&resource_type) {
+                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
+                        }
+                    }
                 }
                 Stmt::Noop => {}
             }
@@ -1091,6 +1187,31 @@ impl<'a> PuppetParser<'a> {
         Ok(params)
     }
 
+    /// Parse `|$a[, $b][, …]|` — the parameter list of an `.each` lambda.
+    /// Type annotations between `|` and a `$var` are skipped (Puppet allows
+    /// `|String $x|`) so the body can bind by name without modeling types.
+    fn parse_lambda_params(&mut self) -> Result<Vec<String>> {
+        let mut params = Vec::new();
+        self.expect(TokenKind::Pipe)?;
+        while !self.consume(TokenKind::Pipe) && !self.is_eof() {
+            if self.peek_kind() == Some(TokenKind::Comma) {
+                self.index += 1;
+                continue;
+            }
+            while self.peek_kind() != Some(TokenKind::Var)
+                && self.peek_kind() != Some(TokenKind::Comma)
+                && self.peek_kind() != Some(TokenKind::Pipe)
+                && !self.is_eof()
+            {
+                self.index += 1;
+            }
+            if self.peek_kind() == Some(TokenKind::Var) {
+                params.push(self.expect_var()?);
+            }
+        }
+        Ok(params)
+    }
+
     /// Parse the `else`/`elsif` tail of an `if`/`unless` chain. `elsif C { … }`
     /// is desugared into `else { if C { … } [else { … }] }`.
     fn parse_else_chain(&mut self) -> Result<Vec<Stmt>> {
@@ -1172,11 +1293,63 @@ impl<'a> PuppetParser<'a> {
             }
         }
         if self.peek_kind() == Some(TokenKind::Var) {
+            let save = self.index;
             let name = self.expect_var()?;
             if self.consume(TokenKind::Equal) {
                 let expr = self.parse_value_expr()?;
                 return Ok(Some(Stmt::VarAssign(name, expr)));
             }
+            // `$var[.method...].each |params| { body }` — Puppet's iteration form.
+            // Roll back to the variable so parse_expr can consume the full
+            // method chain, then detect a trailing lambda.
+            self.index = save;
+            let expr = self.parse_expr()?;
+            if let Expr::MethodCall { target, name: method } = &expr {
+                if method == "each" && self.peek_kind() == Some(TokenKind::Pipe) {
+                    let params = self.parse_lambda_params()?;
+                    let body = self.parse_block()?;
+                    return Ok(Some(Stmt::EachLoop {
+                        iterable: (**target).clone(),
+                        params,
+                        body,
+                    }));
+                }
+            }
+            // Bare `$var` (or unhandled trailing expr) is dropped — preserve
+            // prior behavior of skipping unrecognised statement forms.
+            return Ok(Some(Stmt::Noop));
+        }
+        // `create_resources('rtype', $hash[, $defaults])` as a statement.
+        // Recognize the bare identifier followed by `(` so the call's side
+        // effect (declaring resources) actually runs — otherwise the parser
+        // skips the tokens and the defined type body never expands.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self
+                .tokens
+                .get(self.index)
+                .map(|t| t.text == "create_resources")
+                .unwrap_or(false)
+            && self
+                .tokens
+                .get(self.index + 1)
+                .map(|t| t.kind == TokenKind::LParen)
+                .unwrap_or(false)
+        {
+            self.index += 2; // consume `create_resources` and `(`
+            let rtype_expr = self.parse_expr()?;
+            self.consume(TokenKind::Comma);
+            let hash_expr = self.parse_expr()?;
+            let defaults_expr = if self.consume(TokenKind::Comma) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            self.consume(TokenKind::RParen);
+            return Ok(Some(Stmt::CreateResources {
+                rtype_expr,
+                hash_expr,
+                defaults_expr,
+            }));
         }
         // Accept a legacy leading `::` on resource-type references
         // (e.g. `::apache::vhost { ... }`). Modern Puppet drops the prefix;
@@ -1665,16 +1838,14 @@ struct Token {
     offset: usize,
 }
 
-struct Lexer<'a> {
-    input: &'a str,
+struct Lexer {
     chars: Vec<char>,
     index: usize,
 }
 
-impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Self {
+impl Lexer {
+    fn new(input: &str) -> Self {
         Self {
-            input,
             chars: input.chars().collect(),
             index: 0,
         }
@@ -1931,7 +2102,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.input[start..self.index].to_string()
+        self.chars[start..self.index].iter().collect()
     }
 
     fn consume_ident(&mut self) -> String {
@@ -1946,7 +2117,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.input[start..self.index].to_string()
+        self.chars[start..self.index].iter().collect()
     }
 
     /// Consume a `/pattern/[flags]` regex literal. Returns the pattern with
@@ -2002,7 +2173,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.input[start..self.index].to_string()
+        self.chars[start..self.index].iter().collect()
     }
 
     fn make(&self, kind: TokenKind, text: &str, offset: usize) -> Token {
@@ -2811,5 +2982,170 @@ class foo {
             .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
             .expect("class with epp(...) followed by trailing comma must parse");
         assert!(catalog.contains("file", "/y"));
+    }
+
+    #[test]
+    fn unicode_in_pp_comments_does_not_break_parser() {
+        // Em-dashes and other non-ASCII characters in `#` comments must not
+        // break tokenization. Real-world modules frequently contain unicode
+        // punctuation in comments and the parser should ignore it.
+        let manifest = "\
+class foo {
+  # comment with em-dash — and unicode: café · ★ ñü
+  # another line — second em-dash
+  notify { 'hello': }
+}
+";
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("manifest with unicode in comments must parse");
+        assert!(catalog.contains("notify", "hello"));
+    }
+
+    #[test]
+    fn create_resources_instantiates_in_module_define() {
+        // `create_resources('mod::api_key', $hash)` should iterate the hash
+        // and instantiate the defined type once per key, expanding the body
+        // into the catalog. Currently regent silently drops the call, so
+        // api_key.pp's body shows 0% coverage and contain_exec assertions
+        // against the inner resources fail.
+        let manifest = r#"
+            define foo::api_key(String $secret) {
+              exec { "rotate-${title}":
+                command => "/usr/bin/rotate ${secret}",
+              }
+            }
+            class foo {
+              $keys = {
+                'prod' => { 'secret' => 'p' },
+                'dev'  => { 'secret' => 'd' },
+              }
+              create_resources('foo::api_key', $keys)
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with create_resources must evaluate");
+        assert!(
+            catalog.contains("foo::api_key", "prod"),
+            "create_resources should instantiate foo::api_key[prod]"
+        );
+        assert!(
+            catalog.contains("foo::api_key", "dev"),
+            "create_resources should instantiate foo::api_key[dev]"
+        );
+        assert!(
+            catalog.contains("exec", "rotate-prod"),
+            "child exec resource of defined type must be exposed in catalog"
+        );
+        assert!(
+            catalog.contains("exec", "rotate-dev"),
+            "child exec resource of defined type must be exposed in catalog"
+        );
+    }
+
+    #[test]
+    fn hash_each_block_iterates_and_declares_resources() {
+        // `$hash.each |$key, $value| { ... }` is a common pattern in Puppet
+        // manifests. The body must run once per hash entry with `$key`/`$value`
+        // bound, declaring resources into the catalog. Previously the parser
+        // saw `$var` with no `=` and silently dropped the statement.
+        let manifest = r#"
+            class foo {
+              $items = {
+                'one' => '/tmp/one',
+                'two' => '/tmp/two',
+              }
+              $items.each |$name, $path| {
+                file { $path:
+                  ensure  => file,
+                  content => $name,
+                }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with hash .each must evaluate");
+        assert!(catalog.contains("file", "/tmp/one"));
+        assert!(catalog.contains("file", "/tmp/two"));
+        let one = catalog.find("file", "/tmp/one").unwrap();
+        assert_eq!(
+            one.attributes.get("content"),
+            Some(&PuppetValue::String("one".to_string()))
+        );
+    }
+
+    #[test]
+    fn array_each_block_iterates_with_single_param() {
+        let manifest = r#"
+            class foo {
+              $names = ['a', 'b', 'c']
+              $names.each |$n| {
+                notify { $n: }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with array .each must evaluate");
+        assert!(catalog.contains("notify", "a"));
+        assert!(catalog.contains("notify", "b"));
+        assert!(catalog.contains("notify", "c"));
+    }
+
+    #[test]
+    fn child_exec_of_in_module_define_is_in_catalog() {
+        // Declaring a defined type inline must expand the body and add the
+        // inner resources to the catalog so that `contain_exec(...)` can see
+        // them — not just the wrapping define resource.
+        let manifest = r#"
+            define foo::app_secret(String $value) {
+              exec { "install-${title}":
+                command => "/usr/bin/install ${value}",
+              }
+            }
+            class foo {
+              foo::app_secret { 'primary': value => 'abc' }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class invoking a defined type must evaluate");
+        assert!(catalog.contains("foo::app_secret", "primary"));
+        assert!(
+            catalog.contains("exec", "install-primary"),
+            "child exec of defined type must be exposed via contain_exec"
+        );
     }
 }

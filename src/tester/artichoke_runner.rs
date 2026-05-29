@@ -1608,6 +1608,162 @@ $POSTMATCH = $' = nil
         let english_path = PathBuf::from(VIRTUAL_ROOT).join("English.rb");
         env.def_rb_source_file(english_path, english.as_bytes().to_vec())?;
 
+        // Artichoke ships no Base64 stdlib module, yet Puppet helpers and specs
+        // (e.g. facter ssh helpers) `require 'base64'`. Provide a self-contained
+        // pure-Ruby implementation that fully mirrors the canonical base64 gem
+        // (RFC-2045 and RFC-4648 method pairs, padding/newline rules, and strict
+        // validation). It avoids pack/unpack, tr, ljust, and enumerator chaining,
+        // which Artichoke does not fully support.
+        let base64 = r#"
+module Base64
+  VERSION = "0.3.0"
+
+  STANDARD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  URLSAFE  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+  def self._encode(bin, chars)
+    bytes = bin.to_s.bytes
+    out = +""
+    i = 0
+    len = bytes.length
+    while i < len
+      b0 = bytes[i]
+      b1 = bytes[i + 1]
+      b2 = bytes[i + 2]
+      n = (b0 << 16) | ((b1 || 0) << 8) | (b2 || 0)
+      out << chars[(n >> 18) & 63]
+      out << chars[(n >> 12) & 63]
+      if b1.nil?
+        out << "=="
+      elsif b2.nil?
+        out << chars[(n >> 6) & 63]
+        out << "="
+      else
+        out << chars[(n >> 6) & 63]
+        out << chars[n & 63]
+      end
+      i += 3
+    end
+    out
+  end
+
+  def self._lookup(chars)
+    table = {}
+    idx = 0
+    while idx < chars.length
+      table[chars[idx]] = idx
+      idx += 1
+    end
+    table
+  end
+
+  # Lenient decode: non-alphabet characters (newlines, '=', and the unused
+  # half of the alphabet) are ignored, and padding is not checked.
+  def self._decode_lenient(str, chars)
+    table = _lookup(chars)
+    s = str.to_s
+    bits = 0
+    bit_count = 0
+    out = +""
+    i = 0
+    while i < s.length
+      c = s[i]
+      i += 1
+      val = table[c]
+      next if val.nil?
+      bits = (bits << 6) | val
+      bit_count += 6
+      if bit_count >= 8
+        bit_count -= 8
+        out << ((bits >> bit_count) & 0xFF).chr
+        # Keep only the still-unconsumed low bits so the accumulator never
+        # grows past ~12 bits; Artichoke raises on wide bit shifts.
+        bits &= (1 << bit_count) - 1
+      end
+    end
+    out
+  end
+
+  # Strict decode: length must be a multiple of 4, padding (if any) must be a
+  # correct 1 or 2 trailing '=', and every other character must be in the
+  # alphabet. Anything else raises ArgumentError, matching unpack1("m0").
+  def self._decode_strict(str, chars)
+    s = str.to_s
+    raise ArgumentError, "invalid base64" if s.length % 4 != 0
+    pad = 0
+    pad += 1 if s.length >= 1 && s[s.length - 1] == "="
+    pad += 1 if s.length >= 2 && s[s.length - 2] == "="
+    body = pad > 0 ? s[0, s.length - pad] : s
+    table = _lookup(chars)
+    bits = 0
+    bit_count = 0
+    out = +""
+    i = 0
+    while i < body.length
+      c = body[i]
+      i += 1
+      val = table[c]
+      raise ArgumentError, "invalid base64" if val.nil?
+      bits = (bits << 6) | val
+      bit_count += 6
+      if bit_count >= 8
+        bit_count -= 8
+        out << ((bits >> bit_count) & 0xFF).chr
+        bits &= (1 << bit_count) - 1
+      end
+    end
+    out
+  end
+
+  def self.encode64(bin)
+    encoded = _encode(bin, STANDARD)
+    result = +""
+    i = 0
+    while i < encoded.length
+      result << encoded[i, 60]
+      result << "\n"
+      i += 60
+    end
+    result
+  end
+
+  def self.decode64(str)
+    _decode_lenient(str, STANDARD)
+  end
+
+  def self.strict_encode64(bin)
+    _encode(bin, STANDARD)
+  end
+
+  def self.strict_decode64(str)
+    _decode_strict(str, STANDARD)
+  end
+
+  def self.urlsafe_encode64(bin, padding: true)
+    str = _encode(bin, URLSAFE)
+    unless padding
+      str = str[0, str.length - 2] if str.length >= 2 && str[str.length - 2, 2] == "=="
+      str = str[0, str.length - 1] if str.length >= 1 && str[str.length - 1] == "="
+    end
+    str
+  end
+
+  def self.urlsafe_decode64(str)
+    # RFC 4648 says nothing about unpadded input but allows excess pad
+    # characters to be ignored, so unpadded input is accepted too: pad it up
+    # to a multiple of 4 before strict validation.
+    s = str.to_s
+    if (s.empty? || s[s.length - 1] != "=") && s.length % 4 != 0
+      target = ((s.length + 3) / 4) * 4
+      s += "=" while s.length < target
+    end
+    _decode_strict(s, URLSAFE)
+  end
+end
+"#;
+        let base64_path = PathBuf::from(VIRTUAL_ROOT).join("base64.rb");
+        env.def_rb_source_file(base64_path, base64.as_bytes().to_vec())?;
+
         Ok(())
     }
 
