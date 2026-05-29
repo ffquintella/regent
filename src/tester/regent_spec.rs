@@ -42,6 +42,18 @@ pub enum Expectation {
         #[serde(default)]
         negate: bool,
     },
+    /// `is_expected.to compile.and_raise_error(/msg/)` or
+    /// `expect { ... }.to raise_error(Klass, /msg/)`. Both forms assert that
+    /// compiling the subject fails; an optional `message` (regex or substring)
+    /// constrains the error text. The exception class, if given in the spec,
+    /// is ignored — the evaluator surfaces a single generic compile error.
+    #[serde(rename = "raise_error")]
+    RaiseError {
+        #[serde(default)]
+        message: Option<JsonValue>,
+        #[serde(default)]
+        negate: bool,
+    },
 }
 
 pub struct RegentSpecRunner {
@@ -189,6 +201,32 @@ impl RegentSpecRunner {
                         )),
                     }
                 }
+                Expectation::RaiseError { message, negate } => {
+                    // `{:#}` flattens the whole anyhow context chain so the
+                    // message pattern can match text from any wrapping layer.
+                    let raised = catalog_result.as_ref().err().map(|err| format!("{err:#}"));
+                    if *negate {
+                        if let Some(err) = &raised {
+                            failures.push(format!(
+                                "expected compilation NOT to raise an error, but it raised: {err}"
+                            ));
+                        }
+                    } else {
+                        match &raised {
+                            None => failures.push(
+                                "expected compilation to raise an error, but it succeeded".to_string(),
+                            ),
+                            Some(err) => {
+                                if !error_matches(message.as_ref(), err)? {
+                                    failures.push(format!(
+                                        "expected error to match {}, but got: {err}",
+                                        describe_pattern(message.as_ref())
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -323,6 +361,43 @@ fn regex_marker(value: &JsonValue) -> Option<&str> {
     obj.get("__regex__").and_then(|v| v.as_str())
 }
 
+/// Does a `raise_error` message constraint match the actual error text?
+/// A `{__regex__: ...}` marker matches as a regex, a bare string matches as a
+/// substring (rspec checks the full message, but our error text carries extra
+/// context wrapping, so substring is the lenient choice), and no constraint
+/// matches any error.
+fn error_matches(pattern: Option<&JsonValue>, message: &str) -> Result<bool> {
+    match pattern {
+        None | Some(JsonValue::Null) => Ok(true),
+        Some(value) => {
+            if let Some(src) = regex_marker(value) {
+                let regex = Regex::new(src)
+                    .with_context(|| format!("invalid raise_error regex /{src}/"))?;
+                Ok(regex.is_match(message))
+            } else if let Some(text) = value.as_str() {
+                Ok(message.contains(text))
+            } else {
+                Ok(true)
+            }
+        }
+    }
+}
+
+fn describe_pattern(pattern: Option<&JsonValue>) -> String {
+    match pattern {
+        Some(value) => {
+            if let Some(src) = regex_marker(value) {
+                format!("/{src}/")
+            } else if let Some(text) = value.as_str() {
+                format!("{text:?}")
+            } else {
+                "an error".to_string()
+            }
+        }
+        None => "an error".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
@@ -356,6 +431,98 @@ mod coverage_tests {
                 expectations: vec![Expectation::Compile { negate: false }],
             }],
         }
+    }
+
+    fn write_failing_module() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        fs::create_dir_all(&manifests).unwrap();
+        fs::write(
+            manifests.join("boom.pp"),
+            "class boom {\n  fail('something went terribly wrong')\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            manifests.join("ok.pp"),
+            "class ok {\n  notify { 'fine': }\n}\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn raise_plan(subject: &str, message: Option<JsonValue>, negate: bool) -> RegentPlan {
+        RegentPlan {
+            tests: vec![RegentTest {
+                name: format!("{subject} raises"),
+                subject: subject.to_string(),
+                title: None,
+                facts: None,
+                params: None,
+                expectations: vec![Expectation::RaiseError { message, negate }],
+            }],
+        }
+    }
+
+    fn regex(src: &str) -> JsonValue {
+        serde_json::json!({ "__regex__": src })
+    }
+
+    fn status(plan: RegentPlan, dir: &tempfile::TempDir) -> (TestStatus, Option<String>) {
+        let runner = RegentSpecRunner::new(dir.path()).unwrap();
+        let results = runner.run_plan(plan).unwrap();
+        let case = &results.test_cases[0];
+        (case.status.clone(), case.message.clone())
+    }
+
+    #[test]
+    fn raise_error_matches_failing_compile() {
+        let module = write_failing_module();
+        // bare: any error
+        assert_eq!(
+            status(raise_plan("boom", None, false), &module).0,
+            TestStatus::Passed
+        );
+        // regex against the failure message
+        assert_eq!(
+            status(raise_plan("boom", Some(regex("terribly wrong")), false), &module).0,
+            TestStatus::Passed
+        );
+        // substring match
+        assert_eq!(
+            status(
+                raise_plan("boom", Some(JsonValue::String("went terribly".into())), false),
+                &module
+            )
+            .0,
+            TestStatus::Passed
+        );
+    }
+
+    #[test]
+    fn raise_error_fails_on_wrong_message_or_no_error() {
+        let module = write_failing_module();
+        // message that does not appear -> fail
+        let (st, msg) = status(raise_plan("boom", Some(regex("not present")), false), &module);
+        assert_eq!(st, TestStatus::Failed);
+        assert!(msg.unwrap().contains("expected error to match"));
+        // a clean class that compiles -> expecting a raise must fail
+        let (st, msg) = status(raise_plan("ok", None, false), &module);
+        assert_eq!(st, TestStatus::Failed);
+        assert!(msg.unwrap().contains("expected compilation to raise"));
+    }
+
+    #[test]
+    fn raise_error_negated() {
+        let module = write_failing_module();
+        // not_to raise_error on a clean class -> pass
+        assert_eq!(
+            status(raise_plan("ok", None, true), &module).0,
+            TestStatus::Passed
+        );
+        // not_to raise_error on a failing class -> fail
+        let (st, msg) = status(raise_plan("boom", None, true), &module);
+        assert_eq!(st, TestStatus::Failed);
+        assert!(msg.unwrap().contains("NOT to raise"));
     }
 
     #[test]

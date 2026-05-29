@@ -793,8 +793,15 @@ begin
           "facts" => example.facts,
           "params" => example.params,
           "expectations" => example.expectations.map do |exp|
-            if exp.kind == "compile"
+            case exp.kind
+            when "compile"
               {{ "kind" => "compile", "negate" => exp.negate }}
+            when "raise_error"
+              {{
+                "kind" => "raise_error",
+                "message" => normalize_value(exp.error_message),
+                "negate" => exp.negate
+              }}
             else
               {{
                 "kind" => "contain",
@@ -935,8 +942,43 @@ begin
   end
 
   class CompileMatcher
+    attr_reader :error_message
+
+    # `compile.and_raise_error(/msg/)` — the compile is expected to fail.
+    # Only a Regexp/String argument (the message constraint) is retained; an
+    # exception-class argument is accepted but ignored.
+    def and_raise_error(*args)
+      @expect_error = true
+      args.each {{ |a| @error_message = a if a.is_a?(Regexp) || a.is_a?(String) }}
+      self
+    end
+
     def kind
-      "compile"
+      @expect_error ? "raise_error" : "compile"
+    end
+
+    def negate
+      @negate ? true : false
+    end
+  end
+
+  # `expect {{ ... }}.to raise_error(Klass, /msg/)`. The block is irrelevant to
+  # us: every example already compiles its subject in Rust, and that is what
+  # the block triggers (`catalogue`, `is_expected.to compile`, etc.).
+  class RaiseErrorMatcher
+    attr_reader :error_message
+
+    def initialize(message = nil)
+      @error_message = message
+    end
+
+    def with_message(message)
+      @error_message = message
+      self
+    end
+
+    def kind
+      "raise_error"
     end
 
     def negate
@@ -1041,7 +1083,20 @@ begin
   def before(*); end
   def after(*); end
   def subject(*); end
-  def expect(*); end
+  # Block form `expect {{ ... }}.to raise_error(...)`: the block and any value
+  # argument are ignored; the returned target only meaningfully accepts a
+  # RaiseErrorMatcher (other matchers are handled via `is_expected`).
+  def expect(*_args, &_block)
+    ExpectationTarget.new
+  end
+  def raise_error(*args)
+    message = nil
+    args.each {{ |a| message = a if a.is_a?(Regexp) || a.is_a?(String) }}
+    RaiseErrorMatcher.new(message)
+  end
+  def raise_exception(*args)
+    raise_error(*args)
+  end
   # rspec-puppet-facts stub: returns an OS hash derived from the module's
   # metadata.json (operatingsystem_support), so generated specs that wrap
   # their examples in `on_supported_os.each do |os, os_facts|` produce one
@@ -1078,6 +1133,18 @@ begin
   end
   module RSpec
     def self.configure; end
+  end
+  # Puppet exception hierarchy so specs that name a class in `raise_error`
+  # (e.g. `raise_error(Puppet::Error, /msg/)`) load. The class is not used to
+  # match — the evaluator surfaces a single generic compile error — but the
+  # constant must resolve.
+  module Puppet
+    class Error < StandardError; end
+    class ParseError < Error; end
+    class PreformattedError < ParseError; end
+    class ParseErrorWithIssue < PreformattedError; end
+    class ResourceError < Error; end
+    class DevError < Error; end
   end
   failures = []
   spec_files = [{spec_file_literals}]
