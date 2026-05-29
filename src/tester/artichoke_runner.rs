@@ -242,15 +242,7 @@ impl<'a> ArtichokeTestRunner<'a> {
 begin
   stderr = ''
   $LOAD_PATH = [{load_path_literal}]
-  module Marshal
-    def self.dump(obj)
-      obj.to_s
-    end
-
-    def self.load(payload)
-      payload
-    end
-  end
+  require 'marshal'
   class IO
     attr_accessor :sync
 
@@ -1176,15 +1168,7 @@ end
 begin
   stderr = ''
   $LOAD_PATH = [{load_path_literal}]
-  module Marshal
-    def self.dump(obj)
-      obj.to_s
-    end
-
-    def self.load(payload)
-      payload
-    end
-  end
+  require 'marshal'
   module Kernel
     unless method_defined?(:__regent_require_relative)
       alias __regent_require_relative require_relative if method_defined?(:require_relative)
@@ -1582,23 +1566,167 @@ end
         let stringio_path = PathBuf::from(VIRTUAL_ROOT).join("stringio.rb");
         env.def_rb_source_file(stringio_path, stringio.as_bytes().to_vec())?;
 
-        let erb = r#"
+        // Real ERB: the template is compiled to Ruby that appends to a buffer,
+        // then evaluated. Artichoke has no `binding`, so `result(b)` cannot see
+        // a caller's locals — it evaluates against an empty context (instance
+        // variables resolve to nil, bare names raise). `result_with_hash` binds
+        // the hash keys as methods and works fully. Trim markers `<%-`/`-%>` are
+        // always honored; the `>`/`<>` newline-suppression modes are not.
+        let erb = r##"
 class ERB
-  def initialize(template, *_args)
-    @template = template.to_s
+  attr_reader :src
+
+  def initialize(str, *args)
+    opts = args.last.is_a?(Hash) ? args[-1] : {}
+    trim = opts[:trim_mode]
+    trim = args[1] if trim.nil? && args.length >= 2 && !args[1].is_a?(Hash)
+    @src = ERB.compile(str, trim)
   end
 
   def result(_binding = nil)
-    @template
+    Context.new({}).__erb_eval(@src)
+  end
+
+  def result_with_hash(hash)
+    Context.new(hash).__erb_eval(@src)
+  end
+
+  def self.compile(template, _trim_mode = nil)
+    s = template.to_s
+    src = +"_erbout = +\"\"\n"
+    i = 0
+    n = s.length
+    while i < n
+      open = s.index("<%", i)
+      if open.nil?
+        _emit_text(src, s[i...n])
+        break
+      end
+      if s[open + 2] == "%"
+        _emit_text(src, s[i...open])
+        _emit_text(src, "<%")
+        i = open + 3
+        next
+      end
+      marker = s[open + 2]
+      left_trim = (marker == "-")
+      text = s[i...open]
+      text = text.sub(/[ \t]*\z/, "") if left_trim
+      _emit_text(src, text)
+      content_start = open + 2
+      type = :code
+      if marker == "="
+        type = :expr
+        content_start = open + 3
+      elsif marker == "#"
+        type = :comment
+        content_start = open + 3
+      elsif marker == "-"
+        content_start = open + 3
+      end
+      close = s.index("%>", content_start)
+      close = n if close.nil?
+      code = s[content_start...close]
+      right_trim = false
+      if code.end_with?("-")
+        right_trim = true
+        code = code[0...-1]
+      end
+      case type
+      when :expr
+        src << "_erbout << (" << code << ").to_s\n"
+      when :comment
+        # dropped
+      else
+        src << code << "\n"
+      end
+      i = close >= n ? n : close + 2
+      if right_trim
+        j = i
+        j += 1 while j < n && (s[j] == " " || s[j] == "\t")
+        if j < n && s[j] == "\n"
+          i = j + 1
+        elsif j + 1 < n && s[j] == "\r" && s[j + 1] == "\n"
+          i = j + 2
+        end
+      end
+    end
+    src << "_erbout\n"
+    src
+  end
+
+  def self._emit_text(src, text)
+    return if text.nil? || text.empty?
+    lit = +"\""
+    k = 0
+    while k < text.length
+      c = text[k]
+      k += 1
+      case c
+      when "\\" then lit << "\\\\"
+      when "\"" then lit << "\\\""
+      when "\n" then lit << "\\n"
+      when "\r" then lit << "\\r"
+      when "\t" then lit << "\\t"
+      when "#"  then lit << "\\#"
+      else lit << c
+      end
+    end
+    lit << "\""
+    src << "_erbout << " << lit << "\n"
+  end
+
+  class Context
+    def initialize(vars = {})
+      @__vars = {}
+      vars.each { |k, v| @__vars[k.to_sym] = v } if vars
+    end
+
+    def __erb_eval(code)
+      instance_eval(code)
+    end
+
+    def method_missing(name, *args)
+      return @__vars[name] if @__vars.key?(name)
+      super
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @__vars.key?(name) || super
+    end
   end
 
   module Util
-    def self.h(text)
-      text.to_s
+    def self.html_escape(value)
+      value.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;").gsub("\"", "&quot;").gsub("'", "&#39;")
+    end
+
+    def self.h(value)
+      html_escape(value)
+    end
+
+    def self.url_encode(value)
+      out = +""
+      value.to_s.bytes.each do |b|
+        ch = b.chr
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           ch == "-" || ch == "_" || ch == "." || ch == "~"
+          out << ch
+        else
+          hex = b.to_s(16).upcase
+          hex = "0" + hex if hex.length < 2
+          out << "%" << hex
+        end
+      end
+      out
+    end
+
+    def self.u(value)
+      url_encode(value)
     end
   end
 end
-"#;
+"##;
         let erb_path = PathBuf::from(VIRTUAL_ROOT).join("erb.rb");
         env.def_rb_source_file(erb_path, erb.as_bytes().to_vec())?;
 
@@ -1626,30 +1754,274 @@ end
         let drb_path = PathBuf::from(VIRTUAL_ROOT).join("drb").join("drb.rb");
         env.def_rb_source_file(drb_path, drb.as_bytes().to_vec())?;
 
+        // Real Marshal for the core value types Puppet specs exchange (nil,
+        // true/false, Integer, Float, String, Symbol, Array, Hash). It is NOT
+        // the MRI binary format — it is a self-describing length-prefixed
+        // encoding — but it round-trips (`load(dump(x)) == x`) and raises on
+        // unsupported objects instead of silently corrupting them. Float
+        // precision is limited to what `Float#to_s` preserves.
         let marshal = r#"
 module Marshal
-  def self.dump(obj)
-    obj.to_s
+  MAJOR_VERSION = 4
+  MINOR_VERSION = 8
+
+  def self.dump(obj, *_args)
+    out = +""
+    _dump(obj, out)
+    out
   end
 
-  def self.load(payload)
-    payload
+  def self._dump(obj, out)
+    if obj.nil?
+      out << "0"
+    elsif obj == true
+      out << "T"
+    elsif obj == false
+      out << "F"
+    elsif obj.is_a?(Integer)
+      out << "i" << obj.to_s << ";"
+    elsif obj.is_a?(Float)
+      out << "f" << obj.to_s << ";"
+    elsif obj.is_a?(Symbol)
+      str = obj.to_s
+      out << "y" << str.length.to_s << ":" << str
+    elsif obj.is_a?(String)
+      out << "s" << obj.length.to_s << ":" << obj
+    elsif obj.is_a?(Array)
+      out << "[" << obj.length.to_s << ";"
+      obj.each { |item| _dump(item, out) }
+    elsif obj.is_a?(Hash)
+      out << "{" << obj.length.to_s << ";"
+      obj.each { |key, value| _dump(key, out); _dump(value, out) }
+    else
+      raise TypeError, "no _dump_data is defined for class #{obj.class}"
+    end
+  end
+
+  def self.load(data, *_args)
+    _load(data.to_s, [0])
+  end
+
+  def self.restore(data, *args)
+    load(data, *args)
+  end
+
+  def self._load(str, pos)
+    tag = str[pos[0]]
+    pos[0] += 1
+    case tag
+    when "0" then nil
+    when "T" then true
+    when "F" then false
+    when "i" then _read_to(str, pos, ";").to_i
+    when "f" then _read_to(str, pos, ";").to_f
+    when "y"
+      len = _read_to(str, pos, ":").to_i
+      val = str[pos[0], len]
+      pos[0] += len
+      val.to_sym
+    when "s"
+      len = _read_to(str, pos, ":").to_i
+      val = str[pos[0], len]
+      pos[0] += len
+      val
+    when "["
+      count = _read_to(str, pos, ";").to_i
+      arr = []
+      idx = 0
+      while idx < count
+        arr << _load(str, pos)
+        idx += 1
+      end
+      arr
+    when "{"
+      count = _read_to(str, pos, ";").to_i
+      hash = {}
+      idx = 0
+      while idx < count
+        key = _load(str, pos)
+        value = _load(str, pos)
+        hash[key] = value
+        idx += 1
+      end
+      hash
+    else
+      raise ArgumentError, "marshal data too short or corrupt"
+    end
+  end
+
+  def self._read_to(str, pos, delim)
+    start = pos[0]
+    idx = str.index(delim, start)
+    raise ArgumentError, "marshal data corrupt" if idx.nil?
+    val = str[start...idx]
+    pos[0] = idx + 1
+    val
   end
 end
 "#;
         let marshal_path = PathBuf::from(VIRTUAL_ROOT).join("marshal.rb");
         env.def_rb_source_file(marshal_path, marshal.as_bytes().to_vec())?;
 
+        // Real OptionParser: `on` records switch definitions (short `-x`, long
+        // `--name`, argument-taking `--name VAL`/`--name=VAL`, optional `[VAL]`,
+        // and `--[no-]flag`); `parse!`/`parse`/`order!` walk an argv, invoke the
+        // blocks, support `--` end-of-options and bundled short flags, and leave
+        // the non-option residue (parse! mutates argv in place). Type coercion
+        // and the auto-generated help table are not implemented.
         let optparse = r#"
 class OptionParser
-  def initialize(*)
+  class ParseError < StandardError; end
+  class InvalidOption < ParseError; end
+  class MissingArgument < ParseError; end
+  class InvalidArgument < ParseError; end
+  class AmbiguousOption < ParseError; end
+
+  attr_accessor :banner, :program_name
+
+  def initialize(banner = nil, *_rest)
+    @banner = banner
+    @program_name = "regent"
+    @switches = []
+    yield self if block_given?
   end
 
-  def on(*)
+  def on(*args, &block)
+    short = nil
+    long = nil
+    takes_arg = false
+    optional_arg = false
+    args.each do |arg|
+      next unless arg.is_a?(String)
+      if arg.start_with?("--")
+        body = arg[2..-1]
+        if body.start_with?("[no-]")
+          long = body[5..-1].split(/[ =\[]/).first
+        else
+          parts = body.split(/[ =]/, 2)
+          long = parts[0]
+          if parts.length > 1
+            takes_arg = true
+            optional_arg = true if parts[1].start_with?("[")
+          end
+        end
+      elsif arg.start_with?("-") && arg.length >= 2
+        rest = arg[1..-1]
+        short = rest[0]
+        takes_arg = true if rest.length > 1
+      end
+    end
+    @switches << {
+      "short" => short,
+      "long" => long,
+      "arg" => takes_arg,
+      "optional" => optional_arg,
+      "block" => block
+    }
+    self
   end
 
-  def parse!(args = [])
-    args
+  def def_option(*args, &block)
+    on(*args, &block)
+  end
+
+  def separator(*); end
+  def to_s; @banner.to_s; end
+  def help; to_s; end
+  def order!(argv); parse!(argv); end
+
+  def parse!(argv)
+    rest = []
+    i = 0
+    while i < argv.length
+      tok = argv[i]
+      if tok == "--"
+        i += 1
+        while i < argv.length
+          rest << argv[i]
+          i += 1
+        end
+        break
+      elsif tok.start_with?("--")
+        body = tok[2..-1]
+        eqpos = body.index("=")
+        if eqpos
+          name = body[0...eqpos]
+          inline = body[(eqpos + 1)..-1]
+          has_eq = true
+        else
+          name = body
+          inline = nil
+          has_eq = false
+        end
+        sw = _find_long(name)
+        negated = false
+        if sw.nil? && name.start_with?("no-")
+          sw = _find_long(name[3..-1])
+          negated = true unless sw.nil?
+        end
+        raise InvalidOption, "invalid option: --#{name}" if sw.nil?
+        if sw["arg"]
+          if has_eq
+            value = inline
+          elsif sw["optional"]
+            value = nil
+          else
+            i += 1
+            value = argv[i]
+            raise MissingArgument, "missing argument: --#{name}" if value.nil?
+          end
+          sw["block"].call(value) if sw["block"]
+        else
+          sw["block"].call(!negated) if sw["block"]
+        end
+      elsif tok.start_with?("-") && tok.length >= 2
+        chars = tok[1..-1]
+        j = 0
+        while j < chars.length
+          c = chars[j]
+          sw = _find_short(c)
+          raise InvalidOption, "invalid option: -#{c}" if sw.nil?
+          if sw["arg"]
+            value = chars[(j + 1)..-1]
+            if value.nil? || value.empty?
+              if sw["optional"]
+                value = nil
+              else
+                i += 1
+                value = argv[i]
+                raise MissingArgument, "missing argument: -#{c}" if value.nil?
+              end
+            end
+            sw["block"].call(value) if sw["block"]
+            break
+          else
+            sw["block"].call(true) if sw["block"]
+            j += 1
+          end
+        end
+      else
+        rest << tok
+      end
+      i += 1
+    end
+    argv.clear
+    rest.each { |item| argv << item }
+    argv
+  end
+
+  def parse(argv)
+    parse!(argv.dup)
+  end
+
+  def _find_long(name)
+    @switches.each { |sw| return sw if sw["long"] == name }
+    nil
+  end
+
+  def _find_short(ch)
+    @switches.each { |sw| return sw if sw["short"] == ch }
+    nil
   end
 end
 "#;
