@@ -8,6 +8,40 @@ use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
 
+/// Pure-Ruby reimplementation of `Hash#merge`, `Hash#merge!`, and `Hash#update`.
+///
+/// Artichoke's Rust-backed `Hash#merge` rejects a trailing implicit hash —
+/// both `h.merge(k: v)` (bare symbol keywords) and `h.merge('k' => v)`
+/// (hashrocket) raise a self-contradictory `ArgumentError: wrong number of
+/// arguments (given 1, expected 1)`; only `h.merge({ ... })` with explicit
+/// braces works. Re-defining these in Ruby with `(*others, **kwargs)` lets the
+/// interpreter's normal call-binding fold the implicit hash / keyword bucket
+/// back in (MRI's behavior for methods that don't declare keywords), fixing
+/// every variadic last-hash call site (`merge`, `update`, fact-hash builders,
+/// etc.) at once.
+pub(crate) const HASH_MERGE_FIX: &str = r#"
+class Hash
+  def merge(*others, **kwargs)
+    result = {}
+    each { |k, v| result[k] = v }
+    others.each do |other|
+      other.each { |k, v| result[k] = v } if other
+    end
+    kwargs.each { |k, v| result[k] = v }
+    result
+  end
+
+  def merge!(*others, **kwargs)
+    others.each do |other|
+      other.each { |k, v| self[k] = v } if other
+    end
+    kwargs.each { |k, v| self[k] = v }
+    self
+  end
+  alias update merge!
+end
+"#;
+
 /// Artichoke-backed test runner (no system Ruby/Puppet dependency).
 pub struct ArtichokeTestRunner<'a> {
     config: &'a TestConfig,
@@ -2202,6 +2236,10 @@ end
 "#;
         let base64_path = PathBuf::from(VIRTUAL_ROOT).join("base64.rb");
         env.def_rb_source_file(base64_path, base64.as_bytes().to_vec())?;
+
+        // Apply the Hash#merge keyword-binding workaround immediately (not as a
+        // require-on-demand virtual file) so every spec and helper sees it.
+        env.eval(HASH_MERGE_FIX)?;
 
         Ok(())
     }

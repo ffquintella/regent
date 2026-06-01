@@ -33,6 +33,36 @@ pub fn user_bundle_dir() -> Option<PathBuf> {
     }
 }
 
+/// Per-user Regent fixture cache directory.
+///
+/// Layout mirrors [`user_bundle_dir`]:
+/// - Unix / macOS: `$HOME/.regent/fixtures`
+/// - Windows: `%APPDATA%\Regent\fixtures` (falls back to
+///   `%LOCALAPPDATA%\Regent\fixtures`, then `%USERPROFILE%\.regent\fixtures`).
+///
+/// Downloaded Puppet module fixtures (Forge tarballs, git clones) are cached
+/// here keyed by source so they can be reused across modules and runs without
+/// re-fetching — and, once populated, without any network access at all.
+pub fn user_fixtures_dir() -> Option<PathBuf> {
+    if let Some(override_dir) = std::env::var_os("REGENT_FIXTURE_CACHE") {
+        return Some(PathBuf::from(override_dir));
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return Some(PathBuf::from(appdata).join("Regent").join("fixtures"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return Some(PathBuf::from(local).join("Regent").join("fixtures"));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile).join(".regent").join("fixtures"));
+        }
+        None
+    } else {
+        home_dir().map(|h| h.join(".regent").join("fixtures"))
+    }
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)

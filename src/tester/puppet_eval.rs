@@ -406,7 +406,12 @@ enum Stmt {
         titles: Vec<Expr>,
         attrs: HashMap<String, Expr>,
     },
-    Include(String),
+    /// `include`/`contain`/`require` of one or more classes. All three declare
+    /// the named class(es) into the catalog and expand their bodies; we don't
+    /// model the ordering/containment nuances that distinguish them, so they
+    /// share a single statement form. Holds a list so the comma-separated and
+    /// array call forms (`include foo, bar`, `contain ['a', 'b']`) all work.
+    Include(Vec<String>),
     If {
         cond: Cond,
         then_body: Vec<Stmt>,
@@ -478,6 +483,18 @@ enum Expr {
     Hash(Vec<(Expr, Expr)>),
     Var(VarRef),
     MethodCall { target: Box<Expr>, name: String },
+    /// A method call carrying a lambda block in *value* position, e.g.
+    /// `$xs.map |$x| { "${x}!" }` used as a selector arm, attribute value, or
+    /// function argument. `body` is the lambda's return expression (the common
+    /// single-expression form; extra statements in the block are skipped during
+    /// parsing). Statement-position `.each` is modeled separately as
+    /// `Stmt::EachLoop` so its body can declare resources.
+    Lambda {
+        target: Box<Expr>,
+        method: String,
+        params: Vec<String>,
+        body: Box<Expr>,
+    },
     ResourceRef { rtype: String, title: Box<Expr> },
     FunctionCall { name: String, args: Vec<Expr> },
     /// Puppet regex literal: `/pattern/[flags]`. Stored as the inner pattern;
@@ -578,6 +595,18 @@ impl<'a> EvalContext<'a> {
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
 
+        // Publish each class parameter under its fully-qualified name
+        // (`class::param`) so other classes can read it as `$class::param`.
+        // Body-assigned variables already get this treatment in the VarAssign
+        // handler; without doing the same for parameters, a cross-class
+        // reference like `$ferrogate::user` would resolve to Undef even though
+        // `$ferrogate::config_dir` (a body variable) works.
+        for param in class_def.params.keys() {
+            if let Some(value) = self.vars.get(param).cloned() {
+                self.vars.insert(format!("{name}::{param}"), value);
+            }
+        }
+
         self.catalog.add(PuppetResource {
             resource_type: "class".to_string(),
             title: name.to_string(),
@@ -620,6 +649,25 @@ impl<'a> EvalContext<'a> {
             local_vars.insert(key.clone(), value.clone());
         }
         self.vars.extend(local_vars);
+        // Surface the define's *resolved* parameters on the catalog resource:
+        // the values passed at the call site, plus any declared parameter that
+        // fell back to its default. Without this, a parameter like `ports` that
+        // relies on its default reads back as Undef from the catalog matcher.
+        // Snapshot before evaluating the body so body-local reassignments to a
+        // same-named variable don't leak into the resource's attributes.
+        let mut resolved_attrs = attrs.clone();
+        for param in define_def.params.keys() {
+            if !resolved_attrs.contains_key(param) {
+                if let Some(value) = self.vars.get(param) {
+                    resolved_attrs.insert(param.clone(), value.clone());
+                }
+            }
+        }
+        self.catalog.add(PuppetResource {
+            resource_type: name.to_string(),
+            title: title.to_string(),
+            attributes: resolved_attrs,
+        });
         let result = self.evaluate_statements(&define_def.body);
         self.vars = saved_vars;
         self.in_progress.retain(|item| item != &key);
@@ -641,6 +689,28 @@ impl<'a> EvalContext<'a> {
         self.apply_param_defaults(&define_def.params, &mut local_vars)?;
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
+        // The define under test is itself a catalog resource, carrying its
+        // resolved parameters (passed values merged with declared defaults), so
+        // `contain_<type>('title').with_<param>(...)` can match — including
+        // parameters left at their default, which would otherwise be Undef.
+        let mut resolved_attrs = HashMap::new();
+        if let PuppetValue::Hash(params) = &self.params {
+            for (key, value) in params {
+                resolved_attrs.insert(key.clone(), value.clone());
+            }
+        }
+        for param in define_def.params.keys() {
+            if !resolved_attrs.contains_key(param) {
+                if let Some(value) = self.vars.get(param) {
+                    resolved_attrs.insert(param.clone(), value.clone());
+                }
+            }
+        }
+        self.catalog.add(PuppetResource {
+            resource_type: normalize_rtype(name),
+            title: title.to_string(),
+            attributes: resolved_attrs,
+        });
         self.evaluate_statements(&define_def.body)?;
         Ok(())
     }
@@ -698,21 +768,35 @@ impl<'a> EvalContext<'a> {
                     }
                     for title in title_values {
                         let resource_type = normalize_rtype(rtype);
-                        let resource = PuppetResource {
+                        if resource_type == "class" {
+                            // Expand the class body first — `evaluate_class` adds
+                            // a bare (attribute-less) class resource — then add
+                            // the declaration's resolved attributes so it wins
+                            // the catalog slot. Otherwise the parameters passed
+                            // at `class { 'x': p => v }` are lost and matchers
+                            // can't introspect them.
+                            let _ = self.evaluate_class(&title);
+                            self.catalog.add(PuppetResource {
+                                resource_type,
+                                title: title.clone(),
+                                attributes: attributes.clone(),
+                            });
+                            continue;
+                        }
+                        self.catalog.add(PuppetResource {
                             resource_type: resource_type.clone(),
                             title: title.clone(),
                             attributes: attributes.clone(),
-                        };
-                        self.catalog.add(resource);
-                        if resource_type == "class" {
-                            let _ = self.evaluate_class(&title);
-                        } else if self.module.defines.contains_key(&resource_type) {
+                        });
+                        if self.module.defines.contains_key(&resource_type) {
                             let _ = self.instantiate_define(&resource_type, &title, &attributes);
                         }
                     }
                 }
-                Stmt::Include(name) => {
-                    let _ = self.evaluate_class(name);
+                Stmt::Include(names) => {
+                    for name in names {
+                        let _ = self.evaluate_class(name);
+                    }
                 }
                 Stmt::If { cond, then_body, else_body } => {
                     if self.eval_cond(cond)? {
@@ -914,6 +998,9 @@ impl<'a> EvalContext<'a> {
                     _ => value,
                 }
             }
+            Expr::Lambda { target, method, params, body } => {
+                self.eval_lambda(target, method, params, body)?
+            }
             Expr::ResourceRef { rtype, title } => {
                 let title = self.eval_expr(title)?.as_string();
                 PuppetValue::String(format!("{rtype}[{title}]"))
@@ -1002,6 +1089,86 @@ impl<'a> EvalContext<'a> {
         })
     }
 
+    /// Evaluate a value-position lambda (`receiver.method |params| { body }`).
+    /// Supports `map`, `filter`/`select`, `reject`, and `each`; unrecognized
+    /// methods fall back to the receiver value so the surrounding expression
+    /// still evaluates. The lambda parameters are bound for the body's duration
+    /// and any prior bindings of the same names are restored afterwards.
+    fn eval_lambda(
+        &mut self,
+        target: &Expr,
+        method: &str,
+        params: &[String],
+        body: &Expr,
+    ) -> Result<PuppetValue> {
+        let receiver = self.eval_expr(target)?;
+
+        // Iterate the receiver as a list of "elements", where each element is
+        // the binding(s) to apply for one lambda invocation.
+        let elements: Vec<Vec<PuppetValue>> = match &receiver {
+            PuppetValue::Array(items) => items.iter().map(|item| vec![item.clone()]).collect(),
+            PuppetValue::Hash(entries) => entries
+                .iter()
+                .map(|(k, v)| vec![PuppetValue::String(k.clone()), v.clone()])
+                .collect(),
+            _ => return Ok(receiver),
+        };
+
+        let saved: Vec<(String, Option<PuppetValue>)> = params
+            .iter()
+            .map(|name| (name.clone(), self.vars.get(name).cloned()))
+            .collect();
+
+        let mut mapped = Vec::new();
+        let mut kept = Vec::new();
+        for element in &elements {
+            // A single-param lambda over a hash receives `[key, value]` as the
+            // one parameter; otherwise bind positionally.
+            if params.len() == 1 && element.len() == 2 {
+                self.vars.insert(
+                    params[0].clone(),
+                    PuppetValue::Array(element.clone()),
+                );
+            } else {
+                for (name, value) in params.iter().zip(element.iter()) {
+                    self.vars.insert(name.clone(), value.clone());
+                }
+            }
+            let result = self.eval_expr(body)?;
+            match method {
+                "map" => mapped.push(result),
+                "filter" | "select" => {
+                    if result.is_truthy() {
+                        kept.push(element[0].clone());
+                    }
+                }
+                "reject" => {
+                    if !result.is_truthy() {
+                        kept.push(element[0].clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (name, prior) in saved {
+            match prior {
+                Some(value) => {
+                    self.vars.insert(name, value);
+                }
+                None => {
+                    self.vars.remove(&name);
+                }
+            }
+        }
+
+        Ok(match method {
+            "map" => PuppetValue::Array(mapped),
+            "filter" | "select" | "reject" => PuppetValue::Array(kept),
+            _ => receiver,
+        })
+    }
+
     /// Resolve a Puppet template reference like `"rustion/rustion.toml.epp"`
     /// to an absolute filesystem path of the form `<module>/templates/<rest>`.
     fn resolve_template_file(&self, reference: &str) -> Option<std::path::PathBuf> {
@@ -1063,6 +1230,10 @@ struct PuppetParser<'a> {
     tokens: Vec<Token>,
     index: usize,
     allow_bare_vars: bool,
+    /// When true, a `.method |params| { … }` in expression position attaches a
+    /// lambda (`Expr::Lambda`). Disabled while detecting a statement-position
+    /// `.each` so its block is parsed as resource-declaring statements instead.
+    lambda_in_expr: bool,
     warnings: Vec<ParseWarning>,
 }
 
@@ -1080,6 +1251,7 @@ impl<'a> PuppetParser<'a> {
             tokens,
             index: 0,
             allow_bare_vars: false,
+            lambda_in_expr: true,
             warnings: Vec::new(),
         }
     }
@@ -1212,6 +1384,61 @@ impl<'a> PuppetParser<'a> {
         Ok(params)
     }
 
+    /// Parse an expression with value-position lambda attachment suppressed, so
+    /// a trailing `.each |..| { .. }` is left for the statement-level iterator
+    /// detector (which parses the block as resource-declaring statements).
+    fn parse_no_lambda_expr(&mut self) -> Result<Expr> {
+        let prev = self.lambda_in_expr;
+        self.lambda_in_expr = false;
+        let result = self.parse_expr();
+        self.lambda_in_expr = prev;
+        result
+    }
+
+    /// Parse the `{ … }` body of a value-position lambda, returning its result
+    /// expression. Reads the first expression inside the braces (the lambda's
+    /// return value for the common single-expression body) and then skips any
+    /// remaining tokens up to the matching `}`, so multi-statement bodies parse
+    /// without error even though only the leading expression is modeled.
+    fn parse_lambda_value_body(&mut self) -> Result<Expr> {
+        self.expect(TokenKind::LBrace)?;
+        let body = if self.peek_kind() == Some(TokenKind::RBrace) {
+            Expr::Undef
+        } else {
+            self.parse_expr()?
+        };
+        // Skip to the brace that closes this lambda body, tracking nesting.
+        let mut depth = 1;
+        while depth > 0 && !self.is_eof() {
+            match self.peek_kind() {
+                Some(TokenKind::LBrace) => depth += 1,
+                Some(TokenKind::RBrace) => depth -= 1,
+                _ => {}
+            }
+            self.index += 1;
+        }
+        Ok(body)
+    }
+
+    /// If `expr` is a `.each` method call immediately followed by a lambda
+    /// (`… .each |params| { body }`), consume the parameters and body and return
+    /// the iteration statement. Returns `None` (consuming nothing further) when
+    /// `expr` is anything else, so callers can fall back to other handling.
+    fn finish_each_loop(&mut self, expr: &Expr) -> Result<Option<Stmt>> {
+        if let Expr::MethodCall { target, name } = expr {
+            if name == "each" && self.peek_kind() == Some(TokenKind::Pipe) {
+                let params = self.parse_lambda_params()?;
+                let body = self.parse_block()?;
+                return Ok(Some(Stmt::EachLoop {
+                    iterable: (**target).clone(),
+                    params,
+                    body,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Parse the `else`/`elsif` tail of an `if`/`unless` chain. `elsif C { … }`
     /// is desugared into `else { if C { … } [else { … }] }`.
     fn parse_else_chain(&mut self) -> Result<Vec<Stmt>> {
@@ -1241,10 +1468,17 @@ impl<'a> PuppetParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Result<Option<Stmt>> {
-        if self.consume_keyword("include") {
-            self.consume_leading_namespace_prefix();
-            let name = self.expect_ident()?;
-            return Ok(Some(Stmt::Include(name)));
+        // `include` / `contain` / `require` all declare one or more classes.
+        // We treat them identically (see `Stmt::Include`). Each accepts a
+        // comma-separated list of class references, where a reference may be a
+        // bare name (`foo::bar`), a quoted string, or an array of either, with
+        // an optional legacy `::` prefix and optional surrounding parentheses.
+        if self.consume_keyword("include")
+            || self.consume_keyword("contain")
+            || self.consume_keyword("require")
+        {
+            let names = self.parse_class_refs()?;
+            return Ok(Some(Stmt::Include(names)));
         }
         if self.consume_keyword("if") {
             let cond = self.parse_cond()?;
@@ -1301,22 +1535,33 @@ impl<'a> PuppetParser<'a> {
             }
             // `$var[.method...].each |params| { body }` — Puppet's iteration form.
             // Roll back to the variable so parse_expr can consume the full
-            // method chain, then detect a trailing lambda.
+            // method chain, then detect a trailing lambda. Lambda attachment is
+            // disabled here so the `.each` block is parsed as resource-declaring
+            // statements rather than collapsed into an `Expr::Lambda` value.
             self.index = save;
-            let expr = self.parse_expr()?;
-            if let Expr::MethodCall { target, name: method } = &expr {
-                if method == "each" && self.peek_kind() == Some(TokenKind::Pipe) {
-                    let params = self.parse_lambda_params()?;
-                    let body = self.parse_block()?;
-                    return Ok(Some(Stmt::EachLoop {
-                        iterable: (**target).clone(),
-                        params,
-                        body,
-                    }));
-                }
+            let expr = self.parse_no_lambda_expr()?;
+            if let Some(stmt) = self.finish_each_loop(&expr)? {
+                return Ok(Some(stmt));
             }
             // Bare `$var` (or unhandled trailing expr) is dropped — preserve
             // prior behavior of skipping unrecognised statement forms.
+            return Ok(Some(Stmt::Noop));
+        }
+        // Iteration on a literal collection or parenthesized expression rather
+        // than a `$variable`: `[...].each |p| { … }` and `({...}).each |p| { … }`.
+        // Puppet can't use a *bare* `{...}` hash literal at statement start (it's
+        // ambiguous with a resource expression), so the supported forms are an
+        // array literal `[...]` or a parenthesized expression `(...)` — the
+        // latter being Puppet's documented workaround for iterating a hash
+        // literal, e.g. `({'a' => 1}).each |$k, $v| { … }`. Without these
+        // branches the statement parser dropped the construct and its body.
+        if matches!(self.peek_kind(), Some(TokenKind::LBracket | TokenKind::LParen)) {
+            let expr = self.parse_no_lambda_expr()?;
+            if let Some(stmt) = self.finish_each_loop(&expr)? {
+                return Ok(Some(stmt));
+            }
+            // A bare collection/parenthesized expression as a statement has no
+            // effect; consume it.
             return Ok(Some(Stmt::Noop));
         }
         // `create_resources('rtype', $hash[, $defaults])` as a statement.
@@ -1542,6 +1787,23 @@ impl<'a> PuppetParser<'a> {
         loop {
             if self.consume(TokenKind::Dot) {
                 let name = self.expect_ident()?;
+                // `.method |params| { body }` in value position is a lambda. `|`
+                // is an unambiguous lambda signal — there's no hash/block
+                // ambiguity to guard against — so attach it whenever it follows
+                // a method postfix, regardless of the enclosing braces. (The
+                // statement-`.each` detector disables this so it can read the
+                // block as resource-declaring statements.)
+                if self.lambda_in_expr && self.peek_kind() == Some(TokenKind::Pipe) {
+                    let params = self.parse_lambda_params()?;
+                    let body = self.parse_lambda_value_body()?;
+                    expr = Expr::Lambda {
+                        target: Box::new(expr),
+                        method: name,
+                        params,
+                        body: Box::new(body),
+                    };
+                    continue;
+                }
                 expr = Expr::MethodCall { target: Box::new(expr), name };
                 continue;
             }
@@ -1701,6 +1963,47 @@ impl<'a> PuppetParser<'a> {
         Ok(token.text.clone())
     }
 
+    /// Parse the argument(s) of an `include`/`contain`/`require` statement into a
+    /// flat list of class names. Accepts a comma-separated list, optionally
+    /// wrapped in parentheses, where each element is a bare identifier, a quoted
+    /// string, or a bracketed array of those — each optionally carrying a legacy
+    /// `::` prefix.
+    fn parse_class_refs(&mut self) -> Result<Vec<String>> {
+        let wrapped = self.consume(TokenKind::LParen);
+        let mut names = Vec::new();
+        loop {
+            self.consume_leading_namespace_prefix();
+            match self.peek_kind() {
+                Some(TokenKind::Ident) => names.push(self.expect_ident()?),
+                Some(TokenKind::String) => names.push(self.expect_string()?),
+                Some(TokenKind::LBracket) => {
+                    self.index += 1; // consume `[`
+                    while !self.consume(TokenKind::RBracket) && !self.is_eof() {
+                        if self.consume(TokenKind::Comma) {
+                            continue;
+                        }
+                        self.consume_leading_namespace_prefix();
+                        match self.peek_kind() {
+                            Some(TokenKind::Ident) => names.push(self.expect_ident()?),
+                            Some(TokenKind::String) => names.push(self.expect_string()?),
+                            _ => {
+                                self.index += 1;
+                            }
+                        }
+                    }
+                }
+                _ => break,
+            }
+            if !self.consume(TokenKind::Comma) {
+                break;
+            }
+        }
+        if wrapped {
+            self.consume(TokenKind::RParen);
+        }
+        Ok(names)
+    }
+
     fn expect_var(&mut self) -> Result<String> {
         let token = self.expect_token(TokenKind::Var)?;
         Ok(token.text.trim_start_matches('$').to_string())
@@ -1774,6 +2077,7 @@ impl Expr {
             Expr::Hash(_) => "hash".to_string(),
             Expr::Var(var) => var.name.clone(),
             Expr::MethodCall { name, .. } => name.clone(),
+            Expr::Lambda { method, .. } => method.clone(),
             Expr::ResourceRef { rtype, .. } => rtype.clone(),
             Expr::FunctionCall { name, .. } => name.clone(),
             Expr::Regex(pattern) => pattern.clone(),
@@ -2557,7 +2861,7 @@ class foo {
         assert!(warnings[0].contains("leading `::`"));
         match &defs[0] {
             PuppetDef::Class(c) => match &c.body[..] {
-                [Stmt::Include(name)] => assert_eq!(name, "stdlib"),
+                [Stmt::Include(names)] => assert_eq!(names, &["stdlib".to_string()]),
                 other => panic!("unexpected body: {other:?}"),
             },
             _ => panic!("expected class def"),
@@ -2946,6 +3250,63 @@ class foo {
     }
 
     #[test]
+    fn contain_declares_class_and_expands_body() {
+        // `contain` must behave like `include`: declare the class into the
+        // catalog and expand its body. Previously `contain` fell through to the
+        // resource parser and was silently dropped.
+        let manifest = r#"
+            class baseapp {
+              contain baseapp::config
+            }
+            class baseapp::config {
+              file { '/etc/baseapp.conf': ensure => file }
+            }
+        "#;
+        let dir = write_module("baseapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "baseapp",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with `contain` must evaluate");
+        assert!(catalog.contains("class", "baseapp::config"));
+        assert!(catalog.contains("file", "/etc/baseapp.conf"));
+    }
+
+    #[test]
+    fn include_accepts_comma_separated_and_quoted_class_lists() {
+        // `include a, b` and quoted/array forms must each declare every class.
+        let manifest = r#"
+            class baseapp {
+              include baseapp::a, 'baseapp::b'
+              contain ['baseapp::c']
+            }
+            class baseapp::a { file { '/etc/a': ensure => file } }
+            class baseapp::b { file { '/etc/b': ensure => file } }
+            class baseapp::c { file { '/etc/c': ensure => file } }
+        "#;
+        let dir = write_module("baseapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "baseapp",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with comma/array include forms must evaluate");
+        for (class, file) in [
+            ("baseapp::a", "/etc/a"),
+            ("baseapp::b", "/etc/b"),
+            ("baseapp::c", "/etc/c"),
+        ] {
+            assert!(catalog.contains("class", class), "missing class {class}");
+            assert!(catalog.contains("file", file), "missing file {file}");
+        }
+    }
+
+    #[test]
     fn loader_picks_up_nested_manifest_files() {
         // `mod::sub::leaf` should autoload from manifests/sub/leaf.pp.
         let dir = tempfile::tempdir().unwrap();
@@ -3119,6 +3480,111 @@ class foo {
     }
 
     #[test]
+    fn class_parameter_is_readable_as_scoped_variable_cross_class() {
+        // A class parameter must be reachable from another class as
+        // `$class::param`, exactly like a body-assigned variable. Previously
+        // only body variables were published under their qualified name, so a
+        // cross-class read of a parameter resolved to Undef.
+        let manifest = r#"
+            class ferrogate($user = 'svc') {
+              $config_dir = '/etc/ferrogate'
+              include ferrogate::config
+            }
+            class ferrogate::config {
+              file { $ferrogate::config_dir: ensure => directory }
+              file { "/home/${ferrogate::user}": ensure => directory }
+            }
+        "#;
+        let dir = write_module("ferrogate", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "ferrogate",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .unwrap();
+        assert!(
+            catalog.contains("file", "/etc/ferrogate"),
+            "cross-class body variable must resolve"
+        );
+        assert!(
+            catalog.contains("file", "/home/svc"),
+            "cross-class class parameter must resolve"
+        );
+    }
+
+    #[test]
+    fn each_on_literal_array_creates_resources() {
+        // `.each` on a literal array (not a `$variable`) must still iterate and
+        // declare the resources in its body. Previously the statement parser
+        // had no branch for a leading `[`, so the loop body was dropped.
+        let manifest = r#"
+            class foo {
+              ['a', 'b'].each |$n| {
+                notify { $n: }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .unwrap();
+        assert!(catalog.contains("notify", "a"));
+        assert!(catalog.contains("notify", "b"));
+    }
+
+    #[test]
+    fn each_on_parenthesized_hash_literal_creates_resources() {
+        // Puppet can't iterate a *bare* `{...}` hash literal at statement start
+        // (ambiguous with a resource expression); the documented workaround is
+        // to parenthesize it. `({...}).each |$k, $v| { … }` must iterate.
+        let manifest = r#"
+            class foo {
+              ({ 'a' => 1, 'b' => 2 }).each |$k, $v| {
+                notify { $k: }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .unwrap();
+        assert!(catalog.contains("notify", "a"));
+        assert!(catalog.contains("notify", "b"));
+    }
+
+    #[test]
+    fn class_resource_declaration_exposes_attributes() {
+        // `class { 'foo': param => val }` must keep `param` on the catalog
+        // resource so matchers can introspect it — expanding the class body
+        // must not clobber the declared attributes.
+        let manifest = r#"
+            class foo($greeting = 'default') {
+              notify { 'inner': }
+            }
+            class baseapp {
+              class { 'foo': greeting => 'hi' }
+            }
+        "#;
+        let dir = write_module("baseapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("baseapp", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .unwrap();
+        // Body still expanded.
+        assert!(catalog.contains("notify", "inner"));
+        let resource = catalog.find("class", "foo").expect("class[foo] in catalog");
+        assert_eq!(
+            resource.attributes.get("greeting"),
+            Some(&PuppetValue::String("hi".to_string())),
+            "declared class attribute must be introspectable"
+        );
+    }
+
+    #[test]
     fn child_exec_of_in_module_define_is_in_catalog() {
         // Declaring a defined type inline must expand the body and add the
         // inner resources to the catalog so that `contain_exec(...)` can see
@@ -3146,6 +3612,180 @@ class foo {
         assert!(
             catalog.contains("exec", "install-primary"),
             "child exec of defined type must be exposed via contain_exec"
+        );
+    }
+
+    #[test]
+    fn defined_type_resource_exposes_defaulted_params() {
+        // A defined type declared inside a class exposes ALL its parameters on
+        // the catalog resource — including ones left at their declared default.
+        // `contain_dockerapp__run('web').with_ports([...])` must see the default
+        // `ports` value instead of reading it back as Undef.
+        let manifest = r#"
+            define dockerapp::run(
+              String $image,
+              Array $ports = ['80:80'],
+            ) {
+              notify { "run-${title}": }
+            }
+            class profile {
+              dockerapp::run { 'web': image => 'nginx' }
+            }
+        "#;
+        let dir = write_module("dockerapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "profile",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class declaring a defined type must evaluate");
+        let resource = catalog
+            .find("dockerapp::run", "web")
+            .expect("dockerapp::run[web] must be in the catalog");
+        assert_eq!(
+            resource.attributes.get("ports"),
+            Some(&PuppetValue::Array(vec![PuppetValue::String("80:80".to_string())])),
+            "defaulted `ports` must read back as its default, not Undef"
+        );
+        assert_eq!(
+            resource.attributes.get("image"),
+            Some(&PuppetValue::String("nginx".to_string())),
+            "explicitly-passed `image` must still be present"
+        );
+    }
+
+    #[test]
+    fn subject_define_resource_exposes_defaulted_params() {
+        // When the defined type is itself the test subject, its own catalog
+        // resource must carry resolved parameters (passed + defaulted) so
+        // `contain_<type>(title).with_<param>(...)` matches.
+        let manifest = r#"
+            define dockerapp::run(
+              String $image,
+              Array $ports = ['8080:80'],
+            ) {
+              notify { "run-${title}": }
+            }
+        "#;
+        let dir = write_module("dockerapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut params = HashMap::new();
+        params.insert("image".to_string(), PuppetValue::String("nginx".to_string()));
+        let catalog = evaluator
+            .evaluate_define(
+                "dockerapp::run",
+                "web",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(params),
+            )
+            .expect("defined type subject must evaluate");
+        let resource = catalog
+            .find("dockerapp::run", "web")
+            .expect("subject define dockerapp::run[web] must be in the catalog");
+        assert_eq!(
+            resource.attributes.get("ports"),
+            Some(&PuppetValue::Array(vec![PuppetValue::String("8080:80".to_string())])),
+            "defaulted `ports` on the subject define must read back as its default"
+        );
+        assert_eq!(
+            resource.attributes.get("image"),
+            Some(&PuppetValue::String("nginx".to_string())),
+            "passed `image` param must be present on the subject define resource"
+        );
+    }
+
+    #[test]
+    fn subject_define_body_resources_are_in_catalog() {
+        // When a defined type is the test subject, its body must expand into the
+        // catalog (not just its own resource with parameters).
+        let manifest = r#"
+            define dockerapp::run(String $image) {
+              notify { "run-${title}": }
+              file { "/etc/${title}.conf": ensure => file }
+            }
+        "#;
+        let dir = write_module("dockerapp", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut params = HashMap::new();
+        params.insert("image".to_string(), PuppetValue::String("nginx".to_string()));
+        let catalog = evaluator
+            .evaluate_define(
+                "dockerapp::run",
+                "web",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(params),
+            )
+            .unwrap();
+        assert!(catalog.contains("notify", "run-web"), "body notify missing");
+        assert!(catalog.contains("file", "/etc/web.conf"), "body file missing");
+    }
+
+    #[test]
+    fn selector_arm_may_hold_a_lambda() {
+        // `subject ? { default => $xs.map |$x| { ... } }` must parse — the
+        // selector body's braces must not suppress lambda recognition.
+        let mut parser = PuppetParser::new(
+            "class foo {\n  $a = $c ? { default => [1, 2].map |$i| { $i } }\n}\n",
+        );
+        let defs = parser.parse_definitions().expect("selector arm with lambda must parse");
+        assert_eq!(defs.len(), 1);
+        // Control: the same lambda as an assignment RHS already parsed.
+        let mut control = PuppetParser::new("class foo {\n  $b = [1, 2].map |$i| { $i } }\n");
+        control.parse_definitions().expect("assignment-RHS lambda must parse");
+    }
+
+    #[test]
+    fn map_lambda_in_selector_arm_evaluates() {
+        // The lambda isn't just parsed — `.map` actually transforms the array,
+        // so a resource title built from it is correct.
+        let manifest = r#"
+            class foo {
+              $relabel = 'z'
+              $volumes = ['a', 'b']
+              $mapped = $relabel ? {
+                'none'  => $volumes,
+                default => $volumes.map |$v| { "${v}:${relabel}" },
+              }
+              $mapped.each |$m| {
+                notify { $m: }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .unwrap();
+        assert!(catalog.contains("notify", "a:z"));
+        assert!(catalog.contains("notify", "b:z"));
+    }
+
+    #[test]
+    fn map_lambda_in_resource_attribute_value() {
+        // Lambdas must also attach inside resource attribute values.
+        let manifest = r#"
+            class foo {
+              $ports = ['80', '443']
+              notify { 'x':
+                message => $ports.map |$p| { "port-${p}" },
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .unwrap();
+        let resource = catalog.find("notify", "x").expect("notify[x] present");
+        assert_eq!(
+            resource.attributes.get("message"),
+            Some(&PuppetValue::Array(vec![
+                PuppetValue::String("port-80".to_string()),
+                PuppetValue::String("port-443".to_string()),
+            ])),
+            "map lambda in attribute value must evaluate"
         );
     }
 }

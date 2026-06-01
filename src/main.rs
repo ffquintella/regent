@@ -98,12 +98,19 @@ enum Commands {
     },
 
     /// Download and install fixture modules declared in .fixtures.yml
+    ///
+    /// Downloaded Forge/git modules are cached per-user (~/.regent/fixtures) and
+    /// reused on later runs; once cached, `--offline` installs them with no
+    /// network access.
     Fixtures {
         #[arg(help = "Path to module", default_value = ".")]
         path: PathBuf,
 
         #[arg(long, help = "Remove existing fixtures before downloading")]
         clean: bool,
+
+        #[arg(long, help = "Install only from the per-user cache; never use the network")]
+        offline: bool,
     },
 
     /// Show version
@@ -230,9 +237,9 @@ fn main() -> anyhow::Result<()> {
             BootstrapCommand::execute(&path, force)?;
         }
 
-        Commands::Fixtures { path, clean } => {
+        Commands::Fixtures { path, clean, offline } => {
             println!("{}", format!("Installing fixtures at: {:?}", path).cyan());
-            cli::FixturesCommand::execute(&path, clean)?;
+            cli::FixturesCommand::execute(&path, clean, offline)?;
         }
 
         Commands::Version => {

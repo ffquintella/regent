@@ -11,8 +11,9 @@ pub enum FixtureSource {
     Symlink { target: String },
     /// `git clone <repo>` (optionally `--branch <ref_value>`) into `spec/fixtures/modules/<name>`.
     Git { repo: String, ref_value: Option<String> },
-    /// Forge module reference like `puppetlabs/stdlib`. Recognised but installation is skipped
-    /// (regent has no forge client); the user is expected to vendor or symlink these.
+    /// Forge module reference like `puppetlabs/stdlib` (optionally
+    /// `author/module:version`). Downloaded from the Puppet Forge and cached
+    /// per-user (`~/.regent/fixtures`) for offline reuse.
     Forge { slug: String },
 }
 
@@ -121,6 +122,12 @@ pub struct FixtureManager {
     pub fixtures_dir: PathBuf,
     pub module_path: PathBuf,
     pub config: FixtureConfig,
+    /// When true, never reach the network: install only from the per-user
+    /// fixture cache (falling back to a stub for anything not cached).
+    offline: bool,
+    /// Override for the per-user fixture cache directory. `None` uses the
+    /// default (`~/.regent/fixtures`). A cache of `None` disables caching.
+    cache_dir: Option<PathBuf>,
 }
 
 impl FixtureManager {
@@ -130,7 +137,23 @@ impl FixtureManager {
             fixtures_dir: fixtures_dir.as_ref().to_path_buf(),
             module_path: module_path.as_ref().to_path_buf(),
             config: FixtureConfig::new(),
+            offline: false,
+            cache_dir: crate::tester::bundled_gems::user_fixtures_dir(),
         }
+    }
+
+    /// Install fixtures only from the per-user cache, never touching the
+    /// network. Anything not already cached falls back to a stub.
+    pub fn set_offline(&mut self, offline: bool) -> &mut Self {
+        self.offline = offline;
+        self
+    }
+
+    /// Override the per-user fixture cache directory (mainly for tests). Pass
+    /// `None` to disable caching entirely.
+    pub fn set_cache_dir(&mut self, dir: Option<PathBuf>) -> &mut Self {
+        self.cache_dir = dir;
+        self
     }
 
     /// Parse .fixtures.yml file. Supports the standard rspec-puppet-fixtures shape:
@@ -197,24 +220,20 @@ impl FixtureManager {
                         }
                     }
                 }
-                Some(FixtureSource::Git { repo, ref_value }) => {
-                    install_git(&fixture_path, repo, ref_value.as_deref()).unwrap_or_else(|err| {
+                // Forge and git fixtures route through the per-user cache: a
+                // cache hit copies the module with no network, a miss downloads
+                // once and populates the cache for next time. In offline mode a
+                // miss falls back to a stub instead of reaching the network.
+                Some(source @ FixtureSource::Git { .. })
+                | Some(source @ FixtureSource::Forge { .. }) => self
+                    .install_cached(&fixture_path, source)
+                    .unwrap_or_else(|err| {
                         eprintln!(
-                            "warning: git install failed for fixture {}: {}; using stub",
+                            "warning: install failed for fixture {}: {}; using stub",
                             module_name, err
                         );
                         false
-                    })
-                }
-                Some(FixtureSource::Forge { slug }) => {
-                    install_forge(&fixture_path, slug).unwrap_or_else(|err| {
-                        eprintln!(
-                            "warning: forge install failed for fixture {} ({}): {}; using stub",
-                            module_name, slug, err
-                        );
-                        false
-                    })
-                }
+                    }),
                 _ => false,
             };
 
@@ -243,6 +262,58 @@ impl FixtureManager {
             ));
         }
         symlink_dir(&resolved, fixture_path)
+    }
+
+    /// Install a Forge/git fixture via the per-user cache.
+    ///
+    /// 1. If the cache holds a valid copy for this source, copy it into
+    ///    `fixture_path` (no network).
+    /// 2. Otherwise, when online, download/clone into the cache, then copy it
+    ///    into `fixture_path`. When offline (or caching is disabled and we're
+    ///    offline), report failure so the caller installs a stub.
+    ///
+    /// With caching disabled (`cache_dir == None`) and online, the download is
+    /// written straight to `fixture_path` (legacy behavior).
+    fn install_cached(&self, fixture_path: &Path, source: &FixtureSource) -> Result<bool> {
+        let Some(cache_root) = self.cache_dir.as_ref() else {
+            // No cache configured: download straight into the module (unless
+            // offline, in which case there's nothing we can do).
+            if self.offline {
+                return Ok(false);
+            }
+            return download_source(fixture_path, source);
+        };
+
+        let key = cache_key(source);
+        let cached = cache_root.join(&key);
+
+        if !cache_entry_is_valid(&cached) {
+            if self.offline {
+                eprintln!(
+                    "offline: fixture not in cache ({}); using stub",
+                    cached.display()
+                );
+                return Ok(false);
+            }
+            // Download into a temp dir adjacent to the cache slot, then rename
+            // into place so a partial download never poisons the cache.
+            fs::create_dir_all(cache_root)
+                .with_context(|| format!("create fixture cache {}", cache_root.display()))?;
+            let staging = cache_root.join(format!("{key}.tmp"));
+            let _ = fs::remove_dir_all(&staging);
+            if !download_source(&staging, source)? {
+                let _ = fs::remove_dir_all(&staging);
+                return Ok(false);
+            }
+            let _ = fs::remove_dir_all(&cached);
+            fs::rename(&staging, &cached).with_context(|| {
+                format!("promote {} -> {}", staging.display(), cached.display())
+            })?;
+        }
+
+        copy_tree(&cached, fixture_path)
+            .with_context(|| format!("copy cached fixture {} -> {}", cached.display(), fixture_path.display()))?;
+        Ok(true)
     }
 
     /// Verify fixtures are properly set up
@@ -336,6 +407,69 @@ fn expand_fixture_target(target: &str, module_path: &Path) -> String {
         out = module_str;
     }
     out
+}
+
+/// Download a Forge/git fixture source into `dest` (the existing, non-cached
+/// install paths). Symlink sources are not handled here.
+fn download_source(dest: &Path, source: &FixtureSource) -> Result<bool> {
+    match source {
+        FixtureSource::Git { repo, ref_value } => install_git(dest, repo, ref_value.as_deref()),
+        FixtureSource::Forge { slug } => install_forge(dest, slug),
+        FixtureSource::Symlink { .. } => Ok(false),
+    }
+}
+
+/// A stable per-source cache key, used as a directory name under the fixture
+/// cache root. Unpinned forge/git sources cache under a `-current` / `@HEAD`
+/// key; pin a version/ref in `.fixtures.yml` for a stable, reproducible entry.
+fn cache_key(source: &FixtureSource) -> String {
+    let raw = match source {
+        FixtureSource::Forge { slug } => {
+            let (slug_part, version) = match slug.split_once(':') {
+                Some((s, v)) if !v.is_empty() => (s, v),
+                _ => (slug.as_str(), "current"),
+            };
+            format!("forge/{}-{}", slug_part.replace('/', "-"), version)
+        }
+        FixtureSource::Git { repo, ref_value } => {
+            format!("git/{}@{}", repo, ref_value.as_deref().unwrap_or("HEAD"))
+        }
+        FixtureSource::Symlink { target } => format!("symlink/{target}"),
+    };
+    sanitize_cache_key(&raw)
+}
+
+/// Reduce an arbitrary source identifier to a safe single path segment.
+fn sanitize_cache_key(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') { c } else { '_' })
+        .collect()
+}
+
+/// A cache entry is usable only if it's a directory containing a real module
+/// (a `metadata.json`), which also rules out leftover empty/partial slots.
+fn cache_entry_is_valid(dir: &Path) -> bool {
+    dir.is_dir() && dir.join("metadata.json").is_file()
+}
+
+/// Recursively copy the contents of `src` into `dst`, creating `dst`. Symlinks
+/// are followed (fixtures are plain module trees).
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            fs::copy(&from, &to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn install_git(fixture_path: &Path, repo: &str, ref_value: Option<&str>) -> Result<bool> {
@@ -965,6 +1099,83 @@ fixtures:
         assert!(content.contains("test"));
         assert!(content.contains("1.0.0"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn cache_key_is_stable_and_sanitized() {
+        assert_eq!(
+            cache_key(&FixtureSource::Forge { slug: "puppetlabs/stdlib:9.4.1".into() }),
+            "forge_puppetlabs-stdlib-9.4.1"
+        );
+        // Unpinned forge gets a `-current` suffix.
+        assert_eq!(
+            cache_key(&FixtureSource::Forge { slug: "voxpupuli/archive".into() }),
+            "forge_voxpupuli-archive-current"
+        );
+        // Git keys fold the URL/ref into one safe segment.
+        let git = cache_key(&FixtureSource::Git {
+            repo: "https://github.com/puppetlabs/puppetlabs-concat.git".into(),
+            ref_value: Some("v9.0.0".into()),
+        });
+        assert!(git.starts_with("git_"));
+        assert!(!git.contains('/'));
+        assert!(git.contains("v9.0.0"));
+    }
+
+    /// Build a minimal valid cached module directory.
+    fn write_fake_cached_module(dir: &Path, name: &str) {
+        fs::create_dir_all(dir.join("manifests")).unwrap();
+        fs::write(
+            dir.join("metadata.json"),
+            format!(r#"{{"name":"{name}","version":"2.0.0","dependencies":[]}}"#),
+        )
+        .unwrap();
+        fs::write(dir.join("manifests").join("init.pp"), "class archive {}\n").unwrap();
+    }
+
+    #[test]
+    fn offline_install_uses_cache_without_network() -> Result<()> {
+        let temp = TempDir::new()?;
+        let cache = temp.path().join("cache");
+        let fixtures_dir = temp.path().join("fixtures");
+
+        // Pre-populate the cache as if a prior online run had downloaded it.
+        let source = FixtureSource::Forge { slug: "voxpupuli/archive".into() };
+        let cached = cache.join(cache_key(&source));
+        write_fake_cached_module(&cached, "archive");
+
+        let mut manager = FixtureManager::new(temp.path(), &fixtures_dir);
+        manager.set_cache_dir(Some(cache.clone())).set_offline(true);
+        manager.config =
+            FixtureConfig::new().add_module("archive", FixtureModule::new("archive").with_forge("voxpupuli/archive"));
+
+        let count = manager.setup_fixtures()?;
+        assert_eq!(count, 1);
+        // The module was copied out of the cache — contents and all.
+        assert!(fixtures_dir.join("archive").join("metadata.json").exists());
+        assert!(fixtures_dir.join("archive").join("manifests").join("init.pp").exists());
+        let meta = fs::read_to_string(fixtures_dir.join("archive").join("metadata.json"))?;
+        assert!(meta.contains("2.0.0"), "should be the cached module, not a stub");
+        Ok(())
+    }
+
+    #[test]
+    fn offline_install_falls_back_to_stub_on_cache_miss() -> Result<()> {
+        let temp = TempDir::new()?;
+        let cache = temp.path().join("empty-cache");
+        let fixtures_dir = temp.path().join("fixtures");
+
+        let mut manager = FixtureManager::new(temp.path(), &fixtures_dir);
+        manager.set_cache_dir(Some(cache)).set_offline(true);
+        manager.config = FixtureConfig::new()
+            .add_module("archive", FixtureModule::new("archive").with_forge("voxpupuli/archive"));
+
+        let count = manager.setup_fixtures()?;
+        assert_eq!(count, 1);
+        // No network in offline mode → a stub is written.
+        let meta = fs::read_to_string(fixtures_dir.join("archive").join("metadata.json"))?;
+        assert!(meta.contains("Regent stub fixture"), "offline miss should stub, got: {meta}");
         Ok(())
     }
 }

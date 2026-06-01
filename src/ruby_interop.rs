@@ -118,6 +118,43 @@ impl Default for RubyEnvironment {
     }
 }
 
+#[cfg(test)]
+mod merge_repro_tests {
+    use super::*;
+    use crate::tester::artichoke_runner::HASH_MERGE_FIX;
+
+    #[test]
+    fn hash_merge_fix_handles_all_call_forms() {
+        let mut env = RubyEnvironment::new().unwrap();
+        env.eval(HASH_MERGE_FIX).unwrap();
+        // explicit braces
+        assert_eq!(
+            env.eval_to_string("({'a' => 1}.merge({'b' => 2})).length.to_s").unwrap(),
+            "2"
+        );
+        // implicit hash with hashrocket
+        assert_eq!(
+            env.eval_to_string("({'a' => 1}.merge('b' => 2)).length.to_s").unwrap(),
+            "2"
+        );
+        // bare symbol keyword — the originally-failing form
+        assert_eq!(
+            env.eval_to_string("({'a' => 1}.merge(b: 2)).length.to_s").unwrap(),
+            "2"
+        );
+        // the merged value is actually present and correct (symbol key, as MRI)
+        assert_eq!(
+            env.eval_to_string("({'a' => 1}.merge(b: 2))[:b].to_s").unwrap(),
+            "2"
+        );
+        // merge! / update in place
+        assert_eq!(
+            env.eval_to_string("(h = {'a' => 1}; h.update(b: 2); h.length).to_s").unwrap(),
+            "2"
+        );
+    }
+}
+
 /// FFI bridge for calling Rust from Ruby
 pub mod ffi {
     pub fn rust_function_from_ruby(_arg: String) -> String {
