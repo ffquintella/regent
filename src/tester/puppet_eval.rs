@@ -442,6 +442,29 @@ enum Stmt {
         hash_expr: Expr,
         defaults_expr: Option<Expr>,
     },
+    /// `ensure_resource($type, $title[, $params])` — stdlib's idempotent
+    /// resource declaration. Declares one resource (or one per title, when
+    /// `$title` is an array) of the given type with the given params, and
+    /// expands the matching defined type if `$type` names one. Modeled as a
+    /// first-class statement because the call almost always carries a `{...}`
+    /// hash argument: without explicit parsing the hash's closing `}` is
+    /// mistaken for the enclosing class body's `}`, silently truncating the
+    /// rest of the class.
+    EnsureResource {
+        type_expr: Expr,
+        title_expr: Expr,
+        params_expr: Option<Expr>,
+    },
+    /// `ensure_packages($packages[, $params])` — declares a `package` resource
+    /// per entry. `$packages` is either an array of names (each taking the
+    /// shared `$params` as defaults) or a hash of `name => per-package params`
+    /// (merged over the defaults). As with `ensure_resource`, the trailing
+    /// `{...}` argument forces first-class parsing to avoid truncating the
+    /// class body.
+    EnsurePackages {
+        packages_expr: Expr,
+        params_expr: Option<Expr>,
+    },
     /// Placeholder for statements the parser recognises and consumes but the
     /// evaluator does not need to act on (e.g. resource collectors
     /// `Foo<| ... |>`).
@@ -897,6 +920,83 @@ impl<'a> EvalContext<'a> {
                         } else if self.module.defines.contains_key(&resource_type) {
                             let _ = self.instantiate_define(&resource_type, &title, &attributes);
                         }
+                    }
+                }
+                Stmt::EnsureResource { type_expr, title_expr, params_expr } => {
+                    let resource_type =
+                        normalize_rtype(&self.eval_expr(type_expr)?.as_string());
+                    let titles = match self.eval_expr(title_expr)? {
+                        PuppetValue::Array(items) => {
+                            items.into_iter().map(|v| v.as_string()).collect()
+                        }
+                        other => vec![other.as_string()],
+                    };
+                    let attributes = match params_expr {
+                        Some(expr) => match self.eval_expr(expr)? {
+                            PuppetValue::Hash(map) => map,
+                            _ => HashMap::new(),
+                        },
+                        None => HashMap::new(),
+                    };
+                    for title in titles {
+                        self.catalog.add(PuppetResource {
+                            resource_type: resource_type.clone(),
+                            title: title.clone(),
+                            attributes: attributes.clone(),
+                        });
+                        if self.module.defines.contains_key(&resource_type) {
+                            let _ = self.instantiate_define(
+                                &resource_type,
+                                &title,
+                                &attributes,
+                            );
+                        }
+                    }
+                }
+                Stmt::EnsurePackages { packages_expr, params_expr } => {
+                    let defaults = match params_expr {
+                        Some(expr) => match self.eval_expr(expr)? {
+                            PuppetValue::Hash(map) => map,
+                            _ => HashMap::new(),
+                        },
+                        None => HashMap::new(),
+                    };
+                    // stdlib's `ensure_packages` defaults each package to
+                    // `ensure => present` unless overridden by the params.
+                    let with_ensure_default = |mut attrs: HashMap<String, PuppetValue>| {
+                        attrs
+                            .entry("ensure".to_string())
+                            .or_insert_with(|| PuppetValue::String("present".to_string()));
+                        attrs
+                    };
+                    match self.eval_expr(packages_expr)? {
+                        // Array of package names — each takes the shared params.
+                        PuppetValue::Array(items) => {
+                            for item in items {
+                                self.catalog.add(PuppetResource {
+                                    resource_type: "package".to_string(),
+                                    title: item.as_string(),
+                                    attributes: with_ensure_default(defaults.clone()),
+                                });
+                            }
+                        }
+                        // Hash of `name => per-package params` over the defaults.
+                        PuppetValue::Hash(entries) => {
+                            for (title, attrs_value) in entries {
+                                let mut attributes = defaults.clone();
+                                if let PuppetValue::Hash(attrs) = attrs_value {
+                                    for (key, value) in attrs {
+                                        attributes.insert(key, value);
+                                    }
+                                }
+                                self.catalog.add(PuppetResource {
+                                    resource_type: "package".to_string(),
+                                    title,
+                                    attributes: with_ensure_default(attributes),
+                                });
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Stmt::Noop => {}
@@ -1595,6 +1695,49 @@ impl<'a> PuppetParser<'a> {
                 hash_expr,
                 defaults_expr,
             }));
+        }
+        // `ensure_resource(...)` / `ensure_packages(...)` as statements. Like
+        // `create_resources`, the call's side effect (declaring resources) must
+        // run, and — crucially — its arguments must be parsed as expressions so
+        // a trailing `{...}` hash is consumed whole. Otherwise the parser leaves
+        // the `(` behind, then mistakes the hash argument's closing `}` for the
+        // class body's `}` and drops every statement that follows the call.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self
+                .tokens
+                .get(self.index + 1)
+                .map(|t| t.kind == TokenKind::LParen)
+                .unwrap_or(false)
+        {
+            let fname = self.tokens[self.index].text.clone();
+            if fname == "ensure_resource" || fname == "ensure_packages" {
+                self.index += 2; // consume the function name and `(`
+                let mut args = Vec::new();
+                while !self.consume(TokenKind::RParen) && !self.is_eof() {
+                    if self.peek_kind() == Some(TokenKind::Comma) {
+                        self.index += 1;
+                        continue;
+                    }
+                    args.push(self.parse_expr()?);
+                }
+                let mut args = args.into_iter();
+                if fname == "ensure_resource" {
+                    let type_expr = args.next().unwrap_or(Expr::Undef);
+                    let title_expr = args.next().unwrap_or(Expr::Undef);
+                    let params_expr = args.next();
+                    return Ok(Some(Stmt::EnsureResource {
+                        type_expr,
+                        title_expr,
+                        params_expr,
+                    }));
+                }
+                let packages_expr = args.next().unwrap_or(Expr::Undef);
+                let params_expr = args.next();
+                return Ok(Some(Stmt::EnsurePackages {
+                    packages_expr,
+                    params_expr,
+                }));
+            }
         }
         // Accept a legacy leading `::` on resource-type references
         // (e.g. `::apache::vhost { ... }`). Modern Puppet drops the prefix;
@@ -3786,6 +3929,96 @@ class foo {
                 PuppetValue::String("port-443".to_string()),
             ])),
             "map lambda in attribute value must evaluate"
+        );
+    }
+
+    #[test]
+    fn ensure_packages_with_hash_arg_does_not_truncate_class_body() {
+        // Regression: the `{ ensure => present }` argument to `ensure_packages`
+        // used to leave the parser mid-call, so the hash's closing `}` was
+        // mistaken for the class body's `}` — dropping every statement after the
+        // call. Both the declared packages and the trailing `notify` must land.
+        let manifest = r#"
+            class foo {
+              ensure_packages(['nginx', 'curl'], { 'ensure' => 'present' })
+              notify { 'after': }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with ensure_packages must evaluate");
+        assert!(catalog.contains("package", "nginx"), "package[nginx] declared");
+        assert!(catalog.contains("package", "curl"), "package[curl] declared");
+        assert!(
+            catalog.contains("notify", "after"),
+            "statement after ensure_packages must not be truncated"
+        );
+        let nginx = catalog.find("package", "nginx").unwrap();
+        assert_eq!(
+            nginx.attributes.get("ensure"),
+            Some(&PuppetValue::String("present".to_string())),
+            "shared params apply to each package"
+        );
+    }
+
+    #[test]
+    fn ensure_packages_array_defaults_ensure_present() {
+        let manifest = r#"
+            class foo {
+              ensure_packages(['vim'])
+              notify { 'after': }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .unwrap();
+        assert!(catalog.contains("notify", "after"));
+        let vim = catalog.find("package", "vim").expect("package[vim] declared");
+        assert_eq!(
+            vim.attributes.get("ensure"),
+            Some(&PuppetValue::String("present".to_string())),
+            "ensure_packages defaults ensure => present"
+        );
+    }
+
+    #[test]
+    fn ensure_resource_with_hash_arg_does_not_truncate_class_body() {
+        let manifest = r#"
+            class foo {
+              ensure_resource('package', 'htop', { 'ensure' => 'installed' })
+              notify { 'after': }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("class with ensure_resource must evaluate");
+        assert!(
+            catalog.contains("notify", "after"),
+            "statement after ensure_resource must not be truncated"
+        );
+        let htop = catalog.find("package", "htop").expect("package[htop] declared");
+        assert_eq!(
+            htop.attributes.get("ensure"),
+            Some(&PuppetValue::String("installed".to_string())),
+            "ensure_resource params apply to the declared resource"
         );
     }
 }
