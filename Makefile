@@ -5,7 +5,7 @@ CARGO ?= cargo
 PYTHON ?= python3
 NPM ?= npm
 
-.PHONY: help version-show sync-vscode-version sync-vscode-version-check bump-major bump-minor bump-patch build install vscode-extension \
+.PHONY: help version-show sync-vscode-version sync-vscode-version-check bump-major bump-minor bump-patch build install vscode-extension clean \
 	package-homebrew package-deb package-rpm package-windows package-all
 
 help:
@@ -19,6 +19,7 @@ help:
 	@echo "  build            - Build release binary (cargo build --release)"
 	@echo "  install          - Install binary locally (cargo install --path . --locked)"
 	@echo "  vscode-extension - Build VS Code extension VSIX package"
+	@echo "  clean            - Remove build artifacts (cargo, VS Code extension, packages)"
 	@echo ""
 	@echo "Packaging targets:"
 	@echo "  package-homebrew - Build Homebrew release artifacts"
@@ -63,6 +64,10 @@ vscode-extension:
 	@ls -lh vscode-extension/*.vsix
 install:
 	$(CARGO) install --path . --locked
+
+clean:
+	$(CARGO) clean
+	rm -rf vscode-extension/out vscode-extension/node_modules vscode-extension/*.vsix
 
 # Packaging targets
 package-homebrew:
