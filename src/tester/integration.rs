@@ -329,7 +329,9 @@ impl IntegrationTester {
         ));
         summary.push_str(&format!(
             "Tests: {}/{} passed ({:.1}%)\n",
-            results.passed, results.total_tests, results.success_rate()
+            results.passed,
+            results.total_tests,
+            results.success_rate()
         ));
         summary.push_str(&format!(
             "Nodes Tested: {}/{}\n",
@@ -342,7 +344,9 @@ impl IntegrationTester {
                 if !result.success {
                     summary.push_str(&format!(
                         "  - {}/{}: {}\n",
-                        result.scenario, result.node, result.errors.join(", ")
+                        result.scenario,
+                        result.node,
+                        result.errors.join(", ")
                     ));
                 }
             }
@@ -368,8 +372,7 @@ mod tests {
 
     #[test]
     fn test_node_spec_with_role() {
-        let node = NodeSpec::new("ubuntu", "ubuntu-20.04")
-            .with_role("master");
+        let node = NodeSpec::new("ubuntu", "ubuntu-20.04").with_role("master");
 
         assert_eq!(node.roles.len(), 1);
         assert_eq!(node.roles[0], "master");
@@ -407,8 +410,8 @@ mod tests {
 
     #[test]
     fn test_test_scenario_add_node() {
-        let scenario = TestScenario::new("default")
-            .add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
+        let scenario =
+            TestScenario::new("default").add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
 
         assert_eq!(scenario.nodes.len(), 1);
         assert_eq!(scenario.nodes[0].name, "ubuntu");
@@ -486,8 +489,8 @@ mod tests {
     #[test]
     fn test_integration_tester_add_scenario() {
         let mut tester = IntegrationTester::new("/tmp/module");
-        let scenario = TestScenario::new("default")
-            .add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
+        let scenario =
+            TestScenario::new("default").add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
 
         tester.add_scenario(scenario);
         assert_eq!(tester.scenario_count(), 1);
@@ -514,8 +517,8 @@ mod tests {
     #[test]
     fn test_integration_tester_setup_nodes() -> Result<()> {
         let mut tester = IntegrationTester::new("/tmp/module");
-        let scenario = TestScenario::new("default")
-            .add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
+        let scenario =
+            TestScenario::new("default").add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
 
         tester.add_scenario(scenario);
 
@@ -528,8 +531,8 @@ mod tests {
     #[test]
     fn test_integration_tester_cleanup_nodes() -> Result<()> {
         let mut tester = IntegrationTester::new("/tmp/module");
-        let scenario = TestScenario::new("default")
-            .add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
+        let scenario =
+            TestScenario::new("default").add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
 
         tester.add_scenario(scenario);
 
@@ -542,8 +545,8 @@ mod tests {
     #[test]
     fn test_integration_tester_generate_summary() -> Result<()> {
         let mut tester = IntegrationTester::new("/tmp/module");
-        let scenario = TestScenario::new("default")
-            .add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
+        let scenario =
+            TestScenario::new("default").add_node(NodeSpec::new("ubuntu", "ubuntu-20.04"));
 
         tester.add_scenario(scenario);
         let results = tester.run_acceptance_tests()?;

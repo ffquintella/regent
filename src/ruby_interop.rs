@@ -1,8 +1,8 @@
 // Artichoke Ruby Interoperability Module
 // This module enables seamless integration between Rust and Ruby code
 
-use artichoke::prelude::*;
 use artichoke::prelude::RubyException;
+use artichoke::prelude::*;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -129,27 +129,32 @@ mod merge_repro_tests {
         env.eval(HASH_MERGE_FIX).unwrap();
         // explicit braces
         assert_eq!(
-            env.eval_to_string("({'a' => 1}.merge({'b' => 2})).length.to_s").unwrap(),
+            env.eval_to_string("({'a' => 1}.merge({'b' => 2})).length.to_s")
+                .unwrap(),
             "2"
         );
         // implicit hash with hashrocket
         assert_eq!(
-            env.eval_to_string("({'a' => 1}.merge('b' => 2)).length.to_s").unwrap(),
+            env.eval_to_string("({'a' => 1}.merge('b' => 2)).length.to_s")
+                .unwrap(),
             "2"
         );
         // bare symbol keyword — the originally-failing form
         assert_eq!(
-            env.eval_to_string("({'a' => 1}.merge(b: 2)).length.to_s").unwrap(),
+            env.eval_to_string("({'a' => 1}.merge(b: 2)).length.to_s")
+                .unwrap(),
             "2"
         );
         // the merged value is actually present and correct (symbol key, as MRI)
         assert_eq!(
-            env.eval_to_string("({'a' => 1}.merge(b: 2))[:b].to_s").unwrap(),
+            env.eval_to_string("({'a' => 1}.merge(b: 2))[:b].to_s")
+                .unwrap(),
             "2"
         );
         // merge! / update in place
         assert_eq!(
-            env.eval_to_string("(h = {'a' => 1}; h.update(b: 2); h.length).to_s").unwrap(),
+            env.eval_to_string("(h = {'a' => 1}; h.update(b: 2); h.length).to_s")
+                .unwrap(),
             "2"
         );
     }

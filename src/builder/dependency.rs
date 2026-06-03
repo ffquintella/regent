@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -35,19 +35,22 @@ impl DependencyTree {
     }
 
     pub fn add_dependency(&mut self, parent: String, child: String) {
-        self.nodes.entry(parent).or_insert_with(Vec::new).push(child);
+        self.nodes
+            .entry(parent)
+            .or_insert_with(Vec::new)
+            .push(child);
     }
 
     pub fn has_cycles(&self) -> bool {
         let mut visited = HashSet::new();
         let mut rec_stack = HashSet::new();
-        
+
         for node in self.nodes.keys() {
             if self.has_cycle_util(node, &mut visited, &mut rec_stack) {
                 return true;
             }
         }
-        
+
         false
     }
 
@@ -60,14 +63,14 @@ impl DependencyTree {
         if rec_stack.contains(node) {
             return true;
         }
-        
+
         if visited.contains(node) {
             return false;
         }
-        
+
         visited.insert(node.to_string());
         rec_stack.insert(node.to_string());
-        
+
         if let Some(children) = self.nodes.get(node) {
             for child in children {
                 if self.has_cycle_util(child, visited, rec_stack) {
@@ -75,7 +78,7 @@ impl DependencyTree {
                 }
             }
         }
-        
+
         rec_stack.remove(node);
         false
     }
@@ -95,12 +98,13 @@ impl DependencyResolver {
     pub fn validate(&self) -> Result<()> {
         for dep in &self.dependencies {
             // Validate version requirement format
-            VersionReq::parse(&dep.version_req)
-                .with_context(|| format!(
+            VersionReq::parse(&dep.version_req).with_context(|| {
+                format!(
                     "Invalid version requirement '{}' for dependency '{}'",
                     dep.version_req, dep.name
-                ))?;
-            
+                )
+            })?;
+
             // Validate dependency name format (puppetlabs-stdlib or author-module)
             if !dep.name.contains('-') {
                 return Err(anyhow!(
@@ -109,7 +113,7 @@ impl DependencyResolver {
                 ));
             }
         }
-        
+
         Ok(())
     }
 
@@ -121,7 +125,7 @@ impl DependencyResolver {
                 return Ok(req.matches(version));
             }
         }
-        
+
         // If dependency not found in our list, it's not required
         Ok(true)
     }
@@ -129,7 +133,7 @@ impl DependencyResolver {
     /// Check all dependencies are compatible (stub for future implementation)
     pub fn check_compatible(&self) -> Result<()> {
         self.validate()?;
-        
+
         // Future: Could fetch actual module versions from Forge and validate
         // For now, just validate syntax
         Ok(())
@@ -138,17 +142,19 @@ impl DependencyResolver {
     /// Build a dependency tree (detects circular dependencies)
     pub fn get_dependency_tree(&self, module_name: &str) -> Result<DependencyTree> {
         let mut tree = DependencyTree::new(module_name.to_string());
-        
+
         // Build tree from direct dependencies
         for dep in &self.dependencies {
             tree.add_dependency(module_name.to_string(), dep.name.clone());
         }
-        
+
         // Check for circular dependencies
         if tree.has_cycles() {
-            return Err(anyhow!("Circular dependency detected in module dependencies"));
+            return Err(anyhow!(
+                "Circular dependency detected in module dependencies"
+            ));
         }
-        
+
         Ok(tree)
     }
 
@@ -181,7 +187,7 @@ mod tests {
                 version_req: ">= 5.0.0".to_string(),
             },
         ];
-        
+
         let resolver = DependencyResolver::new(deps);
         assert!(resolver.validate().is_ok());
     }
@@ -192,7 +198,7 @@ mod tests {
             name: "puppetlabs-stdlib".to_string(),
             version_req: "invalid_version".to_string(),
         }];
-        
+
         let resolver = DependencyResolver::new(deps);
         assert!(resolver.validate().is_err());
     }
@@ -203,11 +209,14 @@ mod tests {
             name: "invalidname".to_string(),
             version_req: ">= 1.0.0".to_string(),
         }];
-        
+
         let resolver = DependencyResolver::new(deps);
         let result = resolver.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be in format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be in format"));
     }
 
     #[test]
@@ -216,9 +225,9 @@ mod tests {
             name: "puppetlabs-stdlib".to_string(),
             version_req: ">= 4.0.0, < 9.0.0".to_string(),
         }];
-        
+
         let resolver = DependencyResolver::new(deps);
-        
+
         // Test compatible versions
         assert!(resolver
             .check_version_compatible("puppetlabs-stdlib", &Version::parse("5.0.0").unwrap())
@@ -226,7 +235,7 @@ mod tests {
         assert!(resolver
             .check_version_compatible("puppetlabs-stdlib", &Version::parse("8.9.0").unwrap())
             .unwrap());
-        
+
         // Test incompatible versions
         assert!(!resolver
             .check_version_compatible("puppetlabs-stdlib", &Version::parse("3.9.0").unwrap())
@@ -248,14 +257,22 @@ mod tests {
                 version_req: ">= 5.0.0".to_string(),
             },
         ];
-        
+
         let resolver = DependencyResolver::new(deps);
         let tree = resolver.get_dependency_tree("mymodule").unwrap();
-        
+
         assert_eq!(tree.root, "mymodule");
         assert_eq!(tree.nodes.get("mymodule").unwrap().len(), 2);
-        assert!(tree.nodes.get("mymodule").unwrap().contains(&"puppetlabs-stdlib".to_string()));
-        assert!(tree.nodes.get("mymodule").unwrap().contains(&"puppetlabs-concat".to_string()));
+        assert!(tree
+            .nodes
+            .get("mymodule")
+            .unwrap()
+            .contains(&"puppetlabs-stdlib".to_string()));
+        assert!(tree
+            .nodes
+            .get("mymodule")
+            .unwrap()
+            .contains(&"puppetlabs-concat".to_string()));
     }
 
     #[test]
@@ -264,7 +281,7 @@ mod tests {
         tree.add_dependency("module_a".to_string(), "module_b".to_string());
         tree.add_dependency("module_b".to_string(), "module_c".to_string());
         tree.add_dependency("module_c".to_string(), "module_a".to_string()); // Creates cycle
-        
+
         assert!(tree.has_cycles());
     }
 
@@ -274,19 +291,17 @@ mod tests {
         tree.add_dependency("module_a".to_string(), "module_b".to_string());
         tree.add_dependency("module_a".to_string(), "module_c".to_string());
         tree.add_dependency("module_b".to_string(), "module_d".to_string());
-        
+
         assert!(!tree.has_cycles());
     }
 
     #[test]
     fn test_get_dependencies() {
-        let deps = vec![
-            ModuleDependency {
-                name: "puppetlabs-stdlib".to_string(),
-                version_req: ">= 4.0.0".to_string(),
-            },
-        ];
-        
+        let deps = vec![ModuleDependency {
+            name: "puppetlabs-stdlib".to_string(),
+            version_req: ">= 4.0.0".to_string(),
+        }];
+
         let resolver = DependencyResolver::new(deps.clone());
         assert_eq!(resolver.get_dependencies(), &deps);
     }
@@ -297,10 +312,10 @@ mod tests {
             name: "puppetlabs-stdlib".to_string(),
             version_req: ">= 4.0.0".to_string(),
         }];
-        
+
         let resolver = DependencyResolver::new(deps);
         let resolved = resolver.resolve().unwrap();
-        
+
         // Current stub returns empty vec
         assert_eq!(resolved.len(), 0);
     }
@@ -311,7 +326,7 @@ mod tests {
             name: "puppetlabs-stdlib".to_string(),
             version_req: ">= 4.0.0, < 9.0.0".to_string(),
         }];
-        
+
         let resolver = DependencyResolver::new(deps);
         assert!(resolver.check_compatible().is_ok());
     }

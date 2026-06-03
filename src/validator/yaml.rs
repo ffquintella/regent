@@ -1,8 +1,8 @@
 //! YAML validator - Validates YAML files in the module
 
+use crate::validator::lint::{LintResult, LintTool};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use crate::validator::lint::{LintResult, LintTool};
 
 /// YAML file validator
 pub struct YamlValidator {
@@ -17,9 +17,7 @@ impl YamlValidator {
             anyhow::bail!("Module path does not exist: {:?}", path);
         }
 
-        Ok(Self {
-            module_path: path,
-        })
+        Ok(Self { module_path: path })
     }
 
     /// Validate YAML files
@@ -38,11 +36,7 @@ impl YamlValidator {
     }
 
     fn check_yaml_files(&self, _result: &mut LintResult) -> Result<()> {
-        let yaml_dirs = vec![
-            "hiera",
-            "data",
-            ".github",
-        ];
+        let yaml_dirs = vec!["hiera", "data", ".github"];
 
         for dir_name in yaml_dirs {
             let dir = self.module_path.join(dir_name);
@@ -55,7 +49,12 @@ impl YamlValidator {
         if let Ok(entries) = std::fs::read_dir(&self.module_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && path.extension().map(|e| e == "yml" || e == "yaml").unwrap_or(false) {
+                if path.is_file()
+                    && path
+                        .extension()
+                        .map(|e| e == "yml" || e == "yaml")
+                        .unwrap_or(false)
+                {
                     // Placeholder for YAML validation
                 }
             }
@@ -68,7 +67,12 @@ impl YamlValidator {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && path.extension().map(|e| e == "yml" || e == "yaml").unwrap_or(false) {
+                if path.is_file()
+                    && path
+                        .extension()
+                        .map(|e| e == "yml" || e == "yaml")
+                        .unwrap_or(false)
+                {
                     // Placeholder for actual YAML validation
                 } else if path.is_dir() {
                     self.scan_yaml_files(&path, _result)?;

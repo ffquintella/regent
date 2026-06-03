@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
 use bzip2::write::BzEncoder;
-use flate2::Compression;
 use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs::{self, File};
-use std::io::{Write, copy};
+use std::io::{copy, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder as TarBuilder;
 use walkdir::WalkDir;
 use zip::write::FileOptions;
-use zip::ZipWriter;
 use zip::CompressionMethod;
+use zip::ZipWriter;
 
 /// Output format for module package
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +88,11 @@ impl TarballBuilder {
             config,
             ignore_patterns: Vec::new(),
         };
-        
+
         if builder.config.respect_ignore_files {
             builder.load_ignore_patterns()?;
         }
-        
+
         Ok(builder)
     }
 
@@ -112,8 +112,8 @@ impl TarballBuilder {
         // Load .pdkignore
         let pdkignore_path = self.config.module_path.join(".pdkignore");
         if pdkignore_path.exists() {
-            let content = fs::read_to_string(&pdkignore_path)
-                .context("Failed to read .pdkignore")?;
+            let content =
+                fs::read_to_string(&pdkignore_path).context("Failed to read .pdkignore")?;
             for line in content.lines() {
                 let line = line.trim();
                 if !line.is_empty() && !line.starts_with('#') {
@@ -125,8 +125,8 @@ impl TarballBuilder {
         // Load .gitignore (lower priority than .pdkignore)
         let gitignore_path = self.config.module_path.join(".gitignore");
         if gitignore_path.exists() {
-            let content = fs::read_to_string(&gitignore_path)
-                .context("Failed to read .gitignore")?;
+            let content =
+                fs::read_to_string(&gitignore_path).context("Failed to read .gitignore")?;
             for line in content.lines() {
                 let line = line.trim();
                 if !line.is_empty() && !line.starts_with('#') {
@@ -211,9 +211,7 @@ impl TarballBuilder {
             } else if anchored {
                 // Anchored literal: must match at the start of the relative path,
                 // either exactly or as a path prefix.
-                if path_str == pat
-                    || path_str.starts_with(&format!("{}/", pat))
-                {
+                if path_str == pat || path_str.starts_with(&format!("{}/", pat)) {
                     return true;
                 }
             } else {
@@ -245,14 +243,12 @@ impl TarballBuilder {
     /// Build tar.gz package
     fn build_tar_gz(&self, module_name: &str, version: &str) -> Result<PathBuf> {
         let output_dir = self.get_output_dir();
-        fs::create_dir_all(&output_dir)
-            .context("Failed to create output directory")?;
+        fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
         let filename = format!("{}-{}.tar.gz", module_name, version);
         let package_path = output_dir.join(&filename);
 
-        let tar_file = File::create(&package_path)
-            .context("Failed to create tarball file")?;
+        let tar_file = File::create(&package_path).context("Failed to create tarball file")?;
         let encoder = GzEncoder::new(tar_file, Compression::default());
         let mut tar = TarBuilder::new(encoder);
 
@@ -269,14 +265,12 @@ impl TarballBuilder {
     /// Build tar.bz2 package
     fn build_tar_bz2(&self, module_name: &str, version: &str) -> Result<PathBuf> {
         let output_dir = self.get_output_dir();
-        fs::create_dir_all(&output_dir)
-            .context("Failed to create output directory")?;
+        fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
         let filename = format!("{}-{}.tar.bz2", module_name, version);
         let package_path = output_dir.join(&filename);
 
-        let tar_file = File::create(&package_path)
-            .context("Failed to create tarball file")?;
+        let tar_file = File::create(&package_path).context("Failed to create tarball file")?;
         let encoder = BzEncoder::new(tar_file, bzip2::Compression::default());
         let mut tar = TarBuilder::new(encoder);
 
@@ -293,30 +287,35 @@ impl TarballBuilder {
     /// Build ZIP package
     fn build_zip(&self, module_name: &str, version: &str) -> Result<PathBuf> {
         let output_dir = self.get_output_dir();
-        fs::create_dir_all(&output_dir)
-            .context("Failed to create output directory")?;
+        fs::create_dir_all(&output_dir).context("Failed to create output directory")?;
 
         let filename = format!("{}-{}.zip", module_name, version);
         let package_path = output_dir.join(&filename);
 
-        let zip_file = File::create(&package_path)
-            .context("Failed to create ZIP file")?;
+        let zip_file = File::create(&package_path).context("Failed to create ZIP file")?;
         let mut zip = ZipWriter::new(zip_file);
         let options = FileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .unix_permissions(0o755);
 
-        self.add_directory_to_zip(&mut zip, &self.config.module_path, module_name, version, options)?;
+        self.add_directory_to_zip(
+            &mut zip,
+            &self.config.module_path,
+            module_name,
+            version,
+            options,
+        )?;
 
-        zip.finish()
-            .context("Failed to finalize ZIP file")?;
+        zip.finish().context("Failed to finalize ZIP file")?;
 
         Ok(package_path)
     }
 
     /// Get output directory
     fn get_output_dir(&self) -> PathBuf {
-        self.config.output_dir.as_ref()
+        self.config
+            .output_dir
+            .as_ref()
             .map(|p| p.clone())
             .unwrap_or_else(|| self.config.module_path.join("pkg"))
     }
@@ -345,7 +344,8 @@ impl TarballBuilder {
             }
 
             // Calculate relative path
-            let rel_path = path.strip_prefix(base_path)
+            let rel_path = path
+                .strip_prefix(base_path)
                 .context("Failed to calculate relative path")?;
 
             // Skip if ignored
@@ -358,15 +358,16 @@ impl TarballBuilder {
 
             if path.is_file() {
                 // Add file to tarball
-                let mut file = File::open(path)
-                    .with_context(|| format!("Failed to open file: {:?}", path))?;
-                
+                let mut file =
+                    File::open(path).with_context(|| format!("Failed to open file: {:?}", path))?;
+
                 tar.append_file(&tar_path, &mut file)
                     .with_context(|| format!("Failed to add file to tarball: {:?}", tar_path))?;
             } else if path.is_dir() {
                 // Add directory to tarball
-                tar.append_dir(&tar_path, path)
-                    .with_context(|| format!("Failed to add directory to tarball: {:?}", tar_path))?;
+                tar.append_dir(&tar_path, path).with_context(|| {
+                    format!("Failed to add directory to tarball: {:?}", tar_path)
+                })?;
             }
         }
 
@@ -407,7 +408,8 @@ impl TarballBuilder {
             }
 
             // Calculate relative path
-            let rel_path = path.strip_prefix(base_path)
+            let rel_path = path
+                .strip_prefix(base_path)
                 .context("Failed to calculate relative path")?;
 
             // Skip if ignored
@@ -423,10 +425,10 @@ impl TarballBuilder {
                 // Add file to ZIP
                 zip.start_file(&zip_path_str, options)
                     .with_context(|| format!("Failed to start ZIP file entry: {:?}", zip_path))?;
-                
-                let mut file = File::open(path)
-                    .with_context(|| format!("Failed to open file: {:?}", path))?;
-                
+
+                let mut file =
+                    File::open(path).with_context(|| format!("Failed to open file: {:?}", path))?;
+
                 copy(&mut file, zip)
                     .with_context(|| format!("Failed to write file to ZIP: {:?}", zip_path))?;
             } else if path.is_dir() {
@@ -444,8 +446,8 @@ impl TarballBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tar::Archive;
     use flate2::read::GzDecoder;
+    use tar::Archive;
     use tempfile::TempDir;
 
     fn create_test_module(dir: &Path) -> Result<()> {
@@ -498,19 +500,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = PackagerConfig::new(temp_dir.path());
         let builder = TarballBuilder::new(config);
-        
+
         assert!(builder.is_ok());
     }
 
     #[test]
     fn test_ignore_patterns_loaded() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create .pdkignore
         fs::write(
             temp_dir.path().join(".pdkignore"),
             "*.tmp\n# Comment\ntest/\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let config = PackagerConfig::new(temp_dir.path());
         let builder = TarballBuilder::new(config).unwrap();
@@ -524,10 +527,7 @@ mod tests {
     #[test]
     fn test_should_ignore_patterns() {
         let temp_dir = TempDir::new().unwrap();
-        fs::write(
-            temp_dir.path().join(".pdkignore"),
-            "*.swp\ntemp/\n",
-        ).unwrap();
+        fs::write(temp_dir.path().join(".pdkignore"), "*.swp\ntemp/\n").unwrap();
 
         let config = PackagerConfig::new(temp_dir.path());
         let builder = TarballBuilder::new(config).unwrap();
@@ -547,7 +547,8 @@ mod tests {
         fs::write(
             temp_dir.path().join(".pdkignore"),
             "/vendor/\n/bin/\n/spec/fixtures/modules/*\n/pkg/\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let config = PackagerConfig::new(temp_dir.path());
         let builder = TarballBuilder::new(config).unwrap();
@@ -569,8 +570,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         create_test_module(temp_dir.path()).unwrap();
 
-        let config = PackagerConfig::new(temp_dir.path())
-            .with_output_dir(temp_dir.path().join("output"));
+        let config =
+            PackagerConfig::new(temp_dir.path()).with_output_dir(temp_dir.path().join("output"));
         let builder = TarballBuilder::new(config).unwrap();
 
         let tarball_path = builder.build("testuser-testmodule", "1.0.0").unwrap();
@@ -641,10 +642,7 @@ mod tests {
         create_test_module(temp_dir.path()).unwrap();
 
         // Create .pdkignore
-        fs::write(
-            temp_dir.path().join(".pdkignore"),
-            "files/\n",
-        ).unwrap();
+        fs::write(temp_dir.path().join(".pdkignore"), "files/\n").unwrap();
 
         let config = PackagerConfig::new(temp_dir.path());
         let builder = TarballBuilder::new(config).unwrap();
@@ -673,8 +671,7 @@ mod tests {
         create_test_module(temp_dir.path()).unwrap();
 
         let custom_output = temp_dir.path().join("custom_output");
-        let config = PackagerConfig::new(temp_dir.path())
-            .with_output_dir(&custom_output);
+        let config = PackagerConfig::new(temp_dir.path()).with_output_dir(&custom_output);
         let builder = TarballBuilder::new(config).unwrap();
 
         let tarball_path = builder.build("testuser-testmodule", "1.0.0").unwrap();
@@ -688,8 +685,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         create_test_module(temp_dir.path()).unwrap();
 
-        let config = PackagerConfig::new(temp_dir.path())
-            .with_format(BuildFormat::TarBz2);
+        let config = PackagerConfig::new(temp_dir.path()).with_format(BuildFormat::TarBz2);
         let builder = TarballBuilder::new(config).unwrap();
 
         let package_path = builder.build("testuser-testmodule", "1.0.0").unwrap();
@@ -703,8 +699,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         create_test_module(temp_dir.path()).unwrap();
 
-        let config = PackagerConfig::new(temp_dir.path())
-            .with_format(BuildFormat::Zip);
+        let config = PackagerConfig::new(temp_dir.path()).with_format(BuildFormat::Zip);
         let builder = TarballBuilder::new(config).unwrap();
 
         let package_path = builder.build("testuser-testmodule", "1.0.0").unwrap();
@@ -718,8 +713,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         create_test_module(temp_dir.path()).unwrap();
 
-        let config = PackagerConfig::new(temp_dir.path())
-            .with_format(BuildFormat::Zip);
+        let config = PackagerConfig::new(temp_dir.path()).with_format(BuildFormat::Zip);
         let builder = TarballBuilder::new(config).unwrap();
 
         let package_path = builder.build("testuser-testmodule", "1.0.0").unwrap();

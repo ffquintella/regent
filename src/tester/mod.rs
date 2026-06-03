@@ -1,27 +1,29 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-pub mod runner;
-pub mod parser;
-pub mod reporter;
-pub mod version_matrix;
-pub mod fixtures;
-pub mod integration;
 pub mod artichoke_runner;
 pub mod bundled_gems;
+pub mod fixtures;
+pub mod integration;
+pub mod parser;
 pub mod puppet_eval;
 pub mod regent_spec;
+pub mod reporter;
+pub mod runner;
+pub mod version_matrix;
 
-pub use runner::TestRunner;
 pub use artichoke_runner::ArtichokeTestRunner;
+pub use fixtures::{FixtureConfig, FixtureManager, FixtureModule};
+pub use integration::{
+    AcceptanceResults, IntegrationConfig, IntegrationTester, NodeSpec, TestScenario,
+};
 pub use parser::RSpecParser;
-pub use reporter::TestReporter;
-pub use version_matrix::{TestMatrixRunner, VersionMatrix, VersionTestResult, MatrixTestResults};
-pub use fixtures::{FixtureManager, FixtureConfig, FixtureModule};
-pub use integration::{IntegrationTester, NodeSpec, TestScenario, AcceptanceResults, IntegrationConfig};
 pub use regent_spec::{RegentPlan, RegentSpecRunner};
+pub use reporter::TestReporter;
+pub use runner::TestRunner;
+pub use version_matrix::{MatrixTestResults, TestMatrixRunner, VersionMatrix, VersionTestResult};
 
 /// Types of tests that can be executed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

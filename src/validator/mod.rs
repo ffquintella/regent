@@ -4,26 +4,26 @@
 //! supporting multiple validation tools including puppet-lint, puppet-syntax,
 //! metadata-json-lint, and Ruby linting.
 
-use std::path::{Path, PathBuf};
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
 use chrono;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
+pub mod cli;
 pub mod lint;
 pub mod metadata;
 pub mod puppet;
+pub mod report;
 pub mod ruby;
 pub mod yaml;
-pub mod report;
-pub mod cli;
 
+pub use cli::ValidatorCli;
 pub use lint::{LintConfig, LintIssue, LintLevel, LintManager, LintResult, LintTool};
 pub use metadata::MetadataValidator;
 pub use puppet::PuppetValidator;
+pub use report::ReportGenerator;
 pub use ruby::RubyValidator;
 pub use yaml::YamlValidator;
-pub use report::ReportGenerator;
-pub use cli::ValidatorCli;
 
 /// Report format enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,9 +114,21 @@ impl ModuleValidator {
         if self.config.enable_puppet_lint {
             if let Ok(result) = self.validate_puppet_lint() {
                 total_issues += result.issues.len();
-                errors += result.issues.iter().filter(|i| i.level == LintLevel::Error).count();
-                warnings += result.issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-                info_count += result.issues.iter().filter(|i| i.level == LintLevel::Info).count();
+                errors += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Error)
+                    .count();
+                warnings += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Warning)
+                    .count();
+                info_count += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Info)
+                    .count();
                 results.push(result);
             }
         }
@@ -125,9 +137,21 @@ impl ModuleValidator {
         if self.config.enable_puppet_syntax {
             if let Ok(result) = self.validate_puppet_syntax() {
                 total_issues += result.issues.len();
-                errors += result.issues.iter().filter(|i| i.level == LintLevel::Error).count();
-                warnings += result.issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-                info_count += result.issues.iter().filter(|i| i.level == LintLevel::Info).count();
+                errors += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Error)
+                    .count();
+                warnings += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Warning)
+                    .count();
+                info_count += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Info)
+                    .count();
                 results.push(result);
             }
         }
@@ -136,9 +160,21 @@ impl ModuleValidator {
         if self.config.enable_metadata_lint {
             if let Ok(result) = self.validate_metadata() {
                 total_issues += result.issues.len();
-                errors += result.issues.iter().filter(|i| i.level == LintLevel::Error).count();
-                warnings += result.issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-                info_count += result.issues.iter().filter(|i| i.level == LintLevel::Info).count();
+                errors += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Error)
+                    .count();
+                warnings += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Warning)
+                    .count();
+                info_count += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Info)
+                    .count();
                 results.push(result);
             }
         }
@@ -147,9 +183,21 @@ impl ModuleValidator {
         if self.config.enable_ruby_lint {
             if let Ok(result) = self.validate_ruby() {
                 total_issues += result.issues.len();
-                errors += result.issues.iter().filter(|i| i.level == LintLevel::Error).count();
-                warnings += result.issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-                info_count += result.issues.iter().filter(|i| i.level == LintLevel::Info).count();
+                errors += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Error)
+                    .count();
+                warnings += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Warning)
+                    .count();
+                info_count += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Info)
+                    .count();
                 results.push(result);
             }
         }
@@ -158,9 +206,21 @@ impl ModuleValidator {
         if self.config.enable_yaml_lint {
             if let Ok(result) = self.validate_yaml() {
                 total_issues += result.issues.len();
-                errors += result.issues.iter().filter(|i| i.level == LintLevel::Error).count();
-                warnings += result.issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-                info_count += result.issues.iter().filter(|i| i.level == LintLevel::Info).count();
+                errors += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Error)
+                    .count();
+                warnings += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Warning)
+                    .count();
+                info_count += result
+                    .issues
+                    .iter()
+                    .filter(|i| i.level == LintLevel::Info)
+                    .count();
                 results.push(result);
             }
         }

@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 
 /// How a fixture module should be installed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -10,7 +10,10 @@ pub enum FixtureSource {
     /// Symlink `target` (a path relative to the module root, or absolute) into `spec/fixtures/modules/<name>`.
     Symlink { target: String },
     /// `git clone <repo>` (optionally `--branch <ref_value>`) into `spec/fixtures/modules/<name>`.
-    Git { repo: String, ref_value: Option<String> },
+    Git {
+        repo: String,
+        ref_value: Option<String>,
+    },
     /// Forge module reference like `puppetlabs/stdlib` (optionally
     /// `author/module:version`). Downloaded from the Puppet Forge and cached
     /// per-user (`~/.regent/fixtures`) for offline reuse.
@@ -53,7 +56,9 @@ impl FixtureModule {
     }
 
     pub fn with_symlink(mut self, target: impl Into<String>) -> Self {
-        self.source = Some(FixtureSource::Symlink { target: target.into() });
+        self.source = Some(FixtureSource::Symlink {
+            target: target.into(),
+        });
         self
     }
 
@@ -175,8 +180,8 @@ impl FixtureManager {
             return Err(anyhow!("fixtures.yml not found at {:?}", fixtures_yml_path));
         }
 
-        let content = fs::read_to_string(fixtures_yml_path)
-            .context("Failed to read fixtures.yml")?;
+        let content =
+            fs::read_to_string(fixtures_yml_path).context("Failed to read fixtures.yml")?;
 
         self.config = parse_fixtures_yaml(&content)?;
         Ok(())
@@ -193,8 +198,7 @@ impl FixtureManager {
     ///
     /// Returns the number of fixture modules processed (skipping ones already on disk).
     pub fn setup_fixtures(&self) -> Result<usize> {
-        fs::create_dir_all(&self.fixtures_dir)
-            .context("Failed to create fixtures directory")?;
+        fs::create_dir_all(&self.fixtures_dir).context("Failed to create fixtures directory")?;
 
         let mut count = 0;
         let Some(ref modules) = self.config.modules else {
@@ -311,8 +315,13 @@ impl FixtureManager {
             })?;
         }
 
-        copy_tree(&cached, fixture_path)
-            .with_context(|| format!("copy cached fixture {} -> {}", cached.display(), fixture_path.display()))?;
+        copy_tree(&cached, fixture_path).with_context(|| {
+            format!(
+                "copy cached fixture {} -> {}",
+                cached.display(),
+                fixture_path.display()
+            )
+        })?;
         Ok(true)
     }
 
@@ -442,7 +451,13 @@ fn cache_key(source: &FixtureSource) -> String {
 /// Reduce an arbitrary source identifier to a safe single path segment.
 fn sanitize_cache_key(raw: &str) -> String {
     raw.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -466,7 +481,8 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).ok();
             }
-            fs::copy(&from, &to).with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+            fs::copy(&from, &to)
+                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
         }
     }
     Ok(())
@@ -508,7 +524,10 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
     };
     let normalized = slug_part.replace('/', "-");
     if normalized.is_empty() || !normalized.contains('-') {
-        return Err(anyhow!("invalid forge slug `{}` (expected author/module)", slug));
+        return Err(anyhow!(
+            "invalid forge slug `{}` (expected author/module)",
+            slug
+        ));
     }
 
     let metadata_url = format!("https://forgeapi.puppet.com/v3/modules/{normalized}");
@@ -519,8 +538,9 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
         .into_json()
         .with_context(|| format!("parse JSON from {metadata_url}"))?;
 
-    let file_uri = forge_file_uri(&metadata, version_pin)
-        .ok_or_else(|| anyhow!("forge metadata for {normalized} did not include a downloadable release"))?;
+    let file_uri = forge_file_uri(&metadata, version_pin).ok_or_else(|| {
+        anyhow!("forge metadata for {normalized} did not include a downloadable release")
+    })?;
 
     let download_url = format!("https://forgeapi.puppet.com{file_uri}");
     let mut reader = ureq::get(&download_url)
@@ -531,7 +551,8 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
 
     // Buffer the tarball to a tempfile before extracting so a slow link can't
     // leave a half-extracted module directory on disk.
-    let mut tarball = tempfile::NamedTempFile::new().context("create tempfile for forge tarball")?;
+    let mut tarball =
+        tempfile::NamedTempFile::new().context("create tempfile for forge tarball")?;
     std::io::copy(&mut reader, tarball.as_file_mut()).context("download forge tarball")?;
     tarball.as_file_mut().sync_all().ok();
     let path = tarball.path().to_path_buf();
@@ -586,7 +607,9 @@ fn extract_forge_tarball(tarball: &Path, fixture_path: &Path) -> Result<()> {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).ok();
         }
-        entry.unpack(&dest).with_context(|| format!("unpack {}", dest.display()))?;
+        entry
+            .unpack(&dest)
+            .with_context(|| format!("unpack {}", dest.display()))?;
     }
     Ok(())
 }
@@ -796,8 +819,7 @@ mod tests {
 
     #[test]
     fn test_fixture_module_with_repo() {
-        let module = FixtureModule::new("test")
-            .with_repo("https://github.com/test/test.git");
+        let module = FixtureModule::new("test").with_repo("https://github.com/test/test.git");
 
         assert_eq!(module.name, "test");
         assert_eq!(module.repo(), Some("https://github.com/test/test.git"));
@@ -830,10 +852,16 @@ fixtures:
         let modules = cfg.modules.expect("modules parsed");
         assert_eq!(modules.len(), 4);
         let stdlib = modules.get("stdlib").unwrap();
-        assert_eq!(stdlib.repo(), Some("https://github.com/puppetlabs/puppetlabs-stdlib.git"));
+        assert_eq!(
+            stdlib.repo(),
+            Some("https://github.com/puppetlabs/puppetlabs-stdlib.git")
+        );
         assert_eq!(stdlib.ref_value(), Some("v9.4.1"));
         let concat = modules.get("concat").unwrap();
-        assert_eq!(concat.repo(), Some("https://github.com/puppetlabs/puppetlabs-concat.git"));
+        assert_eq!(
+            concat.repo(),
+            Some("https://github.com/puppetlabs/puppetlabs-concat.git")
+        );
         let mymod = modules.get("mymod").unwrap();
         assert!(matches!(mymod.source, Some(FixtureSource::Symlink { .. })));
         let archive = modules.get("archive").unwrap();
@@ -891,8 +919,7 @@ fixtures:
         let module_path = temp_dir.path().join("module");
 
         let mut manager = FixtureManager::new(&module_path, &fixtures_dir);
-        manager.config = FixtureConfig::new()
-            .add_module("puppet", FixtureModule::new("puppet"));
+        manager.config = FixtureConfig::new().add_module("puppet", FixtureModule::new("puppet"));
 
         let verified = manager.verify()?;
         assert!(!verified);
@@ -911,8 +938,7 @@ fixtures:
         let module_path = temp_dir.path().join("module");
 
         let mut manager = FixtureManager::new(&module_path, &fixtures_dir);
-        manager.config = FixtureConfig::new()
-            .add_module("puppet", FixtureModule::new("puppet"));
+        manager.config = FixtureConfig::new().add_module("puppet", FixtureModule::new("puppet"));
 
         manager.setup_fixtures()?;
         assert!(fixtures_dir.join("puppet").exists());
@@ -943,8 +969,7 @@ fixtures:
     #[test]
     fn test_fixture_manager_get_module() {
         let mut manager = FixtureManager::new("/tmp/module", "/tmp/fixtures");
-        manager.config = FixtureConfig::new()
-            .add_module("puppet", FixtureModule::new("puppet"));
+        manager.config = FixtureConfig::new().add_module("puppet", FixtureModule::new("puppet"));
 
         let module = manager.get_module("puppet");
         assert!(module.is_some());
@@ -960,8 +985,7 @@ fixtures:
         assert!(!manager.has_fixtures());
 
         let mut manager = FixtureManager::new("/tmp/module", "/tmp/fixtures");
-        manager.config = FixtureConfig::new()
-            .add_module("puppet", FixtureModule::new("puppet"));
+        manager.config = FixtureConfig::new().add_module("puppet", FixtureModule::new("puppet"));
 
         assert!(manager.has_fixtures());
     }
@@ -975,7 +999,9 @@ fixtures:
         let mut manager = FixtureManager::new(temp_dir.path(), temp_dir.path());
         manager.parse_fixtures_yml(&fixtures_yml)?;
 
-        assert!(manager.config.modules.is_none() || manager.config.modules.as_ref().unwrap().is_empty());
+        assert!(
+            manager.config.modules.is_none() || manager.config.modules.as_ref().unwrap().is_empty()
+        );
         Ok(())
     }
 
@@ -1062,10 +1088,15 @@ fixtures:
         let dest = work.path().join("installed");
         extract_forge_tarball(&tarball_path, &dest).unwrap();
 
-        assert!(dest.join("metadata.json").exists(), "metadata.json must be at the top level");
+        assert!(
+            dest.join("metadata.json").exists(),
+            "metadata.json must be at the top level"
+        );
         assert!(dest.join("manifests").join("init.pp").exists());
-        assert!(!dest.join("author-mod-1.0.0").exists(),
-            "the leading <author-mod-version>/ directory must be stripped");
+        assert!(
+            !dest.join("author-mod-1.0.0").exists(),
+            "the leading <author-mod-version>/ directory must be stripped"
+        );
     }
 
     /// Live network test — only runs when REGENT_NETWORK_TESTS=1 is set.
@@ -1087,8 +1118,7 @@ fixtures:
         let fixtures_dir = temp_dir.path().join("fixtures");
 
         let mut manager = FixtureManager::new(temp_dir.path(), &fixtures_dir);
-        manager.config = FixtureConfig::new()
-            .add_module("test", FixtureModule::new("test"));
+        manager.config = FixtureConfig::new().add_module("test", FixtureModule::new("test"));
 
         manager.setup_fixtures()?;
 
@@ -1105,12 +1135,16 @@ fixtures:
     #[test]
     fn cache_key_is_stable_and_sanitized() {
         assert_eq!(
-            cache_key(&FixtureSource::Forge { slug: "puppetlabs/stdlib:9.4.1".into() }),
+            cache_key(&FixtureSource::Forge {
+                slug: "puppetlabs/stdlib:9.4.1".into()
+            }),
             "forge_puppetlabs-stdlib-9.4.1"
         );
         // Unpinned forge gets a `-current` suffix.
         assert_eq!(
-            cache_key(&FixtureSource::Forge { slug: "voxpupuli/archive".into() }),
+            cache_key(&FixtureSource::Forge {
+                slug: "voxpupuli/archive".into()
+            }),
             "forge_voxpupuli-archive-current"
         );
         // Git keys fold the URL/ref into one safe segment.
@@ -1141,22 +1175,33 @@ fixtures:
         let fixtures_dir = temp.path().join("fixtures");
 
         // Pre-populate the cache as if a prior online run had downloaded it.
-        let source = FixtureSource::Forge { slug: "voxpupuli/archive".into() };
+        let source = FixtureSource::Forge {
+            slug: "voxpupuli/archive".into(),
+        };
         let cached = cache.join(cache_key(&source));
         write_fake_cached_module(&cached, "archive");
 
         let mut manager = FixtureManager::new(temp.path(), &fixtures_dir);
         manager.set_cache_dir(Some(cache.clone())).set_offline(true);
-        manager.config =
-            FixtureConfig::new().add_module("archive", FixtureModule::new("archive").with_forge("voxpupuli/archive"));
+        manager.config = FixtureConfig::new().add_module(
+            "archive",
+            FixtureModule::new("archive").with_forge("voxpupuli/archive"),
+        );
 
         let count = manager.setup_fixtures()?;
         assert_eq!(count, 1);
         // The module was copied out of the cache — contents and all.
         assert!(fixtures_dir.join("archive").join("metadata.json").exists());
-        assert!(fixtures_dir.join("archive").join("manifests").join("init.pp").exists());
+        assert!(fixtures_dir
+            .join("archive")
+            .join("manifests")
+            .join("init.pp")
+            .exists());
         let meta = fs::read_to_string(fixtures_dir.join("archive").join("metadata.json"))?;
-        assert!(meta.contains("2.0.0"), "should be the cached module, not a stub");
+        assert!(
+            meta.contains("2.0.0"),
+            "should be the cached module, not a stub"
+        );
         Ok(())
     }
 
@@ -1168,14 +1213,19 @@ fixtures:
 
         let mut manager = FixtureManager::new(temp.path(), &fixtures_dir);
         manager.set_cache_dir(Some(cache)).set_offline(true);
-        manager.config = FixtureConfig::new()
-            .add_module("archive", FixtureModule::new("archive").with_forge("voxpupuli/archive"));
+        manager.config = FixtureConfig::new().add_module(
+            "archive",
+            FixtureModule::new("archive").with_forge("voxpupuli/archive"),
+        );
 
         let count = manager.setup_fixtures()?;
         assert_eq!(count, 1);
         // No network in offline mode → a stub is written.
         let meta = fs::read_to_string(fixtures_dir.join("archive").join("metadata.json"))?;
-        assert!(meta.contains("Regent stub fixture"), "offline miss should stub, got: {meta}");
+        assert!(
+            meta.contains("Regent stub fixture"),
+            "offline miss should stub, got: {meta}"
+        );
         Ok(())
     }
 }

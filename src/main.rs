@@ -1,13 +1,15 @@
 // Regent CLI - Rust + Artichoke Ruby powered Puppet module development kit
 
-mod cli;
 mod artichoke_runtime;
+mod cli;
 
 use clap::{Parser, Subcommand};
 use colored::*;
 use std::path::PathBuf;
 
-use cli::{NewCommand, GenerateCommand, ValidateCommand, BuildCommand, TestCommand, BootstrapCommand};
+use cli::{
+    BootstrapCommand, BuildCommand, GenerateCommand, NewCommand, TestCommand, ValidateCommand,
+};
 
 #[derive(Parser)]
 #[command(
@@ -109,7 +111,10 @@ enum Commands {
         #[arg(long, help = "Remove existing fixtures before downloading")]
         clean: bool,
 
-        #[arg(long, help = "Install only from the per-user cache; never use the network")]
+        #[arg(
+            long,
+            help = "Install only from the per-user cache; never use the network"
+        )]
         offline: bool,
     },
 
@@ -171,7 +176,9 @@ fn main() -> anyhow::Result<()> {
         } => {
             println!(
                 "{}",
-                format!("Creating new Puppet module: {}", name).cyan().bold()
+                format!("Creating new Puppet module: {}", name)
+                    .cyan()
+                    .bold()
             );
             NewCommand::execute(
                 &name,
@@ -202,10 +209,7 @@ fn main() -> anyhow::Result<()> {
         },
 
         Commands::Validate { path } => {
-            println!(
-                "{}",
-                format!("Validating module at: {:?}", path).cyan()
-            );
+            println!("{}", format!("Validating module at: {:?}", path).cyan());
             ValidateCommand::execute(&path)?;
         }
 
@@ -237,7 +241,11 @@ fn main() -> anyhow::Result<()> {
             BootstrapCommand::execute(&path, force)?;
         }
 
-        Commands::Fixtures { path, clean, offline } => {
+        Commands::Fixtures {
+            path,
+            clean,
+            offline,
+        } => {
             println!("{}", format!("Installing fixtures at: {:?}", path).cyan());
             cli::FixturesCommand::execute(&path, clean, offline)?;
         }

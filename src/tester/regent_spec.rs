@@ -6,9 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::{CoverageReport, FileCoverage, TestCase, TestResults, TestStatus};
-use crate::tester::puppet_eval::{
-    EvaluationTrace, PuppetCatalog, PuppetEvaluator, PuppetValue,
-};
+use crate::tester::puppet_eval::{EvaluationTrace, PuppetCatalog, PuppetEvaluator, PuppetValue};
 
 #[derive(Debug, Deserialize)]
 pub struct RegentPlan {
@@ -174,7 +172,9 @@ impl RegentSpecRunner {
                 Expectation::Compile { negate } => match (&catalog_result, *negate) {
                     (Ok(_), false) | (Err(_), true) => {}
                     (Err(err), false) => failures.push(format!("compile failed: {err}")),
-                    (Ok(_), true) => failures.push("expected compile to fail, but it succeeded".to_string()),
+                    (Ok(_), true) => {
+                        failures.push("expected compile to fail, but it succeeded".to_string())
+                    }
                 },
                 Expectation::Contain {
                     resource_type,
@@ -214,7 +214,8 @@ impl RegentSpecRunner {
                     } else {
                         match &raised {
                             None => failures.push(
-                                "expected compilation to raise an error, but it succeeded".to_string(),
+                                "expected compilation to raise an error, but it succeeded"
+                                    .to_string(),
                             ),
                             Some(err) => {
                                 if !error_matches(message.as_ref(), err)? {
@@ -484,13 +485,21 @@ mod coverage_tests {
         );
         // regex against the failure message
         assert_eq!(
-            status(raise_plan("boom", Some(regex("terribly wrong")), false), &module).0,
+            status(
+                raise_plan("boom", Some(regex("terribly wrong")), false),
+                &module
+            )
+            .0,
             TestStatus::Passed
         );
         // substring match
         assert_eq!(
             status(
-                raise_plan("boom", Some(JsonValue::String("went terribly".into())), false),
+                raise_plan(
+                    "boom",
+                    Some(JsonValue::String("went terribly".into())),
+                    false
+                ),
                 &module
             )
             .0,
@@ -502,7 +511,10 @@ mod coverage_tests {
     fn raise_error_fails_on_wrong_message_or_no_error() {
         let module = write_failing_module();
         // message that does not appear -> fail
-        let (st, msg) = status(raise_plan("boom", Some(regex("not present")), false), &module);
+        let (st, msg) = status(
+            raise_plan("boom", Some(regex("not present")), false),
+            &module,
+        );
         assert_eq!(st, TestStatus::Failed);
         assert!(msg.unwrap().contains("expected error to match"));
         // a clean class that compiles -> expecting a raise must fail

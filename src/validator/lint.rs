@@ -56,12 +56,7 @@ pub struct LintIssue {
 }
 
 impl LintIssue {
-    pub fn new(
-        level: LintLevel,
-        code: String,
-        message: String,
-        file: PathBuf,
-    ) -> Self {
+    pub fn new(level: LintLevel, code: String, message: String, file: PathBuf) -> Self {
         Self {
             level,
             code,
@@ -143,15 +138,24 @@ impl LintResult {
     }
 
     pub fn error_count(&self) -> usize {
-        self.issues.iter().filter(|i| i.level == LintLevel::Error).count()
+        self.issues
+            .iter()
+            .filter(|i| i.level == LintLevel::Error)
+            .count()
     }
 
     pub fn warning_count(&self) -> usize {
-        self.issues.iter().filter(|i| i.level == LintLevel::Warning).count()
+        self.issues
+            .iter()
+            .filter(|i| i.level == LintLevel::Warning)
+            .count()
     }
 
     pub fn info_count(&self) -> usize {
-        self.issues.iter().filter(|i| i.level == LintLevel::Info).count()
+        self.issues
+            .iter()
+            .filter(|i| i.level == LintLevel::Info)
+            .count()
     }
 }
 

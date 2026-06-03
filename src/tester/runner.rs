@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::process::Command;
 use std::time::Instant;
 
-use super::{TestConfig, TestResults, TestStatus, TestCase, CoverageReport};
+use super::{CoverageReport, TestCase, TestConfig, TestResults, TestStatus};
 use std::collections::HashMap;
 
 /// Runs tests against Puppet modules
@@ -224,7 +224,10 @@ impl<'a> TestRunner<'a> {
             bundle_cmd
                 .env("BUNDLE_GEMFILE", self.config.module_path.join("Gemfile"))
                 .env("BUNDLE_APP_CONFIG", self.config.module_path.join(".bundle"))
-                .env("BUNDLE_PATH", self.config.module_path.join("vendor").join("bundle"))
+                .env(
+                    "BUNDLE_PATH",
+                    self.config.module_path.join("vendor").join("bundle"),
+                )
                 .env("BUNDLE_FORCE_RUBY_PLATFORM", "true");
             self.prepend_ruby_bindir(&mut bundle_cmd, &ruby);
             bundle_cmd
@@ -238,9 +241,7 @@ impl<'a> TestRunner<'a> {
         cmd.current_dir(&self.config.module_path);
 
         // Add RSpec options
-        cmd.arg("--format")
-            .arg("progress")
-            .arg("--color");
+        cmd.arg("--format").arg("progress").arg("--color");
 
         if let Some(pattern) = &self.config.pattern {
             cmd.arg("--pattern").arg(pattern);
@@ -255,14 +256,16 @@ impl<'a> TestRunner<'a> {
         }
 
         // Execute and capture output
-        cmd.output()
-            .context("Failed to execute RSpec command")
+        cmd.output().context("Failed to execute RSpec command")
     }
 
     fn execute_rspec_with_bundle_install(&self) -> Result<std::process::Output> {
         let output = self.execute_rspec_command()?;
         if self.should_run_bundle_install(&output) {
-            println!("{}", "Running bundle install to resolve missing gems...".yellow());
+            println!(
+                "{}",
+                "Running bundle install to resolve missing gems...".yellow()
+            );
             self.run_bundle_install()?;
             let retry = self.execute_rspec_command()?;
             if self.should_run_bundle_install(&retry) {
@@ -377,10 +380,17 @@ impl<'a> TestRunner<'a> {
             .bundler_version_from_lockfile()
             .unwrap_or_else(|| "2.4.21".to_string());
         let mut install_cmd = Command::new(ruby);
-        install_cmd.args(&["-S", "gem", "install", "bundler", "-v", &version, "--no-document"]);
+        install_cmd.args(&[
+            "-S",
+            "gem",
+            "install",
+            "bundler",
+            "-v",
+            &version,
+            "--no-document",
+        ]);
         self.prepend_ruby_bindir(&mut install_cmd, ruby);
-        let output = install_cmd.output()
-            .context("Failed to install Bundler")?;
+        let output = install_cmd.output().context("Failed to install Bundler")?;
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -404,7 +414,6 @@ impl<'a> TestRunner<'a> {
         }
         None
     }
-
 
     fn has_bundle_gemfile(&self) -> bool {
         self.config.module_path.join("Gemfile").exists()
@@ -473,7 +482,7 @@ impl<'a> TestRunner<'a> {
     /// Parse individual test line
     fn parse_test_line(&self, line: &str, results: &mut TestResults) -> Result<()> {
         let trimmed = line.trim();
-        
+
         // Extract test name and status
         let (name, status) = if trimmed.contains("✓") || trimmed.starts_with(".") {
             (trimmed.to_string(), TestStatus::Passed)
@@ -592,7 +601,9 @@ mod tests {
         let runner = TestRunner::new(&config);
         let mut results = TestResults::new("unit");
 
-        runner.parse_summary_line("5 examples, 0 failures", &mut results).unwrap();
+        runner
+            .parse_summary_line("5 examples, 0 failures", &mut results)
+            .unwrap();
 
         assert_eq!(results.total, 5);
         assert_eq!(results.passed, 5);
@@ -605,7 +616,9 @@ mod tests {
         let runner = TestRunner::new(&config);
         let mut results = TestResults::new("unit");
 
-        runner.parse_summary_line("10 examples, 2 failures", &mut results).unwrap();
+        runner
+            .parse_summary_line("10 examples, 2 failures", &mut results)
+            .unwrap();
 
         assert_eq!(results.total, 10);
         assert_eq!(results.failed, 2);

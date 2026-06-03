@@ -1,6 +1,6 @@
 //! CLI integration for validator commands
 
-use crate::validator::{ModuleValidator, ValidatorConfig, ReportFormat, ReportGenerator};
+use crate::validator::{ModuleValidator, ReportFormat, ReportGenerator, ValidatorConfig};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -29,15 +29,9 @@ impl ValidatorCli {
 
         // Output report in requested format
         let output = match report_format {
-            ReportFormat::Json => {
-                ReportGenerator::to_json(&report)?
-            },
-            ReportFormat::Text => {
-                ReportGenerator::to_text(&report)
-            },
-            ReportFormat::Html => {
-                ReportGenerator::to_html(&report)
-            },
+            ReportFormat::Json => ReportGenerator::to_json(&report)?,
+            ReportFormat::Text => ReportGenerator::to_text(&report),
+            ReportFormat::Html => ReportGenerator::to_html(&report),
         };
 
         println!("{}", output);
@@ -53,10 +47,7 @@ impl ValidatorCli {
     }
 
     /// Handle validate specific tool
-    pub fn validate_tool(
-        module_path: &PathBuf,
-        tool: &str,
-    ) -> Result<i32> {
+    pub fn validate_tool(module_path: &PathBuf, tool: &str) -> Result<i32> {
         let config = ValidatorConfig {
             enable_puppet_lint: tool == "puppet-lint" || tool == "all",
             enable_puppet_syntax: tool == "puppet-syntax" || tool == "all",

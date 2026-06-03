@@ -7,9 +7,7 @@ pub struct FixturesCommand;
 
 impl FixturesCommand {
     pub fn execute(path: &Path, clean: bool, offline: bool) -> anyhow::Result<()> {
-        let module_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let module_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let fixtures_yml = module_path.join(".fixtures.yml");
         if !fixtures_yml.exists() {
             return Err(anyhow::anyhow!(
@@ -35,7 +33,11 @@ impl FixturesCommand {
         }
 
         let count = manager.setup_fixtures()?;
-        let mode = if offline { " (offline, from cache)" } else { "" };
+        let mode = if offline {
+            " (offline, from cache)"
+        } else {
+            ""
+        };
         println!(
             "{} Installed {} fixture module(s) into {}{}",
             "✓".green().bold(),

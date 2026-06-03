@@ -1,8 +1,8 @@
 //! Ruby validator - Validates Ruby code in the module
 
+use crate::validator::lint::{LintResult, LintTool};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use crate::validator::lint::{LintResult, LintTool};
 
 /// Ruby code validator
 pub struct RubyValidator {
@@ -17,9 +17,7 @@ impl RubyValidator {
             anyhow::bail!("Module path does not exist: {:?}", path);
         }
 
-        Ok(Self {
-            module_path: path,
-        })
+        Ok(Self { module_path: path })
     }
 
     /// Run Ruby linting checks
@@ -38,11 +36,7 @@ impl RubyValidator {
     }
 
     fn check_ruby_files(&self, result: &mut LintResult) -> Result<()> {
-        let dirs_to_check = vec![
-            "lib",
-            "spec",
-            "tasks",
-        ];
+        let dirs_to_check = vec!["lib", "spec", "tasks"];
 
         for dir_name in dirs_to_check {
             let dir = self.module_path.join(dir_name);

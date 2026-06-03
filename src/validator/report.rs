@@ -16,7 +16,7 @@ impl ReportGenerator {
     /// Generate text/human-readable report
     pub fn to_text(report: &ValidationReport) -> String {
         let mut output = String::new();
-        
+
         writeln!(&mut output, "╔════════════════════════════════════════╗").ok();
         writeln!(&mut output, "║     VALIDATION REPORT                  ║").ok();
         writeln!(&mut output, "╚════════════════════════════════════════╝").ok();
@@ -35,13 +35,18 @@ impl ReportGenerator {
             crate::validator::ValidationStatus::Failed => "🚨",
         };
 
-        writeln!(&mut output, "Status: {} {}", status_icon, 
-                match report.overall_status {
-                    crate::validator::ValidationStatus::Success => "SUCCESS",
-                    crate::validator::ValidationStatus::Warnings => "WARNINGS",
-                    crate::validator::ValidationStatus::Errors => "ERRORS",
-                    crate::validator::ValidationStatus::Failed => "FAILED",
-                }).ok();
+        writeln!(
+            &mut output,
+            "Status: {} {}",
+            status_icon,
+            match report.overall_status {
+                crate::validator::ValidationStatus::Success => "SUCCESS",
+                crate::validator::ValidationStatus::Warnings => "WARNINGS",
+                crate::validator::ValidationStatus::Errors => "ERRORS",
+                crate::validator::ValidationStatus::Failed => "FAILED",
+            }
+        )
+        .ok();
         writeln!(&mut output).ok();
 
         // Summary
@@ -59,10 +64,24 @@ impl ReportGenerator {
             writeln!(&mut output, "─────────────────────────").ok();
 
             for result in &report.results {
-                writeln!(&mut output, "\n[{}] {}", result.tool, 
-                        if result.success { "✅ PASS" } else { "❌ FAIL" }).ok();
+                writeln!(
+                    &mut output,
+                    "\n[{}] {}",
+                    result.tool,
+                    if result.success {
+                        "✅ PASS"
+                    } else {
+                        "❌ FAIL"
+                    }
+                )
+                .ok();
                 writeln!(&mut output, "  Issues Found: {}", result.issues.len()).ok();
-                writeln!(&mut output, "  Execution Time: {}ms", result.execution_time_ms).ok();
+                writeln!(
+                    &mut output,
+                    "  Execution Time: {}ms",
+                    result.execution_time_ms
+                )
+                .ok();
 
                 if !result.issues.is_empty() {
                     writeln!(&mut output, "  Issues:").ok();
@@ -73,11 +92,15 @@ impl ReportGenerator {
                             crate::validator::LintLevel::Info => "ℹ️ ",
                         };
 
-                        writeln!(&mut output, "    {} [{}] {}: {}",
-                                level_icon,
-                                issue.code,
-                                issue.file.display(),
-                                issue.message).ok();
+                        writeln!(
+                            &mut output,
+                            "    {} [{}] {}: {}",
+                            level_icon,
+                            issue.code,
+                            issue.file.display(),
+                            issue.message
+                        )
+                        .ok();
 
                         if let Some(line) = issue.line {
                             write!(&mut output, " (line {}", line).ok();
@@ -121,10 +144,16 @@ impl ReportGenerator {
         html.push_str("<meta charset='UTF-8'>\n");
         html.push_str("<title>Validation Report</title>\n");
         html.push_str("<style>\n");
-        html.push_str("body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }\n");
+        html.push_str(
+            "body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }\n",
+        );
         html.push_str(".container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n");
-        html.push_str("h1 { color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }\n");
-        html.push_str(".status { padding: 10px; border-radius: 4px; margin: 10px 0; font-weight: bold; }\n");
+        html.push_str(
+            "h1 { color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }\n",
+        );
+        html.push_str(
+            ".status { padding: 10px; border-radius: 4px; margin: 10px 0; font-weight: bold; }\n",
+        );
         html.push_str(".status.success { background: #d4edda; color: #155724; }\n");
         html.push_str(".status.warning { background: #fff3cd; color: #856404; }\n");
         html.push_str(".status.error { background: #f8d7da; color: #721c24; }\n");
@@ -133,34 +162,67 @@ impl ReportGenerator {
         html.push_str(".summary-item { display: inline-block; margin-right: 30px; }\n");
         html.push_str(".summary-item strong { color: #007bff; }\n");
         html.push_str(".result { border: 1px solid #ddd; border-radius: 4px; padding: 15px; margin: 15px 0; }\n");
-        html.push_str(".result-header { font-weight: bold; font-size: 16px; margin-bottom: 10px; }\n");
+        html.push_str(
+            ".result-header { font-weight: bold; font-size: 16px; margin-bottom: 10px; }\n",
+        );
         html.push_str(".issue { background: #f9f9f9; padding: 10px; margin: 8px 0; border-left: 4px solid #007bff; }\n");
         html.push_str(".issue.error { border-left-color: #dc3545; }\n");
         html.push_str(".issue.warning { border-left-color: #ffc107; }\n");
         html.push_str(".issue.info { border-left-color: #17a2b8; }\n");
         html.push_str(".issue-code { font-weight: bold; color: #007bff; }\n");
-        html.push_str(".footer { text-align: center; color: #666; margin-top: 20px; font-size: 12px; }\n");
+        html.push_str(
+            ".footer { text-align: center; color: #666; margin-top: 20px; font-size: 12px; }\n",
+        );
         html.push_str("</style>\n");
         html.push_str("</head>\n");
         html.push_str("<body>\n");
         html.push_str("<div class='container'>\n");
 
         html.push_str("<h1>Validation Report</h1>\n");
-        html.push_str(&format!("<div class='status {}'>{}</div>\n", status_class, status_text));
+        html.push_str(&format!(
+            "<div class='status {}'>{}</div>\n",
+            status_class, status_text
+        ));
 
         html.push_str("<div class='summary'>\n");
-        html.push_str(&format!("<div class='summary-item'><strong>Module:</strong> {}</div>\n", report.module_path));
-        html.push_str(&format!("<div class='summary-item'><strong>Timestamp:</strong> {}</div>\n", report.timestamp));
-        html.push_str(&format!("<div class='summary-item'><strong>Total Issues:</strong> {}</div>\n", report.total_issues));
-        html.push_str(&format!("<div class='summary-item'><strong>Errors:</strong> {}</div>\n", report.errors));
-        html.push_str(&format!("<div class='summary-item'><strong>Warnings:</strong> {}</div>\n", report.warnings));
+        html.push_str(&format!(
+            "<div class='summary-item'><strong>Module:</strong> {}</div>\n",
+            report.module_path
+        ));
+        html.push_str(&format!(
+            "<div class='summary-item'><strong>Timestamp:</strong> {}</div>\n",
+            report.timestamp
+        ));
+        html.push_str(&format!(
+            "<div class='summary-item'><strong>Total Issues:</strong> {}</div>\n",
+            report.total_issues
+        ));
+        html.push_str(&format!(
+            "<div class='summary-item'><strong>Errors:</strong> {}</div>\n",
+            report.errors
+        ));
+        html.push_str(&format!(
+            "<div class='summary-item'><strong>Warnings:</strong> {}</div>\n",
+            report.warnings
+        ));
         html.push_str("</div>\n");
 
         for result in &report.results {
-            let result_status = if result.success { "✅ PASS" } else { "❌ FAIL" };
+            let result_status = if result.success {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            };
             html.push_str("<div class='result'>\n");
-            html.push_str(&format!("<div class='result-header'>{} - {}</div>\n", result.tool, result_status));
-            html.push_str(&format!("<p>Issues: {} | Time: {}ms</p>\n", result.issues.len(), result.execution_time_ms));
+            html.push_str(&format!(
+                "<div class='result-header'>{} - {}</div>\n",
+                result.tool, result_status
+            ));
+            html.push_str(&format!(
+                "<p>Issues: {} | Time: {}ms</p>\n",
+                result.issues.len(),
+                result.execution_time_ms
+            ));
 
             if !result.issues.is_empty() {
                 for issue in &result.issues {
@@ -171,7 +233,10 @@ impl ReportGenerator {
                     };
 
                     html.push_str(&format!("<div class='issue {}'>\n", issue_class));
-                    html.push_str(&format!("<span class='issue-code'>[{}]</span> {}\n", issue.code, issue.message));
+                    html.push_str(&format!(
+                        "<span class='issue-code'>[{}]</span> {}\n",
+                        issue.code, issue.message
+                    ));
                     html.push_str(&format!("<br/><small>{}", issue.file.display()));
                     if let Some(line) = issue.line {
                         html.push_str(&format!(" (line {})", line));
@@ -262,7 +327,7 @@ mod tests {
         let mut report = create_test_report();
         report.total_issues = 1;
         report.errors = 1;
-        
+
         let text = ReportGenerator::to_text(&report);
         assert!(text.contains("Total Issues: 1"));
         assert!(text.contains("Errors: 1"));

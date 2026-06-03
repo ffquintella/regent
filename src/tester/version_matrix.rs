@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
@@ -83,7 +83,11 @@ impl VersionMatrix {
 
     /// Total number of test combinations
     pub fn total_combinations(&self) -> usize {
-        let ruby_count = if self.ruby_versions.is_empty() { 1 } else { self.ruby_versions.len() };
+        let ruby_count = if self.ruby_versions.is_empty() {
+            1
+        } else {
+            self.ruby_versions.len()
+        };
         self.puppet_versions.len() * ruby_count
     }
 }
@@ -303,7 +307,11 @@ impl TestMatrixRunner {
         report.push_str("---|---|---\n");
 
         for result in &results.results {
-            let status = if result.success { "✓ PASS" } else { "✗ FAIL" };
+            let status = if result.success {
+                "✓ PASS"
+            } else {
+                "✗ FAIL"
+            };
             report.push_str(&format!(
                 "{} | {} | {}\n",
                 result.puppet_version, result.ruby_version, status
@@ -368,8 +376,8 @@ mod tests {
 
     #[test]
     fn test_version_matrix_no_ruby_versions() {
-        let matrix = VersionMatrix::new()
-            .with_puppet_versions(vec!["7.0".to_string(), "8.0".to_string()]);
+        let matrix =
+            VersionMatrix::new().with_puppet_versions(vec!["7.0".to_string(), "8.0".to_string()]);
 
         let combinations = matrix.get_combinations();
         assert_eq!(combinations.len(), 2);

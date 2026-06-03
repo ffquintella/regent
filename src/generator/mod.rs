@@ -8,9 +8,8 @@
 pub mod advanced;
 
 pub use advanced::{
-    ComponentType, GeneratorConfig, 
-    ProviderGenerator, DeferredFunctionGenerator, BoltTransportGenerator,
-    ClassGenerator, ResourceGenerator,
+    BoltTransportGenerator, ClassGenerator, ComponentType, DeferredFunctionGenerator,
+    GeneratorConfig, ProviderGenerator, ResourceGenerator,
 };
 
 /// Module generator trait for integration

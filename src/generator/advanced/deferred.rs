@@ -40,7 +40,9 @@ impl DeferredFunctionGenerator {
 
     fn generate_function_content(&self) -> String {
         let func_name = self.config.component_name.as_str();
-        let module_name = self.config.module_path
+        let module_name = self
+            .config
+            .module_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("module");

@@ -113,7 +113,9 @@ fn gem_present(bundle_root: &Path, gem_name: &str) -> bool {
     };
     for entry in entries.flatten() {
         let gems_dir = entry.path().join("gems");
-        let Ok(gems) = std::fs::read_dir(&gems_dir) else { continue };
+        let Ok(gems) = std::fs::read_dir(&gems_dir) else {
+            continue;
+        };
         for gem in gems.flatten() {
             if let Some(name) = gem.file_name().to_str() {
                 if name.starts_with(&format!("{gem_name}-")) {

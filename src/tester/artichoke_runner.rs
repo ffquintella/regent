@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-use super::{RegentPlan, RegentSpecRunner, TestConfig, TestResults, TestCase, TestStatus};
 use super::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
+use super::{RegentPlan, RegentSpecRunner, TestCase, TestConfig, TestResults, TestStatus};
 use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
@@ -74,7 +74,12 @@ impl<'a> ArtichokeTestRunner<'a> {
         let mut spec_files = Vec::new();
         for entry in WalkDir::new(&spec_dir).into_iter().flatten() {
             let path = entry.path();
-            if path.is_file() && path.file_name().and_then(|name| name.to_str()).map_or(false, |name| name.ends_with("_spec.rb")) {
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| name.ends_with("_spec.rb"))
+            {
                 spec_files.push(path.to_path_buf());
             }
         }
@@ -182,7 +187,11 @@ impl<'a> ArtichokeTestRunner<'a> {
         if smoke {
             results.add_test_case(TestCase {
                 name: "rspec_smoke".to_string(),
-                status: if summary.exit_code == 0 { TestStatus::Passed } else { TestStatus::Failed },
+                status: if summary.exit_code == 0 {
+                    TestStatus::Passed
+                } else {
+                    TestStatus::Failed
+                },
                 duration_ms: 0,
                 message: None,
             });
@@ -190,7 +199,11 @@ impl<'a> ArtichokeTestRunner<'a> {
             for path in spec_files {
                 results.add_test_case(TestCase {
                     name: path.display().to_string(),
-                    status: if summary.exit_code == 0 { TestStatus::Passed } else { TestStatus::Failed },
+                    status: if summary.exit_code == 0 {
+                        TestStatus::Passed
+                    } else {
+                        TestStatus::Failed
+                    },
                     duration_ms: 0,
                     message: None,
                 });
@@ -210,7 +223,9 @@ impl<'a> ArtichokeTestRunner<'a> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
             return Vec::new();
         };
-        let Some(entries) = value.get("operatingsystem_support").and_then(|v| v.as_array())
+        let Some(entries) = value
+            .get("operatingsystem_support")
+            .and_then(|v| v.as_array())
         else {
             return Vec::new();
         };
@@ -247,10 +262,14 @@ impl<'a> ArtichokeTestRunner<'a> {
         roots.push(self.config.module_path.join("vendor").join("bundle"));
         for root in roots {
             let ruby_root = root.join("ruby");
-            let Ok(entries) = std::fs::read_dir(&ruby_root) else { continue };
+            let Ok(entries) = std::fs::read_dir(&ruby_root) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let gem_root = entry.path().join("gems");
-                let Ok(gems) = std::fs::read_dir(gem_root) else { continue };
+                let Ok(gems) = std::fs::read_dir(gem_root) else {
+                    continue;
+                };
                 for gem in gems.flatten() {
                     let lib = gem.path().join("lib");
                     if lib.is_dir() {
@@ -1360,9 +1379,7 @@ module Diff
   end
 end
 "#;
-        let diff_lcs_path = PathBuf::from(VIRTUAL_ROOT)
-            .join("diff")
-            .join("lcs.rb");
+        let diff_lcs_path = PathBuf::from(VIRTUAL_ROOT).join("diff").join("lcs.rb");
         env.def_rb_source_file(diff_lcs_path, diff_lcs.as_bytes().to_vec())?;
 
         let diff_hunk = r#"
@@ -1485,13 +1502,8 @@ module RSpec
   end
 end
 "#;
-            let rspec_support_path = PathBuf::from(VIRTUAL_ROOT)
-                .join("rspec")
-                .join("support.rb");
-            env.def_rb_source_file(
-                rspec_support_path,
-                rspec_support_stub.as_bytes().to_vec(),
-            )?;
+            let rspec_support_path = PathBuf::from(VIRTUAL_ROOT).join("rspec").join("support.rb");
+            env.def_rb_source_file(rspec_support_path, rspec_support_stub.as_bytes().to_vec())?;
 
             let rspec_stub = r#"
 module RSpec
@@ -2247,7 +2259,9 @@ end
     fn parse_summary(output: &str) -> Summary {
         let mut summary = Summary::default();
         for line in output.lines() {
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
             match key {
                 "exit_code" => summary.exit_code = value.parse().unwrap_or(1),
                 "total" => summary.total = value.parse().unwrap_or(0),
@@ -2289,7 +2303,8 @@ impl SupportedOs {
 
     fn osfamily(&self) -> &'static str {
         match self.os.to_lowercase().as_str() {
-            "redhat" | "centos" | "rocky" | "almalinux" | "oraclelinux" | "fedora" | "scientific" => "RedHat",
+            "redhat" | "centos" | "rocky" | "almalinux" | "oraclelinux" | "fedora"
+            | "scientific" => "RedHat",
             "debian" | "ubuntu" => "Debian",
             "sles" | "suse" | "opensuse" => "Suse",
             "solaris" => "Solaris",

@@ -7,20 +7,20 @@
 //! - Puppet classes
 //! - Resources
 
-pub mod provider;
-pub mod deferred;
 pub mod bolt;
 pub mod class;
+pub mod deferred;
+pub mod provider;
 pub mod resource;
 
-pub use provider::ProviderGenerator;
-pub use deferred::DeferredFunctionGenerator;
 pub use bolt::BoltTransportGenerator;
 pub use class::ClassGenerator;
+pub use deferred::DeferredFunctionGenerator;
+pub use provider::ProviderGenerator;
 pub use resource::ResourceGenerator;
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Component type to generate
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,17 +83,16 @@ mod tests {
     #[test]
     fn test_component_type_display() {
         assert_eq!(ComponentType::Provider.to_string(), "provider");
-        assert_eq!(ComponentType::DeferredFunction.to_string(), "deferred_function");
+        assert_eq!(
+            ComponentType::DeferredFunction.to_string(),
+            "deferred_function"
+        );
         assert_eq!(ComponentType::BoltTransport.to_string(), "bolt_transport");
     }
 
     #[test]
     fn test_generator_config_creation() {
-        let config = GeneratorConfig::new(
-            ".",
-            "my_component".to_string(),
-            ComponentType::Provider,
-        );
+        let config = GeneratorConfig::new(".", "my_component".to_string(), ComponentType::Provider);
         assert_eq!(config.component_name, "my_component");
         assert_eq!(config.component_type, ComponentType::Provider);
         assert!(config.create_tests);

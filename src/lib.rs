@@ -1,17 +1,20 @@
 // Regent - Rust + Artichoke Ruby hybrid module for Puppet development
 
+pub mod builder;
 pub mod config;
 pub mod generator;
-pub mod validator;
-pub mod builder;
-pub mod tester;
 pub mod ruby_interop;
+pub mod tester;
+pub mod validator;
 
+pub use builder::{
+    BuildArtifact, BuildFormat, ChecksumGenerator, DependencyResolver, ModuleBuilder,
+    ModuleMetadata, PackagerConfig, TarballBuilder,
+};
 pub use config::Config;
 pub use generator::ModuleGenerator;
-pub use validator::ModuleValidator;
-pub use builder::{ModuleBuilder, ModuleMetadata, ChecksumGenerator, BuildArtifact, TarballBuilder, PackagerConfig, BuildFormat, DependencyResolver};
 pub use tester::{ModuleTester, TestConfig, TestResults, TestType};
+pub use validator::ModuleValidator;
 
 /// Regent version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

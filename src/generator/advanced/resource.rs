@@ -26,9 +26,7 @@ impl ResourceGenerator {
     /// Generates the Puppet resource files in a temporary directory
     pub fn generate(&self) -> TempDir {
         let temp_dir = TempDir::new().unwrap();
-        let resource_path = temp_dir
-            .path()
-            .join(format!("{}.pp", self.resource_type));
+        let resource_path = temp_dir.path().join(format!("{}.pp", self.resource_type));
         let resource_content = self.generate_resource_content();
         std::fs::write(resource_path, resource_content).unwrap();
         temp_dir

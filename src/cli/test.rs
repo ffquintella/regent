@@ -1,9 +1,9 @@
 use colored::*;
 use std::path::Path;
 
-use regent::tester::{FixtureManager, ModuleTester, TestConfig, TestType, TestReporter};
-use regent::tester::reporter::ReportFormat;
 use regent::tester::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
+use regent::tester::reporter::ReportFormat;
+use regent::tester::{FixtureManager, ModuleTester, TestConfig, TestReporter, TestType};
 
 use super::bootstrap::missing_dependency_hint;
 
@@ -19,16 +19,18 @@ impl TestCommand {
         coverage_dir: Option<&Path>,
     ) -> anyhow::Result<()> {
         let effective_pattern = pattern.unwrap_or("spec/{aliases,classes,defines,functions,hosts,integration,plans,tasks,type_aliases,types,unit}/**/*_spec.rb");
-        println!("{} Running tests with pattern: {}", "⚙".cyan(), effective_pattern);
+        println!(
+            "{} Running tests with pattern: {}",
+            "⚙".cyan(),
+            effective_pattern
+        );
 
         // Check if spec directory exists
         if !path.join("spec").exists() {
             return Err(anyhow::anyhow!("No spec directory found at {:?}", path));
         }
 
-        let module_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let module_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
         // Populate the per-user bundle (~/.regent/bundle) from the Regent-shipped
         // gem cache, if one is available and the user bundle is bare.
@@ -58,7 +60,10 @@ impl TestCommand {
             results.passed, results.failed, results.skipped
         );
         if results.total > 0 && results.skipped == results.total {
-            println!("{}", "Artichoke runner skipped all specs (RSpec execution pending).".yellow());
+            println!(
+                "{}",
+                "Artichoke runner skipped all specs (RSpec execution pending).".yellow()
+            );
         }
 
         if detail {
@@ -83,7 +88,10 @@ impl TestCommand {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| module_path.join("coverage"));
                 if let Err(err) = std::fs::create_dir_all(&dir) {
-                    eprintln!("warning: could not create coverage dir {}: {err}", dir.display());
+                    eprintln!(
+                        "warning: could not create coverage dir {}: {err}",
+                        dir.display()
+                    );
                 } else {
                     let json_path = dir.join("coverage.json");
                     match serde_json::to_string_pretty(report) {
@@ -145,7 +153,10 @@ impl TestCommand {
                 println!("{}", results.stderr.trim_end());
             }
             if results.stderr.contains("rspec.rb")
-                || results.stderr.to_lowercase().contains("could not find rspec")
+                || results
+                    .stderr
+                    .to_lowercase()
+                    .contains("could not find rspec")
             {
                 eprintln!("{}", missing_dependency_hint("rspec"));
             }
@@ -164,10 +175,14 @@ fn detect_missing_runtime_dependency(module_path: &Path) -> Option<String> {
     roots.push(module_path.join("vendor").join("bundle"));
     for root in roots {
         let ruby_root = root.join("ruby");
-        let Ok(entries) = std::fs::read_dir(&ruby_root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&ruby_root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let gems_dir = entry.path().join("gems");
-            let Ok(gems) = std::fs::read_dir(&gems_dir) else { continue };
+            let Ok(gems) = std::fs::read_dir(&gems_dir) else {
+                continue;
+            };
             for gem in gems.flatten() {
                 if let Some(name) = gem.file_name().to_str() {
                     if name.starts_with("rspec-") || name == "rspec" || name.starts_with("rspec_") {

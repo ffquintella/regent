@@ -1,15 +1,15 @@
-pub mod metadata;
 pub mod checksum;
-pub mod packager;
 pub mod dependency;
+pub mod metadata;
+pub mod packager;
 
-pub use metadata::ModuleMetadata;
 pub use checksum::{ChecksumGenerator, ChecksumSet};
-pub use packager::{TarballBuilder, PackagerConfig, BuildFormat};
-pub use dependency::{DependencyResolver, ModuleDependency, DependencyTree};
+pub use dependency::{DependencyResolver, DependencyTree, ModuleDependency};
+pub use metadata::ModuleMetadata;
+pub use packager::{BuildFormat, PackagerConfig, TarballBuilder};
 
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 /// Artifact produced by building a module
 #[derive(Debug, Clone)]
@@ -44,11 +44,10 @@ impl ModuleBuilder {
 
         // Load and validate metadata
         let metadata_path = path.join("metadata.json");
-        let mut metadata = ModuleMetadata::load(&metadata_path)
-            .context("Failed to load metadata.json")?;
-        
-        metadata.validate()
-            .context("Metadata validation failed")?;
+        let mut metadata =
+            ModuleMetadata::load(&metadata_path).context("Failed to load metadata.json")?;
+
+        metadata.validate().context("Metadata validation failed")?;
 
         // Apply version override if provided
         if let Some(version) = version_override {
@@ -66,15 +65,16 @@ impl ModuleBuilder {
         }
 
         // Build tarball
-        let builder = TarballBuilder::new(config)
-            .context("Failed to create tarball builder")?;
-        
-        let tarball_path = builder.build(&module_name, &version)
+        let builder = TarballBuilder::new(config).context("Failed to create tarball builder")?;
+
+        let tarball_path = builder
+            .build(&module_name, &version)
             .context("Failed to build tarball")?;
 
         // Generate checksums
         let checksum_gen = ChecksumGenerator::new(&tarball_path);
-        let checksums = checksum_gen.generate_all()
+        let checksums = checksum_gen
+            .generate_all()
             .context("Failed to generate checksums")?;
 
         log::info!("Built module: {:?}", tarball_path);
@@ -90,4 +90,3 @@ impl ModuleBuilder {
         })
     }
 }
-

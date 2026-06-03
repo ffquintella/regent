@@ -53,7 +53,14 @@ impl TestReporter {
         report.push_str(&format!("  Skipped:      {}\n", results.skipped));
         report.push_str(&format!("  Pending:      {}\n", results.pending));
         report.push_str(&format!("  Duration:     {}ms\n", results.duration_ms));
-        report.push_str(&format!("  Status:       {}\n\n", if results.success() { "PASSED" } else { "FAILED" }));
+        report.push_str(&format!(
+            "  Status:       {}\n\n",
+            if results.success() {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        ));
 
         // Test cases section
         if !results.test_cases.is_empty() {
@@ -66,7 +73,10 @@ impl TestReporter {
                     super::TestStatus::Pending => "⊗",
                 };
 
-                report.push_str(&format!("  {} {} ({}ms)\n", status_symbol, test_case.name, test_case.duration_ms));
+                report.push_str(&format!(
+                    "  {} {} ({}ms)\n",
+                    status_symbol, test_case.name, test_case.duration_ms
+                ));
 
                 if let Some(msg) = &test_case.message {
                     report.push_str(&format!("      Message: {}\n", msg));
@@ -98,7 +108,10 @@ impl TestReporter {
         html.push_str("<html>\n");
         html.push_str("<head>\n");
         html.push_str("  <meta charset='UTF-8'>\n");
-        html.push_str(&format!("  <title>Test Report - {}</title>\n", results.test_type));
+        html.push_str(&format!(
+            "  <title>Test Report - {}</title>\n",
+            results.test_type
+        ));
         html.push_str("  <style>\n");
         html.push_str("    body { font-family: Arial, sans-serif; margin: 20px; }\n");
         html.push_str("    .summary { background: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px; }\n");
@@ -114,18 +127,32 @@ impl TestReporter {
 
         html.push_str(&format!("  <h1>Test Report: {}</h1>\n", results.test_type));
         html.push_str("  <div class='summary'>\n");
-        html.push_str(&format!("    <p>Status: <span class='{}'>{}</span></p>\n", 
-            if results.success() { "passed" } else { "failed" },
-            if results.success() { "PASSED" } else { "FAILED" }));
-        html.push_str(&format!("    <p>Total Tests: {} | Passed: {} | Failed: {} | Skipped: {} | Pending: {}</p>\n",
-            results.total, results.passed, results.failed, results.skipped, results.pending));
+        html.push_str(&format!(
+            "    <p>Status: <span class='{}'>{}</span></p>\n",
+            if results.success() {
+                "passed"
+            } else {
+                "failed"
+            },
+            if results.success() {
+                "PASSED"
+            } else {
+                "FAILED"
+            }
+        ));
+        html.push_str(&format!(
+            "    <p>Total Tests: {} | Passed: {} | Failed: {} | Skipped: {} | Pending: {}</p>\n",
+            results.total, results.passed, results.failed, results.skipped, results.pending
+        ));
         html.push_str(&format!("    <p>Duration: {}ms</p>\n", results.duration_ms));
         html.push_str("  </div>\n");
 
         if !results.test_cases.is_empty() {
             html.push_str("  <h2>Test Cases</h2>\n");
             html.push_str("  <table>\n");
-            html.push_str("    <tr><th>Status</th><th>Name</th><th>Duration</th><th>Message</th></tr>\n");
+            html.push_str(
+                "    <tr><th>Status</th><th>Name</th><th>Duration</th><th>Message</th></tr>\n",
+            );
 
             for test_case in &results.test_cases {
                 let status_class = match test_case.status {
@@ -136,10 +163,17 @@ impl TestReporter {
                 };
 
                 html.push_str(&format!("    <tr>\n"));
-                html.push_str(&format!("      <td class='{}'>{}</td>\n", status_class, test_case.status.as_str()));
+                html.push_str(&format!(
+                    "      <td class='{}'>{}</td>\n",
+                    status_class,
+                    test_case.status.as_str()
+                ));
                 html.push_str(&format!("      <td>{}</td>\n", test_case.name));
                 html.push_str(&format!("      <td>{}ms</td>\n", test_case.duration_ms));
-                html.push_str(&format!("      <td>{}</td>\n", test_case.message.as_ref().unwrap_or(&String::new())));
+                html.push_str(&format!(
+                    "      <td>{}</td>\n",
+                    test_case.message.as_ref().unwrap_or(&String::new())
+                ));
                 html.push_str("    </tr>\n");
             }
 
@@ -175,7 +209,7 @@ pub enum ReportFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tester::{TestResults, TestCase, TestStatus};
+    use crate::tester::{TestCase, TestResults, TestStatus};
 
     fn create_sample_results() -> TestResults {
         let mut results = TestResults::new("unit");

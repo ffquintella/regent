@@ -1,9 +1,9 @@
 //! Metadata validator - Validates Puppet module metadata.json
 
+use crate::validator::lint::{LintIssue, LintLevel, LintResult, LintTool};
 use anyhow::Result;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use crate::validator::lint::{LintIssue, LintLevel, LintResult, LintTool};
 
 /// Metadata JSON validator
 pub struct MetadataValidator {
@@ -18,9 +18,7 @@ impl MetadataValidator {
             anyhow::bail!("Module path does not exist: {:?}", path);
         }
 
-        Ok(Self {
-            module_path: path,
-        })
+        Ok(Self { module_path: path })
     }
 
     /// Validate metadata.json file

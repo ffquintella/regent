@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +51,10 @@ impl PuppetValue {
             PuppetValue::Integer(value) => value.to_string(),
             PuppetValue::Bool(value) => value.to_string(),
             PuppetValue::Array(values) => {
-                let items = values.iter().map(|value| value.as_string()).collect::<Vec<_>>();
+                let items = values
+                    .iter()
+                    .map(|value| value.as_string())
+                    .collect::<Vec<_>>();
                 format!("[{}]", items.join(", "))
             }
             PuppetValue::Hash(map) => {
@@ -109,7 +112,9 @@ impl PuppetCatalog {
     }
 
     pub fn find(&self, resource_type: &str, title: &str) -> Option<&PuppetResource> {
-        self.resources.get(resource_type).and_then(|map| map.get(title))
+        self.resources
+            .get(resource_type)
+            .and_then(|map| map.get(title))
     }
 }
 
@@ -172,7 +177,8 @@ impl PuppetEvaluator {
         facts: &PuppetValue,
         params: &PuppetValue,
     ) -> Result<PuppetCatalog> {
-        self.evaluate_class_traced(name, facts, params).map(|(c, _)| c)
+        self.evaluate_class_traced(name, facts, params)
+            .map(|(c, _)| c)
     }
 
     pub fn evaluate_define(
@@ -227,7 +233,10 @@ struct PuppetModule {
 }
 
 impl PuppetModule {
-    fn load_with_fixtures(module_path: &Path, fixture_module_paths: &[std::path::PathBuf]) -> Result<Self> {
+    fn load_with_fixtures(
+        module_path: &Path,
+        fixture_module_paths: &[std::path::PathBuf],
+    ) -> Result<Self> {
         let mut classes = HashMap::new();
         let mut defines = HashMap::new();
         let mut module_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
@@ -237,7 +246,9 @@ impl PuppetModule {
             register_module_path(&mut module_paths, fixture_path);
             // Be tolerant: a single broken fixture should not block the run.
             let mut sink = Vec::new();
-            if let Err(err) = load_manifests_into(fixture_path, &mut classes, &mut defines, &mut sink) {
+            if let Err(err) =
+                load_manifests_into(fixture_path, &mut classes, &mut defines, &mut sink)
+            {
                 eprintln!(
                     "warning: skipping fixture module {}: {}",
                     fixture_path.display(),
@@ -248,11 +259,21 @@ impl PuppetModule {
 
         register_module_path(&mut module_paths, &module_path.to_path_buf());
         let mut primary_manifest_files = Vec::new();
-        load_manifests_into(module_path, &mut classes, &mut defines, &mut primary_manifest_files)
-            .with_context(|| format!("load manifests for {}", module_path.display()))?;
+        load_manifests_into(
+            module_path,
+            &mut classes,
+            &mut defines,
+            &mut primary_manifest_files,
+        )
+        .with_context(|| format!("load manifests for {}", module_path.display()))?;
         primary_manifest_files.sort();
 
-        Ok(Self { classes, defines, module_paths, primary_manifest_files })
+        Ok(Self {
+            classes,
+            defines,
+            module_paths,
+            primary_manifest_files,
+        })
     }
 }
 
@@ -362,7 +383,9 @@ fn discover_fixture_module_paths(module_path: &Path) -> Vec<std::path::PathBuf> 
     for entry in entries.flatten() {
         let path = entry.path();
         // Follow symlinks: they're standard for self-referential fixtures.
-        let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = std::fs::metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         if !is_dir {
             continue;
         }
@@ -476,11 +499,21 @@ enum Cond {
     Not(Box<Cond>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
-    Defined { rtype: String, title: String },
-    Compare { left: Expr, op: CompareOp, right: Expr },
+    Defined {
+        rtype: String,
+        title: String,
+    },
+    Compare {
+        left: Expr,
+        op: CompareOp,
+        right: Expr,
+    },
     /// `<needle> in <haystack>` — membership test against arrays, hash keys, or
     /// substring of a string.
-    In { needle: Expr, haystack: Expr },
+    In {
+        needle: Expr,
+        haystack: Expr,
+    },
     Truthy(Expr),
 }
 
@@ -505,7 +538,10 @@ enum Expr {
     Array(Vec<Expr>),
     Hash(Vec<(Expr, Expr)>),
     Var(VarRef),
-    MethodCall { target: Box<Expr>, name: String },
+    MethodCall {
+        target: Box<Expr>,
+        name: String,
+    },
     /// A method call carrying a lambda block in *value* position, e.g.
     /// `$xs.map |$x| { "${x}!" }` used as a selector arm, attribute value, or
     /// function argument. `body` is the lambda's return expression (the common
@@ -518,8 +554,14 @@ enum Expr {
         params: Vec<String>,
         body: Box<Expr>,
     },
-    ResourceRef { rtype: String, title: Box<Expr> },
-    FunctionCall { name: String, args: Vec<Expr> },
+    ResourceRef {
+        rtype: String,
+        title: Box<Expr>,
+    },
+    FunctionCall {
+        name: String,
+        args: Vec<Expr>,
+    },
     /// Puppet regex literal: `/pattern/[flags]`. Stored as the inner pattern;
     /// flags are pre-applied as inline modifiers (e.g. `(?i)`).
     Regex(String),
@@ -664,8 +706,10 @@ impl<'a> EvalContext<'a> {
             .clone();
         self.in_progress.push(key.clone());
         let saved_vars = self.vars.clone();
-        self.vars.insert("title".to_string(), PuppetValue::String(title.to_string()));
-        self.vars.insert("name".to_string(), PuppetValue::String(title.to_string()));
+        self.vars
+            .insert("title".to_string(), PuppetValue::String(title.to_string()));
+        self.vars
+            .insert("name".to_string(), PuppetValue::String(title.to_string()));
         let mut local_vars = HashMap::new();
         self.apply_param_defaults(&define_def.params, &mut local_vars)?;
         for (key, value) in attrs {
@@ -768,11 +812,16 @@ impl<'a> EvalContext<'a> {
                     self.vars.insert(name.clone(), value);
                     if let Some(scope) = self.class_stack.last() {
                         let scoped = format!("{scope}::{name}");
-                        let scoped_value = self.vars.get(name).cloned().unwrap_or(PuppetValue::Undef);
+                        let scoped_value =
+                            self.vars.get(name).cloned().unwrap_or(PuppetValue::Undef);
                         self.vars.insert(scoped, scoped_value);
                     }
                 }
-                Stmt::Resource { rtype, titles, attrs } => {
+                Stmt::Resource {
+                    rtype,
+                    titles,
+                    attrs,
+                } => {
                     let mut title_values = Vec::new();
                     for title_expr in titles {
                         let value = self.eval_expr(title_expr)?;
@@ -821,14 +870,22 @@ impl<'a> EvalContext<'a> {
                         let _ = self.evaluate_class(name);
                     }
                 }
-                Stmt::If { cond, then_body, else_body } => {
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
                     if self.eval_cond(cond)? {
                         self.evaluate_statements(then_body)?;
                     } else {
                         self.evaluate_statements(else_body)?;
                     }
                 }
-                Stmt::Case { expr, branches, default } => {
+                Stmt::Case {
+                    expr,
+                    branches,
+                    default,
+                } => {
                     let value = self.eval_expr(expr)?;
                     let mut matched = false;
                     for (branch_expr, body) in branches {
@@ -845,7 +902,11 @@ impl<'a> EvalContext<'a> {
                 Stmt::Fail(message) => {
                     return Err(anyhow::anyhow!(message.clone()));
                 }
-                Stmt::EachLoop { iterable, params, body } => {
+                Stmt::EachLoop {
+                    iterable,
+                    params,
+                    body,
+                } => {
                     let value = self.eval_expr(iterable)?;
                     // Snapshot bindings the loop may overwrite so the
                     // surrounding scope is restored once iteration ends.
@@ -890,7 +951,11 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                Stmt::CreateResources { rtype_expr, hash_expr, defaults_expr } => {
+                Stmt::CreateResources {
+                    rtype_expr,
+                    hash_expr,
+                    defaults_expr,
+                } => {
                     let resource_type = normalize_rtype(&self.eval_expr(rtype_expr)?.as_string());
                     let entries = match self.eval_expr(hash_expr)? {
                         PuppetValue::Hash(entries) => entries,
@@ -922,9 +987,12 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                Stmt::EnsureResource { type_expr, title_expr, params_expr } => {
-                    let resource_type =
-                        normalize_rtype(&self.eval_expr(type_expr)?.as_string());
+                Stmt::EnsureResource {
+                    type_expr,
+                    title_expr,
+                    params_expr,
+                } => {
+                    let resource_type = normalize_rtype(&self.eval_expr(type_expr)?.as_string());
                     let titles = match self.eval_expr(title_expr)? {
                         PuppetValue::Array(items) => {
                             items.into_iter().map(|v| v.as_string()).collect()
@@ -945,15 +1013,14 @@ impl<'a> EvalContext<'a> {
                             attributes: attributes.clone(),
                         });
                         if self.module.defines.contains_key(&resource_type) {
-                            let _ = self.instantiate_define(
-                                &resource_type,
-                                &title,
-                                &attributes,
-                            );
+                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
                         }
                     }
                 }
-                Stmt::EnsurePackages { packages_expr, params_expr } => {
+                Stmt::EnsurePackages {
+                    packages_expr,
+                    params_expr,
+                } => {
                     let defaults = match params_expr {
                         Some(expr) => match self.eval_expr(expr)? {
                             PuppetValue::Hash(map) => map,
@@ -1013,10 +1080,9 @@ impl<'a> EvalContext<'a> {
     /// - any other expression — equality after evaluation
     fn case_branch_matches(&mut self, pattern: &Expr, subject: &PuppetValue) -> Result<bool> {
         match pattern {
-            Expr::Regex(regex_src) => eval_regex_match(
-                subject,
-                &PuppetValue::String(regex_src.clone()),
-            ),
+            Expr::Regex(regex_src) => {
+                eval_regex_match(subject, &PuppetValue::String(regex_src.clone()))
+            }
             Expr::Array(items) => {
                 for item in items {
                     if self.case_branch_matches(item, subject)? {
@@ -1038,23 +1104,19 @@ impl<'a> EvalContext<'a> {
                 let rtype = normalize_rtype(rtype);
                 self.catalog.contains(&rtype, title)
             }
-            Cond::Compare { left, op, right } => {
-                match op {
-                    CompareOp::Eq => self.eval_expr(left)? == self.eval_expr(right)?,
-                    CompareOp::NotEq => self.eval_expr(left)? != self.eval_expr(right)?,
-                    CompareOp::Match => eval_regex_match(
-                        &self.eval_expr(left)?,
-                        &self.eval_expr(right)?,
-                    )?,
-                    CompareOp::NotMatch => !eval_regex_match(
-                        &self.eval_expr(left)?,
-                        &self.eval_expr(right)?,
-                    )?,
-                    CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq => {
-                        eval_ordered_compare(&self.eval_expr(left)?, *op, &self.eval_expr(right)?)
-                    }
+            Cond::Compare { left, op, right } => match op {
+                CompareOp::Eq => self.eval_expr(left)? == self.eval_expr(right)?,
+                CompareOp::NotEq => self.eval_expr(left)? != self.eval_expr(right)?,
+                CompareOp::Match => {
+                    eval_regex_match(&self.eval_expr(left)?, &self.eval_expr(right)?)?
                 }
-            }
+                CompareOp::NotMatch => {
+                    !eval_regex_match(&self.eval_expr(left)?, &self.eval_expr(right)?)?
+                }
+                CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq => {
+                    eval_ordered_compare(&self.eval_expr(left)?, *op, &self.eval_expr(right)?)
+                }
+            },
             Cond::In { needle, haystack } => {
                 let needle = self.eval_expr(needle)?;
                 let haystack = self.eval_expr(haystack)?;
@@ -1098,9 +1160,12 @@ impl<'a> EvalContext<'a> {
                     _ => value,
                 }
             }
-            Expr::Lambda { target, method, params, body } => {
-                self.eval_lambda(target, method, params, body)?
-            }
+            Expr::Lambda {
+                target,
+                method,
+                params,
+                body,
+            } => self.eval_lambda(target, method, params, body)?,
             Expr::ResourceRef { rtype, title } => {
                 let title = self.eval_expr(title)?.as_string();
                 PuppetValue::String(format!("{rtype}[{title}]"))
@@ -1225,10 +1290,8 @@ impl<'a> EvalContext<'a> {
             // A single-param lambda over a hash receives `[key, value]` as the
             // one parameter; otherwise bind positionally.
             if params.len() == 1 && element.len() == 2 {
-                self.vars.insert(
-                    params[0].clone(),
-                    PuppetValue::Array(element.clone()),
-                );
+                self.vars
+                    .insert(params[0].clone(), PuppetValue::Array(element.clone()));
             } else {
                 for (name, value) in params.iter().zip(element.iter()) {
                     self.vars.insert(name.clone(), value.clone());
@@ -1288,7 +1351,10 @@ impl<'a> EvalContext<'a> {
             v
         } else if let PuppetValue::Hash(facts) = &self.facts {
             // Legacy top-scope fact references: `$::osfamily` → `$facts['osfamily']`.
-            facts.get(&normalized).cloned().unwrap_or(PuppetValue::Undef)
+            facts
+                .get(&normalized)
+                .cloned()
+                .unwrap_or(PuppetValue::Undef)
         } else {
             PuppetValue::Undef
         };
@@ -1377,9 +1443,8 @@ impl<'a> PuppetParser<'a> {
         self.index += 2;
         self.warnings.push(ParseWarning {
             offset,
-            message:
-                "deprecated leading `::` namespace prefix; modern Puppet treats it as a no-op"
-                    .to_string(),
+            message: "deprecated leading `::` namespace prefix; modern Puppet treats it as a no-op"
+                .to_string(),
         });
         true
     }
@@ -1416,14 +1481,25 @@ impl<'a> PuppetParser<'a> {
             None
         };
         let body = self.parse_block()?;
-        Ok(ClassDef { name, params, parent, body, origin_file: None })
+        Ok(ClassDef {
+            name,
+            params,
+            parent,
+            body,
+            origin_file: None,
+        })
     }
 
     fn parse_define_def(&mut self) -> Result<DefineDef> {
         let name = self.expect_ident()?;
         let params = self.parse_param_list()?;
         let body = self.parse_block()?;
-        Ok(DefineDef { name, params, body, origin_file: None })
+        Ok(DefineDef {
+            name,
+            params,
+            body,
+            origin_file: None,
+        })
     }
 
     fn parse_param_list(&mut self) -> Result<HashMap<String, Expr>> {
@@ -1546,7 +1622,11 @@ impl<'a> PuppetParser<'a> {
             let cond = self.parse_cond()?;
             let then_body = self.parse_block()?;
             let else_body = self.parse_else_chain()?;
-            return Ok(vec![Stmt::If { cond, then_body, else_body }]);
+            return Ok(vec![Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            }]);
         }
         if self.consume_keyword("else") {
             return self.parse_block();
@@ -1584,7 +1664,11 @@ impl<'a> PuppetParser<'a> {
             let cond = self.parse_cond()?;
             let then_body = self.parse_block()?;
             let else_body = self.parse_else_chain()?;
-            return Ok(Some(Stmt::If { cond, then_body, else_body }));
+            return Ok(Some(Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            }));
         }
         if self.consume_keyword("unless") {
             // `unless C { … } [else { … }]` is `if !C { … } else { … }`.
@@ -1613,7 +1697,11 @@ impl<'a> PuppetParser<'a> {
                 let body = self.parse_block()?;
                 branches.push((branch_expr, body));
             }
-            return Ok(Some(Stmt::Case { expr, branches, default }));
+            return Ok(Some(Stmt::Case {
+                expr,
+                branches,
+                default,
+            }));
         }
         if self.consume_keyword("fail") {
             if self.consume(TokenKind::LParen) {
@@ -1655,7 +1743,10 @@ impl<'a> PuppetParser<'a> {
         // latter being Puppet's documented workaround for iterating a hash
         // literal, e.g. `({'a' => 1}).each |$k, $v| { … }`. Without these
         // branches the statement parser dropped the construct and its body.
-        if matches!(self.peek_kind(), Some(TokenKind::LBracket | TokenKind::LParen)) {
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::LBracket | TokenKind::LParen)
+        ) {
             let expr = self.parse_no_lambda_expr()?;
             if let Some(stmt) = self.finish_each_loop(&expr)? {
                 return Ok(Some(stmt));
@@ -1750,7 +1841,11 @@ impl<'a> PuppetParser<'a> {
                 let titles = self.parse_titles()?;
                 let attrs = self.parse_attributes()?;
                 self.consume(TokenKind::RBrace);
-                return Ok(Some(Stmt::Resource { rtype, titles, attrs }));
+                return Ok(Some(Stmt::Resource {
+                    rtype,
+                    titles,
+                    attrs,
+                }));
             }
             // Resource collector: `Foo::Bar<| expr |>`. We don't model
             // virtual/exported-resource realisation, so just skip the body.
@@ -1786,7 +1881,10 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_attributes(&mut self) -> Result<HashMap<String, Expr>> {
         let mut attrs = HashMap::new();
-        while !self.peek_kind().map_or(false, |kind| kind == TokenKind::RBrace) && !self.is_eof()
+        while !self
+            .peek_kind()
+            .map_or(false, |kind| kind == TokenKind::RBrace)
+            && !self.is_eof()
         {
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.index += 1;
@@ -1853,7 +1951,10 @@ impl<'a> PuppetParser<'a> {
             // We can't statically prove a variable is set during fixture-module
             // parsing, so treat this as always-false (which routes apt::pin into
             // its safe fallback branch). The point is to accept the syntax.
-            if matches!(self.peek_kind(), Some(TokenKind::String) | Some(TokenKind::Var)) {
+            if matches!(
+                self.peek_kind(),
+                Some(TokenKind::String) | Some(TokenKind::Var)
+            ) {
                 self.index += 1;
                 self.consume(TokenKind::RParen);
                 return Ok(Cond::Compare {
@@ -1875,39 +1976,74 @@ impl<'a> PuppetParser<'a> {
         let left = self.parse_expr()?;
         if self.consume(TokenKind::EqEq) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::Eq, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::Eq,
+                right,
+            });
         }
         if self.consume(TokenKind::NotEq) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::NotEq, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::NotEq,
+                right,
+            });
         }
         if self.consume(TokenKind::Match) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::Match, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::Match,
+                right,
+            });
         }
         if self.consume(TokenKind::NotMatch) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::NotMatch, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::NotMatch,
+                right,
+            });
         }
         if self.consume(TokenKind::LtEq) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::LtEq, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::LtEq,
+                right,
+            });
         }
         if self.consume(TokenKind::GtEq) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::GtEq, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::GtEq,
+                right,
+            });
         }
         if self.consume(TokenKind::Lt) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::Lt, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::Lt,
+                right,
+            });
         }
         if self.consume(TokenKind::Gt) {
             let right = self.parse_expr()?;
-            return Ok(Cond::Compare { left, op: CompareOp::Gt, right });
+            return Ok(Cond::Compare {
+                left,
+                op: CompareOp::Gt,
+                right,
+            });
         }
         if self.consume_keyword("in") {
             let right = self.parse_expr()?;
-            return Ok(Cond::In { needle: left, haystack: right });
+            return Ok(Cond::In {
+                needle: left,
+                haystack: right,
+            });
         }
         Ok(Cond::Truthy(left))
     }
@@ -1947,7 +2083,10 @@ impl<'a> PuppetParser<'a> {
                     };
                     continue;
                 }
-                expr = Expr::MethodCall { target: Box::new(expr), name };
+                expr = Expr::MethodCall {
+                    target: Box::new(expr),
+                    name,
+                };
                 continue;
             }
             let arith_op = match self.peek_kind() {
@@ -1960,7 +2099,11 @@ impl<'a> PuppetParser<'a> {
             if let Some(op) = arith_op {
                 self.index += 1;
                 let right = self.parse_primary()?;
-                expr = Expr::Arith { op, left: Box::new(expr), right: Box::new(right) };
+                expr = Expr::Arith {
+                    op,
+                    left: Box::new(expr),
+                    right: Box::new(right),
+                };
                 continue;
             }
             if self.consume(TokenKind::Question) {
@@ -2229,7 +2372,6 @@ impl Expr {
             Expr::Arith { .. } => "arith".to_string(),
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2709,8 +2851,7 @@ fn eval_in(needle: &PuppetValue, haystack: &PuppetValue) -> bool {
 fn eval_regex_match(subject: &PuppetValue, pattern: &PuppetValue) -> Result<bool> {
     let subject = subject.as_string();
     let pattern = pattern.as_string();
-    let re = Regex::new(&pattern)
-        .with_context(|| format!("invalid regex pattern: /{pattern}/"))?;
+    let re = Regex::new(&pattern).with_context(|| format!("invalid regex pattern: /{pattern}/"))?;
     Ok(re.is_match(&subject))
 }
 
@@ -2752,7 +2893,11 @@ fn source_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let clamped = byte_offset.min(source.len());
     let prefix = &source[..clamped];
     let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
-    let col = prefix.rsplit_once('\n').map(|(_, tail)| tail.len()).unwrap_or(prefix.len()) + 1;
+    let col = prefix
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.len())
+        .unwrap_or(prefix.len())
+        + 1;
     (line, col)
 }
 
@@ -3169,9 +3314,7 @@ class foo {
 
     #[test]
     fn parser_accepts_legacy_leading_namespace_prefix_in_include() {
-        let mut parser = PuppetParser::new(
-            "class foo {\n  include ::stdlib\n}\n",
-        );
+        let mut parser = PuppetParser::new("class foo {\n  include ::stdlib\n}\n");
         let defs = parser.parse_definitions().expect("parse");
         assert_eq!(defs.len(), 1);
         let warnings: Vec<String> = parser.warnings.iter().map(|w| w.message.clone()).collect();
@@ -3200,9 +3343,8 @@ class foo {
 
     #[test]
     fn parser_accepts_legacy_leading_namespace_prefix_on_resource_type() {
-        let mut parser = PuppetParser::new(
-            "class foo {\n  ::apache::vhost { 'site': port => 80 }\n}\n",
-        );
+        let mut parser =
+            PuppetParser::new("class foo {\n  ::apache::vhost { 'site': port => 80 }\n}\n");
         let defs = parser.parse_definitions().expect("parse");
         assert_eq!(parser.warnings.len(), 1);
         match &defs[0] {
@@ -3216,9 +3358,7 @@ class foo {
 
     #[test]
     fn parser_does_not_warn_when_no_leading_prefix_present() {
-        let mut parser = PuppetParser::new(
-            "class foo {\n  include stdlib\n}\n",
-        );
+        let mut parser = PuppetParser::new("class foo {\n  include stdlib\n}\n");
         let _ = parser.parse_definitions().expect("parse");
         assert!(parser.warnings.is_empty());
     }
@@ -3259,7 +3399,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .expect("class with template(...) followed by trailing comma must parse");
         let resource = catalog.find("file", "/x").expect("file resource present");
         assert_eq!(
@@ -3282,7 +3426,10 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut facts = HashMap::new();
-        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        facts.insert(
+            "osfamily".to_string(),
+            PuppetValue::String("RedHat".to_string()),
+        );
         let catalog = evaluator
             .evaluate_class(
                 "foo",
@@ -3305,7 +3452,10 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut facts = HashMap::new();
-        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        facts.insert(
+            "osfamily".to_string(),
+            PuppetValue::String("RedHat".to_string()),
+        );
         let catalog = evaluator
             .evaluate_class(
                 "foo",
@@ -3328,7 +3478,10 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut facts = HashMap::new();
-        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        facts.insert(
+            "osfamily".to_string(),
+            PuppetValue::String("RedHat".to_string()),
+        );
         let catalog = evaluator
             .evaluate_class(
                 "foo",
@@ -3352,7 +3505,10 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut facts = HashMap::new();
-        facts.insert("osfamily".to_string(), PuppetValue::String("RedHat".to_string()));
+        facts.insert(
+            "osfamily".to_string(),
+            PuppetValue::String("RedHat".to_string()),
+        );
         let catalog = evaluator
             .evaluate_class(
                 "foo",
@@ -3367,7 +3523,10 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut facts = HashMap::new();
-        facts.insert("osfamily".to_string(), PuppetValue::String(osfamily.to_string()));
+        facts.insert(
+            "osfamily".to_string(),
+            PuppetValue::String(osfamily.to_string()),
+        );
         evaluator
             .evaluate_class(
                 "foo",
@@ -3548,7 +3707,11 @@ class foo {
         let dir = tempfile::tempdir().unwrap();
         let manifests = dir.path().join("manifests");
         std::fs::create_dir_all(&manifests).unwrap();
-        std::fs::write(manifests.join("init.pp"), "class mymod { include mymod::foo }").unwrap();
+        std::fs::write(
+            manifests.join("init.pp"),
+            "class mymod { include mymod::foo }",
+        )
+        .unwrap();
         std::fs::write(
             manifests.join("foo.pp"),
             "class mymod::foo { file { '/etc/sibling-loaded': ensure => file } }",
@@ -3562,7 +3725,11 @@ class foo {
             evaluator.class_names()
         );
         let catalog = evaluator
-            .evaluate_class("mymod", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "mymod",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .expect("evaluating mymod (which includes mymod::foo) must succeed");
         assert!(catalog.contains("file", "/etc/sibling-loaded"));
     }
@@ -3630,7 +3797,11 @@ class foo {
         let dir = tempfile::tempdir().unwrap();
         let manifests = dir.path().join("manifests");
         std::fs::create_dir_all(manifests.join("sub")).unwrap();
-        std::fs::write(manifests.join("init.pp"), "class mymod { include mymod::sub::leaf }").unwrap();
+        std::fs::write(
+            manifests.join("init.pp"),
+            "class mymod { include mymod::sub::leaf }",
+        )
+        .unwrap();
         std::fs::write(
             manifests.join("sub").join("leaf.pp"),
             "class mymod::sub::leaf { file { '/etc/nested-loaded': ensure => file } }",
@@ -3639,7 +3810,10 @@ class foo {
 
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         assert!(
-            evaluator.class_names().iter().any(|n| n == "mymod::sub::leaf"),
+            evaluator
+                .class_names()
+                .iter()
+                .any(|n| n == "mymod::sub::leaf"),
             "nested manifests/sub/leaf.pp must be autoloaded, got: {:?}",
             evaluator.class_names()
         );
@@ -3658,7 +3832,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .expect("class with epp(...) followed by trailing comma must parse");
         assert!(catalog.contains("file", "/y"));
     }
@@ -3702,8 +3880,7 @@ class foo {
 
     #[test]
     fn epp_each_in_skipped_branch_emits_nothing() {
-        let template =
-            "<% if $on { -%>\n<% $xs.each |$x| { -%><%= $x %><% } -%>\n<% } -%>\n";
+        let template = "<% if $on { -%>\n<% $xs.each |$x| { -%><%= $x %><% } -%>\n<% } -%>\n";
         let params = PuppetValue::Hash(HashMap::from([
             ("on".to_string(), PuppetValue::Bool(false)),
             (
@@ -3927,7 +4104,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .unwrap();
         assert!(catalog.contains("notify", "a"));
         assert!(catalog.contains("notify", "b"));
@@ -3948,7 +4129,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .unwrap();
         assert!(catalog.contains("notify", "a"));
         assert!(catalog.contains("notify", "b"));
@@ -3970,7 +4155,11 @@ class foo {
         let dir = write_module("baseapp", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("baseapp", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "baseapp",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .unwrap();
         // Body still expanded.
         assert!(catalog.contains("notify", "inner"));
@@ -4044,7 +4233,9 @@ class foo {
             .expect("dockerapp::run[web] must be in the catalog");
         assert_eq!(
             resource.attributes.get("ports"),
-            Some(&PuppetValue::Array(vec![PuppetValue::String("80:80".to_string())])),
+            Some(&PuppetValue::Array(vec![PuppetValue::String(
+                "80:80".to_string()
+            )])),
             "defaulted `ports` must read back as its default, not Undef"
         );
         assert_eq!(
@@ -4070,7 +4261,10 @@ class foo {
         let dir = write_module("dockerapp", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut params = HashMap::new();
-        params.insert("image".to_string(), PuppetValue::String("nginx".to_string()));
+        params.insert(
+            "image".to_string(),
+            PuppetValue::String("nginx".to_string()),
+        );
         let catalog = evaluator
             .evaluate_define(
                 "dockerapp::run",
@@ -4084,7 +4278,9 @@ class foo {
             .expect("subject define dockerapp::run[web] must be in the catalog");
         assert_eq!(
             resource.attributes.get("ports"),
-            Some(&PuppetValue::Array(vec![PuppetValue::String("8080:80".to_string())])),
+            Some(&PuppetValue::Array(vec![PuppetValue::String(
+                "8080:80".to_string()
+            )])),
             "defaulted `ports` on the subject define must read back as its default"
         );
         assert_eq!(
@@ -4107,7 +4303,10 @@ class foo {
         let dir = write_module("dockerapp", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let mut params = HashMap::new();
-        params.insert("image".to_string(), PuppetValue::String("nginx".to_string()));
+        params.insert(
+            "image".to_string(),
+            PuppetValue::String("nginx".to_string()),
+        );
         let catalog = evaluator
             .evaluate_define(
                 "dockerapp::run",
@@ -4117,7 +4316,10 @@ class foo {
             )
             .unwrap();
         assert!(catalog.contains("notify", "run-web"), "body notify missing");
-        assert!(catalog.contains("file", "/etc/web.conf"), "body file missing");
+        assert!(
+            catalog.contains("file", "/etc/web.conf"),
+            "body file missing"
+        );
     }
 
     #[test]
@@ -4127,11 +4329,15 @@ class foo {
         let mut parser = PuppetParser::new(
             "class foo {\n  $a = $c ? { default => [1, 2].map |$i| { $i } }\n}\n",
         );
-        let defs = parser.parse_definitions().expect("selector arm with lambda must parse");
+        let defs = parser
+            .parse_definitions()
+            .expect("selector arm with lambda must parse");
         assert_eq!(defs.len(), 1);
         // Control: the same lambda as an assignment RHS already parsed.
         let mut control = PuppetParser::new("class foo {\n  $b = [1, 2].map |$i| { $i } }\n");
-        control.parse_definitions().expect("assignment-RHS lambda must parse");
+        control
+            .parse_definitions()
+            .expect("assignment-RHS lambda must parse");
     }
 
     #[test]
@@ -4154,7 +4360,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .unwrap();
         assert!(catalog.contains("notify", "a:z"));
         assert!(catalog.contains("notify", "b:z"));
@@ -4174,7 +4384,11 @@ class foo {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
         let catalog = evaluator
-            .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
             .unwrap();
         let resource = catalog.find("notify", "x").expect("notify[x] present");
         assert_eq!(
@@ -4208,8 +4422,14 @@ class foo {
                 &PuppetValue::Hash(HashMap::new()),
             )
             .expect("class with ensure_packages must evaluate");
-        assert!(catalog.contains("package", "nginx"), "package[nginx] declared");
-        assert!(catalog.contains("package", "curl"), "package[curl] declared");
+        assert!(
+            catalog.contains("package", "nginx"),
+            "package[nginx] declared"
+        );
+        assert!(
+            catalog.contains("package", "curl"),
+            "package[curl] declared"
+        );
         assert!(
             catalog.contains("notify", "after"),
             "statement after ensure_packages must not be truncated"
@@ -4240,7 +4460,9 @@ class foo {
             )
             .unwrap();
         assert!(catalog.contains("notify", "after"));
-        let vim = catalog.find("package", "vim").expect("package[vim] declared");
+        let vim = catalog
+            .find("package", "vim")
+            .expect("package[vim] declared");
         assert_eq!(
             vim.attributes.get("ensure"),
             Some(&PuppetValue::String("present".to_string())),
@@ -4269,7 +4491,9 @@ class foo {
             catalog.contains("notify", "after"),
             "statement after ensure_resource must not be truncated"
         );
-        let htop = catalog.find("package", "htop").expect("package[htop] declared");
+        let htop = catalog
+            .find("package", "htop")
+            .expect("package[htop] declared");
         assert_eq!(
             htop.attributes.get("ensure"),
             Some(&PuppetValue::String("installed".to_string())),

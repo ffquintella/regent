@@ -1,9 +1,9 @@
-use sha2::{Sha256, Digest};
+use anyhow::Result;
 use md5;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use anyhow::Result;
 
 pub struct ChecksumGenerator {
     pub file_path: PathBuf,
@@ -78,11 +78,11 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
         file.flush().unwrap();
-        
+
         let path = file.path().to_path_buf();
         let generator = ChecksumGenerator::new(&path);
         let sha256 = generator.sha256().unwrap();
-        
+
         // SHA256 should be 64 hex characters
         assert_eq!(sha256.len(), 64);
         assert!(!sha256.is_empty());
@@ -94,11 +94,11 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
         file.flush().unwrap();
-        
+
         let path = file.path().to_path_buf();
         let generator = ChecksumGenerator::new(&path);
         let md5 = generator.md5().unwrap();
-        
+
         // MD5 should be 32 hex characters
         assert_eq!(md5.len(), 32);
         assert!(!md5.is_empty());
@@ -110,11 +110,11 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
         file.flush().unwrap();
-        
+
         let path = file.path().to_path_buf();
         let generator = ChecksumGenerator::new(&path);
         let checksums = generator.generate_all().unwrap();
-        
+
         assert_eq!(checksums.sha256.len(), 64);
         assert_eq!(checksums.md5.len(), 32);
     }
@@ -125,13 +125,13 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(content).unwrap();
         file.flush().unwrap();
-        
+
         let path = file.path().to_path_buf();
         let generator = ChecksumGenerator::new(&path);
-        
+
         let sha256_1 = generator.sha256().unwrap();
         let sha256_2 = generator.sha256().unwrap();
-        
+
         assert_eq!(sha256_1, sha256_2);
     }
 }

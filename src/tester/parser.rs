@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use super::{TestResults, TestCase, TestStatus};
+use super::{TestCase, TestResults, TestStatus};
 
 /// Parses RSpec output and extracts structured data
 pub struct RSpecParser;
@@ -73,7 +73,11 @@ impl RSpecParser {
                 });
             } else if trimmed.contains("(SKIP)") || trimmed.contains("(PENDING)") {
                 results.add_test_case(TestCase {
-                    name: trimmed.replace("(SKIP)", "").replace("(PENDING)", "").trim().to_string(),
+                    name: trimmed
+                        .replace("(SKIP)", "")
+                        .replace("(PENDING)", "")
+                        .trim()
+                        .to_string(),
                     status: TestStatus::Skipped,
                     duration_ms: 0,
                     message: None,

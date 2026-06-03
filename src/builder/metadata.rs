@@ -1,13 +1,13 @@
+use anyhow::{anyhow, Result};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use anyhow::{anyhow, Result};
-use semver::Version;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleDependency {
     pub name: String,
-    pub version_requirement: String,  // e.g., ">= 1.0.0"
+    pub version_requirement: String, // e.g., ">= 1.0.0"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +68,7 @@ impl ModuleMetadata {
         }
 
         // Validate version format (semver)
-        Version::parse(&self.version)
-            .map_err(|e| anyhow!("Invalid version format: {}", e))?;
+        Version::parse(&self.version).map_err(|e| anyhow!("Invalid version format: {}", e))?;
 
         // Validate author
         if self.author.is_empty() {
@@ -231,10 +230,7 @@ mod tests {
     #[test]
     fn test_get_module_filename() {
         let metadata = create_test_metadata();
-        assert_eq!(
-            metadata.get_module_filename(),
-            "user-mymodule-1.0.0"
-        );
+        assert_eq!(metadata.get_module_filename(), "user-mymodule-1.0.0");
     }
 
     #[test]

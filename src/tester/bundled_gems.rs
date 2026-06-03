@@ -82,11 +82,15 @@ pub fn ensure_user_bundle() -> Result<Option<PathBuf>> {
     if same_path(&source, &target) {
         return Ok(Some(source));
     }
-    std::fs::create_dir_all(&target).with_context(|| {
-        format!("creating Regent user bundle dir {}", target.display())
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("creating Regent user bundle dir {}", target.display()))?;
+    copy_contents_into(&source, &target).with_context(|| {
+        format!(
+            "copying gem cache {} -> {}",
+            source.display(),
+            target.display()
+        )
     })?;
-    copy_contents_into(&source, &target)
-        .with_context(|| format!("copying gem cache {} -> {}", source.display(), target.display()))?;
     Ok(Some(source))
 }
 
@@ -138,7 +142,11 @@ pub fn discover_bundle_roots() -> Vec<PathBuf> {
         if let Some(exe_dir) = exe_path.parent() {
             for candidate in [
                 exe_dir.join(BUNDLED_GEMS_DIRNAME),
-                exe_dir.join("..").join("share").join("regent").join(BUNDLED_GEMS_DIRNAME),
+                exe_dir
+                    .join("..")
+                    .join("share")
+                    .join("regent")
+                    .join(BUNDLED_GEMS_DIRNAME),
                 exe_dir.join("..").join(BUNDLED_GEMS_DIRNAME),
             ] {
                 push(candidate, &mut roots);
@@ -146,7 +154,10 @@ pub fn discover_bundle_roots() -> Vec<PathBuf> {
         }
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    push(manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME), &mut roots);
+    push(
+        manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME),
+        &mut roots,
+    );
     push(manifest_dir.join("vendor").join("bundle"), &mut roots);
     roots
 }
@@ -164,7 +175,11 @@ fn find_bundled_gems_source() -> Result<Option<PathBuf>> {
         if let Some(exe_dir) = exe_path.parent() {
             for candidate in [
                 exe_dir.join(BUNDLED_GEMS_DIRNAME),
-                exe_dir.join("..").join("share").join("regent").join(BUNDLED_GEMS_DIRNAME),
+                exe_dir
+                    .join("..")
+                    .join("share")
+                    .join("regent")
+                    .join(BUNDLED_GEMS_DIRNAME),
                 exe_dir.join("..").join(BUNDLED_GEMS_DIRNAME),
             ] {
                 if has_gem_layout(&candidate) {
@@ -257,12 +272,29 @@ mod tests {
         copy_contents_into(src.path(), dst.path()).unwrap();
 
         // Expected (flat) layout:
-        assert!(dst.path().join("ruby").join("2.6.0").join("gems").join("rspec-3.13.2").is_dir());
-        assert!(dst.path().join("ruby").join("2.6.0").join("specifications").is_dir());
+        assert!(dst
+            .path()
+            .join("ruby")
+            .join("2.6.0")
+            .join("gems")
+            .join("rspec-3.13.2")
+            .is_dir());
+        assert!(dst
+            .path()
+            .join("ruby")
+            .join("2.6.0")
+            .join("specifications")
+            .is_dir());
 
         // Must NOT have nested the source dir under the target:
-        let nested = dst.path().join(src.path().file_name().unwrap()).join("ruby");
-        assert!(!nested.exists(), "source dir was nested under target at {nested:?}");
+        let nested = dst
+            .path()
+            .join(src.path().file_name().unwrap())
+            .join("ruby");
+        assert!(
+            !nested.exists(),
+            "source dir was nested under target at {nested:?}"
+        );
     }
 
     #[test]
@@ -275,7 +307,13 @@ mod tests {
         // Second invocation should not fail even though files already exist.
         copy_contents_into(src.path(), dst.path()).unwrap();
 
-        assert!(dst.path().join("ruby").join("2.6.0").join("gems").join("rspec-core-3.13.6").is_dir());
+        assert!(dst
+            .path()
+            .join("ruby")
+            .join("2.6.0")
+            .join("gems")
+            .join("rspec-core-3.13.6")
+            .is_dir());
     }
 
     #[test]
@@ -334,9 +372,13 @@ mod tests {
         ];
         let mut found: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for entry in fs::read_dir(&ruby_root).unwrap().flatten() {
-            let Ok(gems) = fs::read_dir(entry.path().join("gems")) else { continue };
+            let Ok(gems) = fs::read_dir(entry.path().join("gems")) else {
+                continue;
+            };
             for gem in gems.flatten() {
-                let Some(name) = gem.file_name().to_str().map(str::to_owned) else { continue };
+                let Some(name) = gem.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
                 for req in &required {
                     if name.starts_with(&format!("{req}-")) {
                         found.insert(req);
@@ -371,6 +413,9 @@ mod tests {
                 }
             }
         }
-        assert!(found_rspec, "verify_required_gems would have missed rspec in {ruby_root:?}");
+        assert!(
+            found_rspec,
+            "verify_required_gems would have missed rspec in {ruby_root:?}"
+        );
     }
 }

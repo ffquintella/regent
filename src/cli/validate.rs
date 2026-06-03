@@ -13,11 +13,7 @@ impl ValidateCommand {
         for item in &required_dirs {
             let item_path = path.join(item);
             if !item_path.exists() {
-                println!(
-                    "{} Missing required: {}",
-                    "✗".red(),
-                    item
-                );
+                println!("{} Missing required: {}", "✗".red(), item);
                 has_errors = true;
             } else {
                 println!("{} Found: {}", "✓".green(), item);

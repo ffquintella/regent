@@ -259,7 +259,10 @@ mod tests {
     fn generated_metadata_includes_summary_key() {
         let json = NewCommand::generate_metadata("acme-mymod", None, "Apache-2.0", None, None);
         let value = parse(&json);
-        assert!(value.get("summary").is_some(), "summary key is required by Puppet");
+        assert!(
+            value.get("summary").is_some(),
+            "summary key is required by Puppet"
+        );
         assert!(
             !value["summary"].as_str().unwrap().is_empty(),
             "summary must not be empty"
@@ -295,13 +298,8 @@ mod tests {
     #[test]
     fn long_descriptions_get_truncated_with_ellipsis() {
         let long = "x".repeat(300);
-        let json = NewCommand::generate_metadata(
-            "acme-mymod",
-            None,
-            "Apache-2.0",
-            Some(&long),
-            None,
-        );
+        let json =
+            NewCommand::generate_metadata("acme-mymod", None, "Apache-2.0", Some(&long), None);
         let value = parse(&json);
         let summary = value["summary"].as_str().unwrap();
         assert!(summary.chars().count() <= 144);

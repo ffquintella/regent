@@ -1,8 +1,8 @@
 //! Puppet validator - Validates Puppet code and syntax
 
+use crate::validator::lint::{LintResult, LintTool};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use crate::validator::lint::{LintResult, LintTool};
 
 /// Puppet code validator
 pub struct PuppetValidator {
@@ -17,9 +17,7 @@ impl PuppetValidator {
             anyhow::bail!("Module path does not exist: {:?}", path);
         }
 
-        Ok(Self {
-            module_path: path,
-        })
+        Ok(Self { module_path: path })
     }
 
     /// Run puppet-lint checks

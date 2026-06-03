@@ -14,9 +14,7 @@ impl BuildCommand {
 
         // Anchor everything at the canonical module path so relative invocations
         // (e.g. `regent build .`) always end up in the module's own pkg/ directory.
-        let module_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let module_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
         let metadata = std::fs::read_to_string(&metadata_path)?;
         let json: serde_json::Value = serde_json::from_str(&metadata)?;
