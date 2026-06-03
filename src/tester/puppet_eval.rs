@@ -542,7 +542,7 @@ enum Expr {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArithOp {
     Add,
     Sub,
@@ -2649,6 +2649,26 @@ fn eval_arith(left: &PuppetValue, op: ArithOp, right: &PuppetValue) -> PuppetVal
             return PuppetValue::Integer(value);
         }
     }
+    if op == ArithOp::Add {
+        // Array `+`: Puppet concatenates two arrays, or appends a single
+        // non-array element to the left-hand array.
+        if let PuppetValue::Array(items) = left {
+            let mut combined = items.clone();
+            match right {
+                PuppetValue::Array(more) => combined.extend(more.iter().cloned()),
+                other => combined.push(other.clone()),
+            }
+            return PuppetValue::Array(combined);
+        }
+        // Hash `+`: merge the right-hand entries over a copy of the left.
+        if let (PuppetValue::Hash(base), PuppetValue::Hash(extra)) = (left, right) {
+            let mut merged = base.clone();
+            for (key, value) in extra {
+                merged.insert(key.clone(), value.clone());
+            }
+            return PuppetValue::Hash(merged);
+        }
+    }
     // Hash-minus (`$h - 'key'`) and other non-integer combinations: keep the
     // left-hand value so downstream code still sees something sensible.
     left.clone()
@@ -2753,70 +2773,225 @@ fn render_epp(template: &str, params: &PuppetValue) -> String {
         PuppetValue::Hash(m) => m.clone(),
         _ => HashMap::new(),
     };
-    let mut out = String::new();
-    // Each entry is (emitting?, branch_already_taken_in_this_if?). The branch
-    // flag is only meaningful for `if`/`elsif`/`else` chains.
-    let mut stack: Vec<(bool, bool)> = Vec::new();
-    let emitting = |s: &[(bool, bool)]| s.iter().all(|(e, _)| *e);
+    let mut idx = 0;
+    render_epp_block(&tokens, &mut idx, &params_map, true)
+}
 
-    for tok in tokens {
-        match tok {
+/// Render tokens starting at `*idx` until the closing `}` of the current block
+/// (or end of stream). On return, `*idx` points at the code token that closed
+/// the block (`}`, `} else …`, `} elsif …`) so the caller can decide what to
+/// do next; for a plain `}` the caller is responsible for consuming it.
+/// `emit` is false while rendering a branch that should not produce output.
+fn render_epp_block(
+    tokens: &[EppToken],
+    idx: &mut usize,
+    params: &HashMap<String, PuppetValue>,
+    emit: bool,
+) -> String {
+    let mut out = String::new();
+    while *idx < tokens.len() {
+        match &tokens[*idx] {
             EppToken::Text(text) => {
-                if emitting(&stack) {
-                    out.push_str(&text);
+                if emit {
+                    out.push_str(text);
                 }
+                *idx += 1;
             }
             EppToken::Output(expr) => {
-                if emitting(&stack) {
-                    out.push_str(&epp_eval(expr.trim(), &params_map).as_string());
+                if emit {
+                    out.push_str(&epp_eval(expr.trim(), params).as_string());
                 }
+                *idx += 1;
             }
             EppToken::Code(code) => {
                 let trimmed = code.trim();
+                // Parameter header (`<%- | params | -%>`).
                 if trimmed.starts_with('|') {
+                    *idx += 1;
                     continue;
                 }
-                if let Some(rest) = trimmed.strip_prefix("if ") {
-                    let cond_expr = rest.trim_end_matches('{').trim();
-                    let parent = emitting(&stack);
-                    let cond = parent && epp_truthy(&epp_eval(cond_expr, &params_map));
-                    stack.push((cond, cond));
+                // A closer for the enclosing block — hand control back.
+                if trimmed == "}" || trimmed.starts_with("} else") || trimmed.starts_with("} elsif")
+                {
+                    return out;
+                }
+                if parse_each_header(trimmed).is_some() {
+                    out.push_str(&render_epp_each(tokens, idx, params, emit, trimmed));
                     continue;
                 }
-                if trimmed.starts_with("unless ") {
-                    let cond_expr = trimmed["unless ".len()..].trim_end_matches('{').trim();
-                    let parent = emitting(&stack);
-                    let cond = parent && !epp_truthy(&epp_eval(cond_expr, &params_map));
-                    stack.push((cond, cond));
-                    continue;
-                }
-                if trimmed == "} else {" || trimmed.starts_with("} else") {
-                    if let Some((_, taken)) = stack.pop() {
-                        let parent = emitting(&stack);
-                        let next = parent && !taken;
-                        stack.push((next, taken || next));
-                    }
-                    continue;
-                }
-                if let Some(rest) = trimmed.strip_prefix("} elsif ") {
-                    if let Some((_, taken)) = stack.pop() {
-                        let cond_src = rest.trim_end_matches('{').trim();
-                        let parent = emitting(&stack);
-                        let next = parent && !taken && epp_truthy(&epp_eval(cond_src, &params_map));
-                        stack.push((next, taken || next));
-                    }
-                    continue;
-                }
-                if trimmed == "}" {
-                    stack.pop();
+                if trimmed.starts_with("if ") || trimmed.starts_with("unless ") {
+                    out.push_str(&render_epp_if(tokens, idx, params, emit, trimmed));
                     continue;
                 }
                 // Unknown code tag — ignore (no error, mirrors tolerant style
                 // used elsewhere in the evaluator).
+                *idx += 1;
             }
         }
     }
     out
+}
+
+/// Render an `if`/`unless` chain. `*idx` points at the opening code token;
+/// on return it has been advanced past the closing `}`.
+fn render_epp_if(
+    tokens: &[EppToken],
+    idx: &mut usize,
+    params: &HashMap<String, PuppetValue>,
+    parent_emit: bool,
+    opener: &str,
+) -> String {
+    let (cond_src, negate) = if let Some(rest) = opener.strip_prefix("if ") {
+        (rest.trim_end_matches('{').trim(), false)
+    } else {
+        (opener["unless ".len()..].trim_end_matches('{').trim(), true)
+    };
+    let mut matched = epp_truthy(&epp_eval(cond_src, params));
+    if negate {
+        matched = !matched;
+    }
+    let mut active = parent_emit && matched;
+    let mut branch_taken = active;
+    let mut out = String::new();
+    *idx += 1; // consume the opener
+    loop {
+        out.push_str(&render_epp_block(tokens, idx, params, active));
+        if *idx >= tokens.len() {
+            break;
+        }
+        let closer = match &tokens[*idx] {
+            EppToken::Code(c) => c.trim().to_string(),
+            _ => break,
+        };
+        if closer == "}" {
+            *idx += 1;
+            break;
+        } else if let Some(rest) = closer.strip_prefix("} elsif ") {
+            *idx += 1;
+            let cond = rest.trim_end_matches('{').trim();
+            let take = parent_emit && !branch_taken && epp_truthy(&epp_eval(cond, params));
+            active = take;
+            branch_taken = branch_taken || take;
+        } else if closer.starts_with("} else") {
+            *idx += 1;
+            active = parent_emit && !branch_taken;
+            branch_taken = true;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Render an `<arr>.each |…| { … }` loop. `*idx` points at the opening code
+/// token; on return it has been advanced past the closing `}`.
+fn render_epp_each(
+    tokens: &[EppToken],
+    idx: &mut usize,
+    params: &HashMap<String, PuppetValue>,
+    emit: bool,
+    header: &str,
+) -> String {
+    let (collection_expr, vars) = parse_each_header(header).expect("caller verified header");
+    *idx += 1; // consume the opener
+    let body_end = find_epp_block_end(tokens, *idx);
+    let body = &tokens[*idx..body_end];
+    // Advance past the body and its closing `}` (if present).
+    *idx = (body_end + 1).min(tokens.len());
+
+    if !emit {
+        return String::new();
+    }
+    let mut out = String::new();
+    match epp_eval(&collection_expr, params) {
+        PuppetValue::Array(items) => {
+            for item in items {
+                let mut scope = params.clone();
+                bind_each_vars(&mut scope, &vars, &[item]);
+                let mut bidx = 0;
+                out.push_str(&render_epp_block(body, &mut bidx, &scope, true));
+            }
+        }
+        PuppetValue::Hash(entries) => {
+            for (key, value) in entries {
+                let mut scope = params.clone();
+                if vars.len() == 1 {
+                    scope.insert(
+                        vars[0].clone(),
+                        PuppetValue::Array(vec![PuppetValue::String(key), value]),
+                    );
+                } else {
+                    bind_each_vars(&mut scope, &vars, &[PuppetValue::String(key), value]);
+                }
+                let mut bidx = 0;
+                out.push_str(&render_epp_block(body, &mut bidx, &scope, true));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn bind_each_vars(
+    scope: &mut HashMap<String, PuppetValue>,
+    vars: &[String],
+    values: &[PuppetValue],
+) {
+    for (name, value) in vars.iter().zip(values.iter()) {
+        scope.insert(name.clone(), value.clone());
+    }
+}
+
+/// Parse an `.each` header such as `$items.each |$item| {` or
+/// `$h.each |$k, $v| {`, returning the collection expression and the loop
+/// variable names (without the leading `$`). Returns `None` if `trimmed` is
+/// not an `.each` opener.
+fn parse_each_header(trimmed: &str) -> Option<(String, Vec<String>)> {
+    if !trimmed.ends_with('{') {
+        return None;
+    }
+    let body = trimmed[..trimmed.len() - 1].trim();
+    let (collection, rest) = body.split_once(".each")?;
+    let collection = collection.trim();
+    if collection.is_empty() {
+        return None;
+    }
+    let rest = rest.trim();
+    let inner = rest.strip_prefix('|')?.strip_suffix('|')?;
+    let vars = inner
+        .split(',')
+        .map(|v| v.trim().trim_start_matches('$').to_string())
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>();
+    if vars.is_empty() {
+        return None;
+    }
+    Some((collection.to_string(), vars))
+}
+
+/// Given `start` pointing just past a block opener, return the index of the
+/// matching closing `}` (or `tokens.len()` if unterminated). `} else {` and
+/// `} elsif … {` are net-zero for nesting since they close and reopen.
+fn find_epp_block_end(tokens: &[EppToken], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < tokens.len() {
+        if let EppToken::Code(code) = &tokens[i] {
+            let t = code.trim();
+            if t == "}" {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+            } else if t.starts_with('}') && t.ends_with('{') {
+                // `} else {` / `} elsif … {`: closes one and opens one.
+            } else if t.ends_with('{') {
+                depth += 1;
+            }
+        }
+        i += 1;
+    }
+    i
 }
 
 #[derive(Debug, Clone)]
@@ -3486,6 +3661,86 @@ class foo {
             .evaluate_class("foo", &PuppetValue::Hash(HashMap::new()), &PuppetValue::Hash(HashMap::new()))
             .expect("class with epp(...) followed by trailing comma must parse");
         assert!(catalog.contains("file", "/y"));
+    }
+
+    #[test]
+    fn epp_each_iterates_array_binding_loop_var() {
+        let template = "<% $items.each |$i| { -%>\n- <%= $i %>\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([(
+            "items".to_string(),
+            PuppetValue::Array(vec![
+                PuppetValue::String("a".to_string()),
+                PuppetValue::String("b".to_string()),
+            ]),
+        )]));
+        assert_eq!(render_epp(template, &params), "- a\n- b\n");
+    }
+
+    #[test]
+    fn epp_each_iterates_hash_with_two_params() {
+        let template = "<% $h.each |$k, $v| { -%>\n<%= $k %>=<%= $v %>\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([(
+            "h".to_string(),
+            PuppetValue::Hash(HashMap::from([(
+                "name".to_string(),
+                PuppetValue::String("nginx".to_string()),
+            )])),
+        )]));
+        assert_eq!(render_epp(template, &params), "name=nginx\n");
+    }
+
+    #[test]
+    fn epp_each_with_nested_if_emits_per_element() {
+        let template =
+            "<% $xs.each |$x| { -%>\n<% if $x { %>on<% } else { %>off<% } %>\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([(
+            "xs".to_string(),
+            PuppetValue::Array(vec![PuppetValue::Bool(true), PuppetValue::Bool(false)]),
+        )]));
+        assert_eq!(render_epp(template, &params), "on\noff\n");
+    }
+
+    #[test]
+    fn epp_each_in_skipped_branch_emits_nothing() {
+        let template =
+            "<% if $on { -%>\n<% $xs.each |$x| { -%><%= $x %><% } -%>\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([
+            ("on".to_string(), PuppetValue::Bool(false)),
+            (
+                "xs".to_string(),
+                PuppetValue::Array(vec![PuppetValue::String("a".to_string())]),
+            ),
+        ]));
+        assert_eq!(render_epp(template, &params), "");
+    }
+
+    #[test]
+    fn array_plus_concatenates_arrays() {
+        let left = PuppetValue::Array(vec![PuppetValue::Integer(1)]);
+        let right = PuppetValue::Array(vec![PuppetValue::Integer(2), PuppetValue::Integer(3)]);
+        let result = eval_arith(&left, ArithOp::Add, &right);
+        assert_eq!(
+            result,
+            PuppetValue::Array(vec![
+                PuppetValue::Integer(1),
+                PuppetValue::Integer(2),
+                PuppetValue::Integer(3),
+            ])
+        );
+    }
+
+    #[test]
+    fn array_plus_scalar_appends_element() {
+        let left = PuppetValue::Array(vec![PuppetValue::String("a".to_string())]);
+        let right = PuppetValue::String("b".to_string());
+        let result = eval_arith(&left, ArithOp::Add, &right);
+        assert_eq!(
+            result,
+            PuppetValue::Array(vec![
+                PuppetValue::String("a".to_string()),
+                PuppetValue::String("b".to_string()),
+            ])
+        );
     }
 
     #[test]

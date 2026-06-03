@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "regent"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "artichoke",
