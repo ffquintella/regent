@@ -429,6 +429,17 @@ enum Stmt {
         titles: Vec<Expr>,
         attrs: HashMap<String, Expr>,
     },
+    /// A resource default: `File { owner => 'root', mode => '0644' }`. A
+    /// capitalized type reference followed by an attribute block with no
+    /// title. It sets default attribute values inherited by every resource of
+    /// that type declared afterwards (for any attribute the declaration itself
+    /// does not set). Distinct from a normal declaration (`file { 'x': ... }`,
+    /// lowercase type + title) and a resource override
+    /// (`File['x'] { ... }`, capitalized type + `[title]`).
+    ResourceDefault {
+        rtype: String,
+        attrs: HashMap<String, Expr>,
+    },
     /// `include`/`contain`/`require` of one or more classes. All three declare
     /// the named class(es) into the catalog and expand their bodies; we don't
     /// model the ordering/containment nuances that distinguish them, so they
@@ -608,6 +619,10 @@ struct EvalContext<'a> {
     class_stack: Vec<String>,
     evaluated_classes: HashSet<String>,
     evaluated_defines: HashSet<String>,
+    /// Resource defaults (`File { owner => 'root' }`), keyed by normalized
+    /// type. Merged into each subsequently-declared resource of that type for
+    /// any attribute the declaration does not set itself.
+    resource_defaults: HashMap<String, HashMap<String, PuppetValue>>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -622,6 +637,7 @@ impl<'a> EvalContext<'a> {
             class_stack: Vec::new(),
             evaluated_classes: HashSet::new(),
             evaluated_defines: HashSet::new(),
+            resource_defaults: HashMap::new(),
         }
     }
 
@@ -837,6 +853,15 @@ impl<'a> EvalContext<'a> {
                     let mut attributes = HashMap::new();
                     for (key, expr) in attrs {
                         attributes.insert(key.clone(), self.eval_expr(expr)?);
+                    }
+                    // Inherit any resource defaults (`File { ... }`) for
+                    // attributes the declaration did not set itself.
+                    if let Some(defaults) = self.resource_defaults.get(&normalize_rtype(rtype)) {
+                        for (key, value) in defaults {
+                            attributes
+                                .entry(key.clone())
+                                .or_insert_with(|| value.clone());
+                        }
                     }
                     for title in title_values {
                         let resource_type = normalize_rtype(rtype);
@@ -1066,6 +1091,17 @@ impl<'a> EvalContext<'a> {
                         _ => {}
                     }
                 }
+                Stmt::ResourceDefault { rtype, attrs } => {
+                    let resource_type = normalize_rtype(rtype);
+                    let mut evaluated = HashMap::new();
+                    for (key, expr) in attrs {
+                        evaluated.insert(key.clone(), self.eval_expr(expr)?);
+                    }
+                    self.resource_defaults
+                        .entry(resource_type)
+                        .or_default()
+                        .extend(evaluated);
+                }
                 Stmt::Noop => {}
             }
         }
@@ -1214,6 +1250,15 @@ impl<'a> EvalContext<'a> {
                             .unwrap_or_default();
                         PuppetValue::String(format!("<{name}:{source}>"))
                     }
+                    // Puppet's numeric type-conversion functions. `Integer('7')`
+                    // must yield the integer `7`, not `Undef` — otherwise a
+                    // subsequent comparison (`Integer('7') >= 10`) falls back to
+                    // lexical string comparison and mis-evaluates.
+                    "Integer" | "Numeric" => arg_values
+                        .first()
+                        .and_then(coerce_to_integer)
+                        .map(PuppetValue::Integer)
+                        .unwrap_or(PuppetValue::Undef),
                     _ => PuppetValue::Undef,
                 }
             }
@@ -1389,6 +1434,14 @@ impl<'a> EvalContext<'a> {
 
 fn normalize_rtype(rtype: &str) -> String {
     rtype.to_lowercase().replace("__", "::")
+}
+
+/// Whether a bareword is a Puppet *type reference* (e.g. `File`,
+/// `Apache::Vhost`) rather than a resource-declaration type name (`file`,
+/// `apache::vhost`). Type references capitalize the first letter; the
+/// distinction is what separates a resource default from a declaration.
+fn is_type_reference(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 struct PuppetParser<'a> {
@@ -1838,6 +1891,15 @@ impl<'a> PuppetParser<'a> {
         if self.peek_kind() == Some(TokenKind::Ident) {
             let rtype = self.expect_ident()?;
             if self.consume(TokenKind::LBrace) {
+                // A capitalized type reference followed by an attribute block
+                // and no title is a resource default (`File { owner => ... }`),
+                // not a declaration. Each namespace segment of a Puppet type
+                // reference is capitalized, so the leading character decides.
+                if is_type_reference(&rtype) {
+                    let attrs = self.parse_attributes()?;
+                    self.consume(TokenKind::RBrace);
+                    return Ok(Some(Stmt::ResourceDefault { rtype, attrs }));
+                }
                 let titles = self.parse_titles()?;
                 let attrs = self.parse_attributes()?;
                 self.consume(TokenKind::RBrace);
@@ -2816,17 +2878,52 @@ fn eval_arith(left: &PuppetValue, op: ArithOp, right: &PuppetValue) -> PuppetVal
     left.clone()
 }
 
-fn eval_ordered_compare(left: &PuppetValue, op: CompareOp, right: &PuppetValue) -> bool {
-    fn to_int(v: &PuppetValue) -> Option<i64> {
-        match v {
-            PuppetValue::Integer(n) => Some(*n),
-            PuppetValue::String(s) => s.parse::<i64>().ok(),
-            _ => None,
+/// Coerce a value to an integer the way Puppet's `Integer()` function does:
+/// integers pass through, numeric strings parse (with optional sign and
+/// `0x`/`0o`/`0b` radix prefixes). Returns `None` when the value isn't a whole
+/// number, so callers can fall back rather than fabricate a `0`.
+fn coerce_to_integer(value: &PuppetValue) -> Option<i64> {
+    match value {
+        PuppetValue::Integer(n) => Some(*n),
+        PuppetValue::String(s) => {
+            let trimmed = s.trim();
+            let (sign, digits) = match trimmed.strip_prefix('-') {
+                Some(rest) => (-1, rest),
+                None => (1, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+            };
+            let magnitude = if let Some(hex) = digits
+                .strip_prefix("0x")
+                .or_else(|| digits.strip_prefix("0X"))
+            {
+                i64::from_str_radix(hex, 16).ok()
+            } else if let Some(oct) = digits
+                .strip_prefix("0o")
+                .or_else(|| digits.strip_prefix("0O"))
+            {
+                i64::from_str_radix(oct, 8).ok()
+            } else if let Some(bin) = digits
+                .strip_prefix("0b")
+                .or_else(|| digits.strip_prefix("0B"))
+            {
+                i64::from_str_radix(bin, 2).ok()
+            } else {
+                digits.parse::<i64>().ok()
+            };
+            magnitude.map(|m| sign * m)
         }
+        _ => None,
     }
-    let ordering = match (to_int(left), to_int(right)) {
+}
+
+fn eval_ordered_compare(left: &PuppetValue, op: CompareOp, right: &PuppetValue) -> bool {
+    let ordering = match (coerce_to_integer(left), coerce_to_integer(right)) {
         (Some(a), Some(b)) => a.cmp(&b),
-        _ => left.as_string().cmp(&right.as_string()),
+        // Only fall back to lexical comparison when *neither* side is numeric.
+        // A mixed numeric/non-numeric comparison (e.g. `7 >= 'undef'`) has no
+        // meaningful lexical answer — comparing the strings `"7"` and `"undef"`
+        // would give a bogus result — so treat it as not-ordered.
+        (None, None) => left.as_string().cmp(&right.as_string()),
+        _ => return false,
     };
     match op {
         CompareOp::Lt => ordering.is_lt(),
@@ -3357,6 +3454,105 @@ class foo {
     }
 
     #[test]
+    fn parser_recognizes_resource_default_with_attributes() {
+        // `File { ... }` — capitalized type, no title — is a resource default,
+        // not a declaration. It must parse into a distinct statement form
+        // rather than tripping the title parser looking for a `:`.
+        let mut parser = PuppetParser::new(
+            "class foo {\n  File {\n    owner => 'root',\n    mode  => '0644',\n  }\n}\n",
+        );
+        let defs = parser.parse_definitions().expect("parse");
+        match &defs[0] {
+            PuppetDef::Class(c) => match &c.body[..] {
+                [Stmt::ResourceDefault { rtype, attrs }] => {
+                    assert_eq!(rtype, "File");
+                    assert_eq!(attrs.len(), 2);
+                    assert!(attrs.contains_key("owner"));
+                    assert!(attrs.contains_key("mode"));
+                }
+                other => panic!("unexpected body: {other:?}"),
+            },
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn parser_distinguishes_default_from_declaration_for_namespaced_type() {
+        // A capitalized namespaced reference is a default; the lowercase form
+        // is a normal declaration with a title.
+        let mut parser = PuppetParser::new(
+            "class foo {\n  Apache::Vhost { mode => '0644' }\n  apache::vhost { 'site': port => 80 }\n}\n",
+        );
+        let defs = parser.parse_definitions().expect("parse");
+        match &defs[0] {
+            PuppetDef::Class(c) => match &c.body[..] {
+                [Stmt::ResourceDefault { rtype, .. }, Stmt::Resource {
+                    rtype: decl,
+                    titles,
+                    ..
+                }] => {
+                    assert_eq!(rtype, "Apache::Vhost");
+                    assert_eq!(decl, "apache::vhost");
+                    assert_eq!(titles.len(), 1);
+                }
+                other => panic!("unexpected body: {other:?}"),
+            },
+            _ => panic!("expected class def"),
+        }
+    }
+
+    #[test]
+    fn resource_default_attributes_are_inherited_by_declarations() {
+        // Defaults fill in attributes a later declaration does not set, but
+        // never override ones it does set.
+        let manifest = r#"
+            class foo {
+              File {
+                owner => 'root',
+                mode  => '0644',
+              }
+              file { '/x':
+                mode => '0600',
+              }
+              file { '/y':
+                ensure => file,
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("resource default must parse and evaluate");
+
+        let x = catalog.find("file", "/x").expect("file[/x] present");
+        // Declaration's own value wins over the default.
+        assert_eq!(
+            x.attributes.get("mode"),
+            Some(&PuppetValue::String("0600".to_string()))
+        );
+        // Default fills in the attribute the declaration omitted.
+        assert_eq!(
+            x.attributes.get("owner"),
+            Some(&PuppetValue::String("root".to_string()))
+        );
+
+        let y = catalog.find("file", "/y").expect("file[/y] present");
+        assert_eq!(
+            y.attributes.get("owner"),
+            Some(&PuppetValue::String("root".to_string()))
+        );
+        assert_eq!(
+            y.attributes.get("mode"),
+            Some(&PuppetValue::String("0644".to_string()))
+        );
+    }
+
+    #[test]
     fn parser_does_not_warn_when_no_leading_prefix_present() {
         let mut parser = PuppetParser::new("class foo {\n  include stdlib\n}\n");
         let _ = parser.parse_definitions().expect("parse");
@@ -3384,6 +3580,61 @@ class foo {
             )
             .expect("manifest with escaped quotes and embedded braces must parse");
         assert!(catalog.contains("notify", "{\"k\": \"v\", \"nested\": {\"a\": 1}}"));
+    }
+
+    #[test]
+    fn integer_conversion_compares_numerically_not_lexically() {
+        // `Integer('7')` must yield the integer 7, and `7 >= 10` must be false.
+        // The old bug returned Undef from `Integer(...)` and then compared
+        // `"undef"` against `"10"` lexically, evaluating the guard as true.
+        let manifest = r#"
+            class foo {
+              if Integer('7') >= 10 {
+                notify { 'ten_or_more': }
+              } else {
+                notify { 'below_ten': }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("Integer() comparison must parse and evaluate");
+        assert!(
+            catalog.contains("notify", "below_ten"),
+            "Integer('7') >= 10 must be false"
+        );
+        assert!(
+            !catalog.contains("notify", "ten_or_more"),
+            "Integer('7') >= 10 must not be true"
+        );
+    }
+
+    #[test]
+    fn integer_conversion_true_branch_when_threshold_met() {
+        // Sanity check the conversion the other way: `Integer('12') >= 10`.
+        let manifest = r#"
+            class foo {
+              if Integer('12') >= 10 {
+                notify { 'ten_or_more': }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("Integer() comparison must parse and evaluate");
+        assert!(catalog.contains("notify", "ten_or_more"));
     }
 
     #[test]

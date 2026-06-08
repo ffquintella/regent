@@ -823,7 +823,12 @@ begin
     end
 
     def self.resolve_subject
-      @contexts.reverse_each do |ctx|
+      # rspec-puppet derives the class/define under test from the *top-level*
+      # describe (`top_level_description`), never from a nested describe/context
+      # used purely for grouping. Iterate outermost-first and take the first
+      # subject so `describe 'firewallmanager' do ... describe 'on RedHat 10' do`
+      # compiles `firewallmanager`, not the nested label.
+      @contexts.each do |ctx|
         return ctx.subject if ctx.subject
       end
       nil
