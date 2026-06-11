@@ -593,6 +593,57 @@ enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// A Puppet data-type reference such as `String`, `String[1,10]`,
+    /// `Integer[0,default]`, `Optional[Array[String]]`, or `Enum['a','b']`.
+    /// Used as the right-hand side of `=~`/`!~`, as a `case`/selector branch,
+    /// where it performs structural type matching rather than regex matching.
+    Type(TypeSpec),
+}
+
+/// A parsed Puppet data type and its bracketed arguments. Bounds, element
+/// types, and enum/pattern members are all captured as [`TypeArg`]s so the
+/// evaluator can enforce them (e.g. `String[1,10]` length bounds).
+#[derive(Debug, Clone)]
+struct TypeSpec {
+    name: String,
+    args: Vec<TypeArg>,
+}
+
+#[derive(Debug, Clone)]
+enum TypeArg {
+    /// A numeric bound or literal (e.g. the `1`/`10` in `String[1,10]`).
+    Int(i64),
+    /// The `default` keyword, meaning "unbounded" in this position.
+    Default,
+    /// A string literal member (e.g. an `Enum['stopped','running']` value).
+    Str(String),
+    /// A regex member (e.g. a `Pattern[/^\d+$/]` alternative).
+    Regex(String),
+    /// A nested type (e.g. the `String` in `Array[String]`).
+    Type(TypeSpec),
+}
+
+impl TypeSpec {
+    /// Render the type back to source-like text for the rare case a type
+    /// reference is used in value position rather than as a match pattern.
+    fn render(&self) -> String {
+        if self.args.is_empty() {
+            return self.name.clone();
+        }
+        let args = self
+            .args
+            .iter()
+            .map(|arg| match arg {
+                TypeArg::Int(n) => n.to_string(),
+                TypeArg::Default => "default".to_string(),
+                TypeArg::Str(s) => format!("'{s}'"),
+                TypeArg::Regex(r) => format!("/{r}/"),
+                TypeArg::Type(spec) => spec.render(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}[{}]", self.name, args)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,7 +657,10 @@ enum ArithOp {
 #[derive(Debug, Clone)]
 struct VarRef {
     name: String,
-    path: Vec<String>,
+    /// Index expressions applied to the variable, e.g. the `$k` and `'name'`
+    /// in `$data[$k]['name']`. Evaluated at resolve time so dynamic keys —
+    /// including integer keys and variable keys — resolve correctly.
+    path: Vec<Expr>,
 }
 
 struct EvalContext<'a> {
@@ -1108,10 +1162,23 @@ impl<'a> EvalContext<'a> {
         Ok(())
     }
 
+    /// Evaluate `left =~ right`. When the right-hand side is a data-type
+    /// reference (`String[1,10]`, `Enum[...]`, …) this performs structural type
+    /// matching with bounds enforcement; otherwise it falls back to compiling
+    /// the right-hand value as a regex.
+    fn eval_match(&mut self, left: &Expr, right: &Expr) -> Result<bool> {
+        let subject = self.eval_expr(left)?;
+        if let Expr::Type(spec) = right {
+            return Ok(eval_type_match(&subject, spec));
+        }
+        eval_regex_match(&subject, &self.eval_expr(right)?)
+    }
+
     /// Match a `case` branch pattern against the subject value.
     ///
     /// Supported branch patterns:
     /// - bare regex literal `/.../[imsx]` — substring match on the subject
+    /// - data type reference `String[1,10]`, `Enum[...]` — structural type match
     /// - array of patterns `[a, b, /c/, ...]` — true if any element matches
     /// - any other expression — equality after evaluation
     fn case_branch_matches(&mut self, pattern: &Expr, subject: &PuppetValue) -> Result<bool> {
@@ -1119,6 +1186,7 @@ impl<'a> EvalContext<'a> {
             Expr::Regex(regex_src) => {
                 eval_regex_match(subject, &PuppetValue::String(regex_src.clone()))
             }
+            Expr::Type(spec) => Ok(eval_type_match(subject, spec)),
             Expr::Array(items) => {
                 for item in items {
                     if self.case_branch_matches(item, subject)? {
@@ -1143,12 +1211,8 @@ impl<'a> EvalContext<'a> {
             Cond::Compare { left, op, right } => match op {
                 CompareOp::Eq => self.eval_expr(left)? == self.eval_expr(right)?,
                 CompareOp::NotEq => self.eval_expr(left)? != self.eval_expr(right)?,
-                CompareOp::Match => {
-                    eval_regex_match(&self.eval_expr(left)?, &self.eval_expr(right)?)?
-                }
-                CompareOp::NotMatch => {
-                    !eval_regex_match(&self.eval_expr(left)?, &self.eval_expr(right)?)?
-                }
+                CompareOp::Match => self.eval_match(left, right)?,
+                CompareOp::NotMatch => !self.eval_match(left, right)?,
                 CompareOp::Lt | CompareOp::Gt | CompareOp::LtEq | CompareOp::GtEq => {
                     eval_ordered_compare(&self.eval_expr(left)?, *op, &self.eval_expr(right)?)
                 }
@@ -1193,6 +1257,8 @@ impl<'a> EvalContext<'a> {
                 let value = self.eval_expr(target)?;
                 match name.as_str() {
                     "downcase" => value.downcase(),
+                    "length" | "size" => PuppetValue::Integer(value_length(&value)),
+                    "empty" => PuppetValue::Bool(value_empty(&value)),
                     _ => value,
                 }
             }
@@ -1259,12 +1325,25 @@ impl<'a> EvalContext<'a> {
                         .and_then(coerce_to_integer)
                         .map(PuppetValue::Integer)
                         .unwrap_or(PuppetValue::Undef),
+                    // Collection introspection. `empty`/`length`/`size` return
+                    // proper Bool/Integer so comparisons (`length($x) > 0`,
+                    // `empty($x)`) evaluate correctly instead of on `Undef`.
+                    "empty" => {
+                        PuppetValue::Bool(arg_values.first().map(value_empty).unwrap_or(true))
+                    }
+                    "length" | "size" => {
+                        PuppetValue::Integer(arg_values.first().map(value_length).unwrap_or(0))
+                    }
                     _ => PuppetValue::Undef,
                 }
             }
             // Regex literals evaluate to their pattern string; comparison ops
             // `=~` / `!~` compile and apply the pattern.
             Expr::Regex(pattern) => PuppetValue::String(pattern.clone()),
+            // A type reference in value position (rare) renders to its source
+            // text; in match position `=~`/`!~`/`case` intercept it for
+            // structural type matching before it is evaluated as a value.
+            Expr::Type(spec) => PuppetValue::String(spec.render()),
             Expr::Selector { subject, cases } => {
                 let subject_value = self.eval_expr(subject)?;
                 let mut default_value: Option<&Expr> = None;
@@ -1279,6 +1358,13 @@ impl<'a> EvalContext<'a> {
                     if let Expr::Regex(_) = key {
                         let pattern = self.eval_expr(key)?;
                         if eval_regex_match(&subject_value, &pattern).unwrap_or(false) {
+                            matched = Some(value);
+                            break;
+                        }
+                        continue;
+                    }
+                    if let Expr::Type(spec) = key {
+                        if eval_type_match(&subject_value, spec) {
                             matched = Some(value);
                             break;
                         }
@@ -1385,7 +1471,7 @@ impl<'a> EvalContext<'a> {
         Some(module_root.join("templates").join(rest))
     }
 
-    fn resolve_var(&self, var: &VarRef) -> PuppetValue {
+    fn resolve_var(&mut self, var: &VarRef) -> PuppetValue {
         // Strip the legacy top-scope `::` prefix (e.g. `$::osfamily`).
         let normalized = var.name.trim_start_matches(':').to_string();
         let mut value = if var.name == "facts" {
@@ -1403,9 +1489,32 @@ impl<'a> EvalContext<'a> {
         } else {
             PuppetValue::Undef
         };
+        // Apply each `[key]` suffix, evaluating the key at runtime so dynamic,
+        // integer, and variable keys resolve. Hashes are indexed by the key's
+        // string form (matching how hash literals store keys); arrays are
+        // indexed by integer, with Puppet-style negative offsets from the end.
         for segment in &var.path {
+            let key = self.eval_expr(segment).unwrap_or(PuppetValue::Undef);
             value = match value {
-                PuppetValue::Hash(map) => map.get(segment).cloned().unwrap_or(PuppetValue::Undef),
+                PuppetValue::Hash(map) => map
+                    .get(&key.as_string())
+                    .cloned()
+                    .unwrap_or(PuppetValue::Undef),
+                PuppetValue::Array(items) => match coerce_to_integer(&key) {
+                    Some(idx) => {
+                        let resolved = if idx < 0 {
+                            items.len() as i64 + idx
+                        } else {
+                            idx
+                        };
+                        if resolved >= 0 && (resolved as usize) < items.len() {
+                            items[resolved as usize].clone()
+                        } else {
+                            PuppetValue::Undef
+                        }
+                    }
+                    None => PuppetValue::Undef,
+                },
                 _ => PuppetValue::Undef,
             };
         }
@@ -1442,6 +1551,201 @@ fn normalize_rtype(rtype: &str) -> String {
 /// distinction is what separates a resource default from a declaration.
 fn is_type_reference(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_uppercase())
+}
+
+/// Whether a capitalized name is one of Puppet's built-in *data types* (as
+/// opposed to a resource type like `File` or a class name). Only these are
+/// parsed as type references; everything else capitalized stays a resource
+/// reference so `File['/etc/x']` is unaffected.
+fn is_data_type(name: &str) -> bool {
+    matches!(
+        name,
+        "String"
+            | "Integer"
+            | "Float"
+            | "Numeric"
+            | "Boolean"
+            | "Array"
+            | "Hash"
+            | "Optional"
+            | "NotUndef"
+            | "Undef"
+            | "Enum"
+            | "Pattern"
+            | "Regexp"
+            | "Variant"
+            | "Scalar"
+            | "ScalarData"
+            | "Data"
+            | "Collection"
+            | "Any"
+            | "Struct"
+            | "Tuple"
+            | "Default"
+            | "Sensitive"
+            | "Type"
+    )
+}
+
+/// Length of a value the way Puppet's `length`/`size` report it: characters for
+/// strings, element count for arrays, entry count for hashes; `0` otherwise.
+fn value_length(value: &PuppetValue) -> i64 {
+    match value {
+        PuppetValue::String(s) => s.chars().count() as i64,
+        PuppetValue::Array(items) => items.len() as i64,
+        PuppetValue::Hash(map) => map.len() as i64,
+        _ => 0,
+    }
+}
+
+/// Whether a value is empty the way Puppet's `empty` reports it. `undef` is
+/// treated as empty (matching modern stdlib), and non-collection scalars are
+/// non-empty.
+fn value_empty(value: &PuppetValue) -> bool {
+    match value {
+        PuppetValue::String(s) => s.is_empty(),
+        PuppetValue::Array(items) => items.is_empty(),
+        PuppetValue::Hash(map) => map.is_empty(),
+        PuppetValue::Undef => true,
+        _ => false,
+    }
+}
+
+/// Read a `(min, max)` pair of optional bounds from type arguments starting at
+/// `offset`. `Int` args set a bound; `Default` or a missing arg means
+/// unbounded.
+fn type_bounds(args: &[TypeArg], offset: usize) -> (Option<i64>, Option<i64>) {
+    let bound = |arg: Option<&TypeArg>| match arg {
+        Some(TypeArg::Int(n)) => Some(*n),
+        _ => None,
+    };
+    (bound(args.get(offset)), bound(args.get(offset + 1)))
+}
+
+/// Whether `value` matches a single type argument (used for `Variant`,
+/// `Optional`, and `Array`/`Hash` element types).
+fn type_arg_matches(value: &PuppetValue, arg: &TypeArg) -> bool {
+    match arg {
+        TypeArg::Type(spec) => eval_type_match(value, spec),
+        TypeArg::Str(s) => matches!(value, PuppetValue::String(v) if v == s),
+        TypeArg::Int(n) => matches!(value, PuppetValue::Integer(v) if v == n),
+        TypeArg::Regex(re) => Regex::new(re)
+            .map(|r| r.is_match(&value.as_string()))
+            .unwrap_or(false),
+        TypeArg::Default => true,
+    }
+}
+
+/// Structurally match a value against a Puppet data type, enforcing length and
+/// numeric bounds, element types, and enum/pattern membership. Unmodeled type
+/// names match leniently (treated as `Any`) so a test never fails purely
+/// because the embedded evaluator doesn't implement an exotic type.
+fn eval_type_match(value: &PuppetValue, spec: &TypeSpec) -> bool {
+    match spec.name.as_str() {
+        "Any" | "Data" | "Default" | "Type" => true,
+        "Undef" => matches!(value, PuppetValue::Undef),
+        "NotUndef" => !matches!(value, PuppetValue::Undef),
+        "Optional" => {
+            matches!(value, PuppetValue::Undef)
+                || spec
+                    .args
+                    .first()
+                    .is_none_or(|arg| type_arg_matches(value, arg))
+        }
+        "Sensitive" => spec
+            .args
+            .first()
+            .is_none_or(|arg| type_arg_matches(value, arg)),
+        "Boolean" => matches!(value, PuppetValue::Bool(_)),
+        "String" => match value {
+            PuppetValue::String(s) => {
+                let len = s.chars().count() as i64;
+                let (min, max) = type_bounds(&spec.args, 0);
+                min.is_none_or(|m| len >= m) && max.is_none_or(|m| len <= m)
+            }
+            _ => false,
+        },
+        "Integer" | "Float" | "Numeric" => match value {
+            PuppetValue::Integer(n) => {
+                let (min, max) = type_bounds(&spec.args, 0);
+                min.is_none_or(|m| *n >= m) && max.is_none_or(|m| *n <= m)
+            }
+            _ => false,
+        },
+        "Scalar" | "ScalarData" => matches!(
+            value,
+            PuppetValue::String(_) | PuppetValue::Integer(_) | PuppetValue::Bool(_)
+        ),
+        "Collection" => matches!(value, PuppetValue::Array(_) | PuppetValue::Hash(_)),
+        "Array" | "Tuple" => match value {
+            PuppetValue::Array(items) => {
+                // An optional leading type arg constrains the element type;
+                // trailing integer args constrain the size.
+                let elem_type = spec.args.iter().find_map(|arg| match arg {
+                    TypeArg::Type(t) => Some(t),
+                    _ => None,
+                });
+                let elems_ok =
+                    elem_type.is_none_or(|t| items.iter().all(|item| eval_type_match(item, t)));
+                let int_args: Vec<i64> = spec
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        TypeArg::Int(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                let size = items.len() as i64;
+                let size_ok = match int_args.as_slice() {
+                    [] => true,
+                    [min] => size >= *min,
+                    [min, max, ..] => size >= *min && size <= *max,
+                };
+                elems_ok && size_ok
+            }
+            _ => false,
+        },
+        "Hash" => match value {
+            PuppetValue::Hash(map) => {
+                // Size bounds, when present, are the 3rd/4th args (after the
+                // key/value types): `Hash[K, V, min, max]`.
+                let int_args: Vec<i64> = spec
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        TypeArg::Int(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                let size = map.len() as i64;
+                match int_args.as_slice() {
+                    [] => true,
+                    [min] => size >= *min,
+                    [min, max, ..] => size >= *min && size <= *max,
+                }
+            }
+            _ => false,
+        },
+        "Enum" => match value {
+            PuppetValue::String(s) => spec
+                .args
+                .iter()
+                .any(|arg| matches!(arg, TypeArg::Str(member) if member == s)),
+            _ => false,
+        },
+        "Pattern" | "Regexp" => {
+            let text = value.as_string();
+            spec.args.iter().any(|arg| match arg {
+                TypeArg::Regex(re) | TypeArg::Str(re) => {
+                    Regex::new(re).map(|r| r.is_match(&text)).unwrap_or(false)
+                }
+                _ => false,
+            })
+        }
+        "Variant" => spec.args.iter().any(|arg| type_arg_matches(value, arg)),
+        // Unmodeled type (e.g. Struct): match leniently rather than failing.
+        _ => true,
+    }
 }
 
 struct PuppetParser<'a> {
@@ -2222,15 +2526,7 @@ impl<'a> PuppetParser<'a> {
         }
         if self.peek_kind() == Some(TokenKind::Var) {
             let var = self.expect_var()?;
-            let mut path = Vec::new();
-            while self.consume(TokenKind::LBracket) {
-                let key = match self.parse_expr()? {
-                    Expr::String(value) => value,
-                    expr => expr.as_string(),
-                };
-                path.push(key);
-                self.consume(TokenKind::RBracket);
-            }
+            let path = self.parse_index_path()?;
             return Ok(Expr::Var(VarRef { name: var, path }));
         }
         if self.peek_kind() == Some(TokenKind::Ident) {
@@ -2246,16 +2542,16 @@ impl<'a> PuppetParser<'a> {
                 }
                 return Ok(Expr::FunctionCall { name: ident, args });
             }
+            // A capitalized data-type name (`String`, `Array`, `Optional`, …)
+            // followed by no `(` is a type reference. The call form `Integer('7')`
+            // is a conversion function and is handled above. Resource types like
+            // `File` are *not* data types, so `File['/etc']` still parses as a
+            // resource reference below.
+            if is_data_type(&ident) {
+                return self.parse_type_spec(ident);
+            }
             if self.allow_bare_vars {
-                let mut path = Vec::new();
-                while self.consume(TokenKind::LBracket) {
-                    let key = match self.parse_expr()? {
-                        Expr::String(value) => value,
-                        expr => expr.as_string(),
-                    };
-                    path.push(key);
-                    self.consume(TokenKind::RBracket);
-                }
+                let path = self.parse_index_path()?;
                 return Ok(Expr::Var(VarRef { name: ident, path }));
             }
             if self.consume(TokenKind::LBracket) {
@@ -2298,6 +2594,67 @@ impl<'a> PuppetParser<'a> {
             .map(|tok| format!("{:?} '{}'", tok.kind, tok.text))
             .unwrap_or_else(|| "EOF".to_string());
         Err(anyhow::anyhow!("unexpected token {detail}"))
+    }
+
+    /// Parse a chain of `[key]` index suffixes into index expressions. Each key
+    /// is kept as an `Expr` and evaluated at resolve time, so `$h[$k]`, `$h[5]`,
+    /// and `$arr[0]` all resolve dynamically rather than freezing to a literal.
+    fn parse_index_path(&mut self) -> Result<Vec<Expr>> {
+        let mut path = Vec::new();
+        while self.consume(TokenKind::LBracket) {
+            path.push(self.parse_expr()?);
+            self.consume(TokenKind::RBracket);
+        }
+        Ok(path)
+    }
+
+    /// Parse a data type and its optional bracketed arguments, e.g.
+    /// `String`, `String[1,10]`, `Optional[Array[String]]`, `Enum['a','b']`.
+    fn parse_type_spec(&mut self, name: String) -> Result<Expr> {
+        let mut args = Vec::new();
+        if self.consume(TokenKind::LBracket) {
+            while !self.consume(TokenKind::RBracket) && !self.is_eof() {
+                if self.consume(TokenKind::Comma) {
+                    continue;
+                }
+                args.push(self.parse_type_arg()?);
+            }
+        }
+        Ok(Expr::Type(TypeSpec { name, args }))
+    }
+
+    /// Parse a single type argument: a numeric bound, the `default` keyword, a
+    /// string/regex member, or a nested type.
+    fn parse_type_arg(&mut self) -> Result<TypeArg> {
+        if self.consume_keyword("default") {
+            return Ok(TypeArg::Default);
+        }
+        match self.peek_kind() {
+            Some(TokenKind::Number) => Ok(TypeArg::Int(self.expect_number()?)),
+            Some(TokenKind::Minus) => {
+                self.index += 1;
+                Ok(TypeArg::Int(-self.expect_number()?))
+            }
+            Some(TokenKind::String) => Ok(TypeArg::Str(self.expect_string()?)),
+            Some(TokenKind::Regex) => {
+                let token = self.tokens[self.index].clone();
+                self.index += 1;
+                Ok(TypeArg::Regex(token.text))
+            }
+            Some(TokenKind::Ident) => {
+                let ident = self.expect_ident()?;
+                match self.parse_type_spec(ident)? {
+                    Expr::Type(spec) => Ok(TypeArg::Type(spec)),
+                    _ => unreachable!("parse_type_spec always returns Expr::Type"),
+                }
+            }
+            // Unrecognized argument shape: consume one token to stay robust and
+            // treat it as an unbounded slot rather than aborting the parse.
+            _ => {
+                self.index += 1;
+                Ok(TypeArg::Default)
+            }
+        }
     }
 
     fn parse_inline_expr(source: &str) -> Result<Expr> {
@@ -2432,6 +2789,7 @@ impl Expr {
             Expr::Selector { .. } => "selector".to_string(),
             Expr::Condition(_) => "condition".to_string(),
             Expr::Arith { .. } => "arith".to_string(),
+            Expr::Type(spec) => spec.render(),
         }
     }
 }
@@ -4749,6 +5107,166 @@ class foo {
             htop.attributes.get("ensure"),
             Some(&PuppetValue::String("installed".to_string())),
             "ensure_resource params apply to the declared resource"
+        );
+    }
+
+    /// Evaluate `class foo { … }` with empty facts and params.
+    fn eval_class_foo(manifest: &str) -> PuppetCatalog {
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(HashMap::new()),
+            )
+            .expect("manifest must parse and evaluate")
+    }
+
+    #[test]
+    fn empty_function_reports_collection_emptiness() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $blank = []
+                  $full = ['x']
+                  if empty($blank) { file { '/etc/empty-yes': ensure => file } }
+                  if empty($full)  { file { '/etc/empty-no':  ensure => file } }
+                  if empty('')     { file { '/etc/empty-str': ensure => file } }
+                }
+            "#,
+        );
+        assert!(catalog.contains("file", "/etc/empty-yes"));
+        assert!(catalog.contains("file", "/etc/empty-str"));
+        assert!(!catalog.contains("file", "/etc/empty-no"));
+    }
+
+    #[test]
+    fn length_function_is_comparable() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $word = 'abcd'
+                  if length($word) > 3  { file { '/etc/len-gt': ensure => file } }
+                  if length($word) == 4 { file { '/etc/len-eq': ensure => file } }
+                  if length($word) < 3  { file { '/etc/len-lt': ensure => file } }
+                }
+            "#,
+        );
+        assert!(catalog.contains("file", "/etc/len-gt"));
+        assert!(catalog.contains("file", "/etc/len-eq"));
+        assert!(!catalog.contains("file", "/etc/len-lt"));
+    }
+
+    #[test]
+    fn string_type_match_enforces_length_bounds() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $name = 'hello'
+                  if $name =~ String[1,10] { file { '/etc/inbounds':  ensure => file } }
+                  if $name =~ String[1,3]  { file { '/etc/outbounds': ensure => file } }
+                  if $name =~ String[5]    { file { '/etc/minonly':   ensure => file } }
+                }
+            "#,
+        );
+        assert!(catalog.contains("file", "/etc/inbounds"));
+        assert!(catalog.contains("file", "/etc/minonly"));
+        assert!(
+            !catalog.contains("file", "/etc/outbounds"),
+            "a 5-char string must not match String[1,3]"
+        );
+    }
+
+    #[test]
+    fn integer_enum_and_variant_type_matching() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $svc = 'running'
+                  if 5 =~ Integer[1,10]                  { file { '/etc/int-ok':   ensure => file } }
+                  if 50 =~ Integer[1,10]                 { file { '/etc/int-bad':  ensure => file } }
+                  if $svc =~ Enum['stopped','running']   { file { '/etc/enum-ok':  ensure => file } }
+                  if $svc =~ Enum['stopped','disabled']  { file { '/etc/enum-bad': ensure => file } }
+                  if $svc =~ Variant[Integer, String[1]] { file { '/etc/variant':  ensure => file } }
+                }
+            "#,
+        );
+        assert!(catalog.contains("file", "/etc/int-ok"));
+        assert!(!catalog.contains("file", "/etc/int-bad"));
+        assert!(catalog.contains("file", "/etc/enum-ok"));
+        assert!(!catalog.contains("file", "/etc/enum-bad"));
+        assert!(catalog.contains("file", "/etc/variant"));
+    }
+
+    #[test]
+    fn hash_indexing_with_integer_and_variable_keys() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $data = { 5 => 'five', 'name' => 'bob' }
+                  $key = 5
+                  if $data[5] == 'five'      { file { '/etc/intlit':  ensure => file } }
+                  if $data[$key] == 'five'   { file { '/etc/intvar':  ensure => file } }
+                  if $data['name'] == 'bob'  { file { '/etc/strkey':  ensure => file } }
+                }
+            "#,
+        );
+        assert!(
+            catalog.contains("file", "/etc/intlit"),
+            "$hash[5] must resolve an integer literal key"
+        );
+        assert!(
+            catalog.contains("file", "/etc/intvar"),
+            "$hash[$k] must evaluate the key variable rather than freeze its name"
+        );
+        assert!(catalog.contains("file", "/etc/strkey"));
+    }
+
+    #[test]
+    fn array_indexing_by_position_and_variable() {
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $items = ['a', 'b', 'c']
+                  $i = 0
+                  $last = 0 - 1
+                  if $items[1] == 'b'     { file { '/etc/lit':  ensure => file } }
+                  if $items[$i] == 'a'    { file { '/etc/var':  ensure => file } }
+                  if $items[$last] == 'c' { file { '/etc/neg':  ensure => file } }
+                }
+            "#,
+        );
+        assert!(catalog.contains("file", "/etc/lit"));
+        assert!(catalog.contains("file", "/etc/var"));
+        assert!(
+            catalog.contains("file", "/etc/neg"),
+            "negative array indices should count from the end"
+        );
+    }
+
+    #[test]
+    fn resource_reference_still_parses_after_type_support() {
+        // A capitalized *resource* type with a bracketed title must remain a
+        // resource reference, not be mistaken for a data type.
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  file { '/etc/dep': ensure => file }
+                  file { '/etc/needs-dep':
+                    ensure  => file,
+                    require => File['/etc/dep'],
+                  }
+                }
+            "#,
+        );
+        let dependent = catalog
+            .find("file", "/etc/needs-dep")
+            .expect("file[/etc/needs-dep] declared");
+        assert_eq!(
+            dependent.attributes.get("require"),
+            Some(&PuppetValue::String("File[/etc/dep]".to_string())),
+            "File['/etc/dep'] must stay a resource reference"
         );
     }
 }
