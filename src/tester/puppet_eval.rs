@@ -51,9 +51,14 @@ impl PuppetValue {
             PuppetValue::Integer(value) => value.to_string(),
             PuppetValue::Bool(value) => value.to_string(),
             PuppetValue::Array(values) => {
+                // Puppet stringifies an array with bracket delimiters and formats
+                // each *contained* value with `%p` (the programmatic form), which
+                // double-quotes string members. So `['a', 'b']` renders as
+                // `["a", "b"]`, not the bare `[a, b]` the elements' own
+                // `as_string` would give.
                 let items = values
                     .iter()
-                    .map(|value| value.as_string())
+                    .map(|value| value.as_programmatic_string())
                     .collect::<Vec<_>>();
                 format!("[{}]", items.join(", "))
             }
@@ -65,6 +70,21 @@ impl PuppetValue {
                 format!("{{{}}}", items.join(", "))
             }
             PuppetValue::Undef => "undef".to_string(),
+        }
+    }
+
+    /// Puppet's `%p` ("programmatic") string form, used for values *contained*
+    /// in an array (or hash). It differs from [`as_string`] only for strings,
+    /// which are double-quoted (with `"` and `\` escaped); every other value
+    /// type — including nested arrays/hashes, which carry their own delimiters —
+    /// is already self-delimiting and reuses [`as_string`].
+    fn as_programmatic_string(&self) -> String {
+        match self {
+            PuppetValue::String(value) => {
+                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\"")
+            }
+            other => other.as_string(),
         }
     }
 
@@ -5242,6 +5262,32 @@ class foo {
         assert!(
             catalog.contains("file", "/etc/neg"),
             "negative array indices should count from the end"
+        );
+    }
+
+    #[test]
+    fn interpolated_array_uses_puppet_programmatic_form() {
+        // Puppet renders an interpolated array with bracket delimiters and the
+        // `%p` form for its members: string elements are double-quoted, while
+        // numbers are left bare. The old behaviour stringified members with
+        // `as_string`, leaking `[a, b]` (unquoted) into the catalog.
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $strings = ['a', 'b']
+                  $numbers = [1, 2]
+                  notify { "s-${strings}": }
+                  notify { "n-${numbers}": }
+                }
+            "#,
+        );
+        assert!(
+            catalog.contains("notify", "s-[\"a\", \"b\"]"),
+            "string array members must be double-quoted"
+        );
+        assert!(
+            catalog.contains("notify", "n-[1, 2]"),
+            "numeric array members must stay unquoted"
         );
     }
 

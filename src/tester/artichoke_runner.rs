@@ -746,12 +746,22 @@ begin
     end
   end
   module RegentSpec
+    # Base class for the per-context example-group class hierarchy. Each
+    # describe/context block becomes a subclass of its enclosing group, and
+    # `let(:name)` defines a real method on that subclass. Because the classes
+    # form an inheritance chain, a nested `let` can call `super()` to reach the
+    # parent context's same-named definition, matching RSpec semantics.
+    # (Artichoke cannot evaluate `super()` inside an instance_eval'd block, so
+    # modelling lets as define_method'd methods on a class chain is what makes
+    # `super()` work.)
+    class ExampleGroup
+    end
     class Context
-      attr_reader :description, :lets, :subject
-      def initialize(description, subject = nil)
+      attr_reader :description, :subject, :klass
+      def initialize(description, subject, klass)
         @description = description
         @subject = subject
-        @lets = {{}}
+        @klass = klass
       end
     end
 
@@ -772,13 +782,16 @@ begin
     @tests = []
     @example_index = 0
     @current_example = nil
+    @current_group_instance = nil
 
     class << self
       attr_reader :tests
     end
 
     def self.push_context(description, subject = nil)
-      @contexts << Context.new(description, subject)
+      parent = @contexts.last
+      base = parent ? parent.klass : ExampleGroup
+      @contexts << Context.new(description, subject, Class.new(base))
       yield
       @contexts.pop
     end
@@ -793,14 +806,21 @@ begin
     end
 
     def self.register_let(name, block)
-      @contexts.last.lets[name] = block
+      # Defining the let as a method on the context's group class (rather than
+      # stashing the block and instance_eval'ing it) is what lets a nested
+      # `let(:x) {{ super() ... }}` resolve to the parent context's `:x`.
+      @contexts.last.klass.send(:define_method, name, &block)
     end
 
     def self.resolve_let(name)
-      @contexts.reverse_each do |ctx|
-        return instance_eval(&ctx.lets[name]) if ctx.lets.key?(name)
-      end
-      nil
+      inst = @current_group_instance
+      # method_defined? (not respond_to?) on purpose: lets are public methods on
+      # the group class chain, while the DSL helpers (contain_*, expect, …) are
+      # private Object methods, so they never false-match. respond_to? would
+      # route through a top-level respond_to_missing? whose `super` has no target
+      # under Artichoke and raises.
+      return nil unless inst && inst.class.method_defined?(name)
+      inst.send(name)
     end
 
     def self.start_example(description)
@@ -810,12 +830,15 @@ begin
       name = [prefix, label].reject(&:empty?).join(" ")
       @current_example = Example.new(name)
       yield
+      leaf = @contexts.last
+      @current_group_instance = leaf ? leaf.klass.new : nil
       @current_example.facts = normalize_value(resolve_let(:facts))
       @current_example.params = normalize_value(resolve_let(:params))
       @current_example.title = normalize_value(resolve_let(:title))
       @current_example.subject = resolve_subject
       @tests << @current_example
       @current_example = nil
+      @current_group_instance = nil
     end
 
     def self.add_expectation(expectation)
@@ -1036,14 +1059,21 @@ begin
     end
   end
 
+  # NOTE: the group block is run with `block.call`, not `instance_eval(&block)`.
+  # A `let(:x) {{ super() }}` defined inside this block is a proc, and Artichoke
+  # binds its `super` to the method dynamically enclosing the proc's creation.
+  # Under `instance_eval` that enclosing method is `instance_eval` itself, so
+  # `super()` mis-resolves; with `block.call` there is no such frame and `super`
+  # correctly targets the parent context's same-named let method. `self` is the
+  # spec's top-level object either way, so the DSL helpers remain in scope.
   def describe(subject, &block)
     RegentSpec.push_context(subject.to_s, subject.to_s) do
-      instance_eval(&block)
+      block.call
     end
   end
   def context(subject, &block)
     RegentSpec.push_context(subject.to_s, nil) do
-      instance_eval(&block)
+      block.call
     end
   end
   def shared_examples(name, &block)
