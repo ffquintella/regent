@@ -3699,7 +3699,50 @@ fn tokenize_epp(template: &str) -> Vec<EppToken> {
     tokens
 }
 
+/// Evaluate an EPP expression. Supports logical (`and`/`or`/`!`/`not`),
+/// comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`) and parenthesised forms on top
+/// of the primitive `$var`/literal lookups in [`epp_eval_primary`]. This is what
+/// lets `<% if $x != '' { %>` and friends render faithfully — without it a
+/// condition like `$x != ''` was treated as a single (missing) variable name and
+/// always evaluated falsy, silently dropping the whole branch.
 fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue {
+    let s = source.trim();
+    // Lowest precedence first: `or`, then `and`.
+    if let Some((l, _, r)) = epp_split_binary(s, &["or"], true) {
+        return PuppetValue::Bool(
+            epp_truthy(&epp_eval(&l, params)) || epp_truthy(&epp_eval(&r, params)),
+        );
+    }
+    if let Some((l, _, r)) = epp_split_binary(s, &["and"], true) {
+        return PuppetValue::Bool(
+            epp_truthy(&epp_eval(&l, params)) && epp_truthy(&epp_eval(&r, params)),
+        );
+    }
+    // Comparisons (two-char operators listed before one-char so `<=`/`>=` win).
+    if let Some((l, op, r)) = epp_split_binary(s, &["==", "!=", "<=", ">=", "<", ">"], false) {
+        return PuppetValue::Bool(epp_compare(
+            &epp_eval(&l, params),
+            &op,
+            &epp_eval(&r, params),
+        ));
+    }
+    // Unary negation.
+    if let Some(rest) = s.strip_prefix('!') {
+        return PuppetValue::Bool(!epp_truthy(&epp_eval(rest, params)));
+    }
+    if let Some(rest) = s.strip_prefix("not ") {
+        return PuppetValue::Bool(!epp_truthy(&epp_eval(rest, params)));
+    }
+    // Fully parenthesised expression.
+    if epp_is_paren_wrapped(s) {
+        return epp_eval(&s[1..s.len() - 1], params);
+    }
+    epp_eval_primary(s, params)
+}
+
+/// Evaluate a primitive EPP expression: a `$var` reference, string/integer
+/// literal, or boolean/undef keyword.
+fn epp_eval_primary(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue {
     let s = source.trim();
     if let Some(name) = s.strip_prefix('$') {
         return params.get(name).cloned().unwrap_or(PuppetValue::Undef);
@@ -3721,6 +3764,161 @@ fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue 
         "undef" => PuppetValue::Undef,
         _ => PuppetValue::Undef,
     }
+}
+
+/// Split `s` on the first top-level occurrence of any operator in `ops`,
+/// ignoring matches inside quotes or parentheses. When `word` is true the
+/// operator must be surrounded by whitespace (for keyword operators like
+/// `and`/`or`). Returns `(left, op, right)`.
+fn epp_split_binary(s: &str, ops: &[&str], word: bool) -> Option<(String, String, String)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut depth: i32 = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_single = true;
+                i += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                i += 1;
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            ')' => {
+                depth -= 1;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            for op in ops {
+                let op_chars: Vec<char> = op.chars().collect();
+                if chars[i..].starts_with(&op_chars[..]) {
+                    if word {
+                        let before_ok = i == 0 || chars[i - 1].is_whitespace();
+                        let after = i + op_chars.len();
+                        let after_ok = after >= chars.len() || chars[after].is_whitespace();
+                        if !(before_ok && after_ok) {
+                            continue;
+                        }
+                    }
+                    let left: String = chars[..i].iter().collect();
+                    let right: String = chars[i + op_chars.len()..].iter().collect();
+                    return Some((left, (*op).to_string(), right));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when `s` is a single parenthesised group spanning the whole string,
+/// e.g. `($a and $b)` but not `($a) or ($b)`.
+fn epp_is_paren_wrapped(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.first() != Some(&'(') || chars.last() != Some(&')') {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, &c) in chars.iter().enumerate() {
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if c == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match c {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                // If we close the opening paren before the final char, the
+                // outer parens don't wrap the whole expression.
+                if depth == 0 && i != chars.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Compare two EPP values for an `if` condition.
+fn epp_compare(left: &PuppetValue, op: &str, right: &PuppetValue) -> bool {
+    match op {
+        "==" => epp_values_eq(left, right),
+        "!=" => !epp_values_eq(left, right),
+        "<" | ">" | "<=" | ">=" => match epp_compare_ord(left, right) {
+            Some(ord) => match op {
+                "<" => ord == std::cmp::Ordering::Less,
+                ">" => ord == std::cmp::Ordering::Greater,
+                "<=" => ord != std::cmp::Ordering::Greater,
+                ">=" => ord != std::cmp::Ordering::Less,
+                _ => false,
+            },
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+fn epp_values_eq(a: &PuppetValue, b: &PuppetValue) -> bool {
+    match (a, b) {
+        (PuppetValue::Integer(x), PuppetValue::Integer(y)) => x == y,
+        (PuppetValue::Bool(x), PuppetValue::Bool(y)) => x == y,
+        (PuppetValue::Undef, PuppetValue::Undef) => true,
+        (PuppetValue::String(x), PuppetValue::String(y)) => x == y,
+        _ => a.as_string() == b.as_string(),
+    }
+}
+
+fn epp_compare_ord(a: &PuppetValue, b: &PuppetValue) -> Option<std::cmp::Ordering> {
+    if let (PuppetValue::Integer(x), PuppetValue::Integer(y)) = (a, b) {
+        return Some(x.cmp(y));
+    }
+    // Fall back to numeric comparison when both stringify to numbers,
+    // otherwise lexicographic — mirroring Puppet's permissive comparisons.
+    let (sa, sb) = (a.as_string(), b.as_string());
+    if let (Ok(x), Ok(y)) = (sa.parse::<f64>(), sb.parse::<f64>()) {
+        return x.partial_cmp(&y);
+    }
+    Some(sa.cmp(&sb))
 }
 
 fn epp_truthy(value: &PuppetValue) -> bool {
@@ -4518,6 +4716,63 @@ class foo {
             ),
         ]));
         assert_eq!(render_epp(template, &params), "");
+    }
+
+    #[test]
+    fn epp_if_with_comparison_renders_branch_and_trailing_block() {
+        // The original bug: a condition with an operator (`!=`) was treated as a
+        // single missing variable, so the if-body *and* anything after it that
+        // depended on the same flow vanished. Both should now render.
+        let template = "<%= $ha_env %>\n<% if $ha_env != '' { -%>\nHA=on\n<% } -%>\n<% $extra.each |$e| { -%>\n- <%= $e %>\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([
+            (
+                "ha_env".to_string(),
+                PuppetValue::String("prod".to_string()),
+            ),
+            (
+                "extra".to_string(),
+                PuppetValue::Array(vec![
+                    PuppetValue::String("x".to_string()),
+                    PuppetValue::String("y".to_string()),
+                ]),
+            ),
+        ]));
+        assert_eq!(render_epp(template, &params), "prod\nHA=on\n- x\n- y\n");
+    }
+
+    #[test]
+    fn epp_if_comparison_false_skips_only_its_branch() {
+        let template = "<% if $env == 'prod' { -%>\nP\n<% } else { -%>\nQ\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([(
+            "env".to_string(),
+            PuppetValue::String("dev".to_string()),
+        )]));
+        assert_eq!(render_epp(template, &params), "Q\n");
+    }
+
+    #[test]
+    fn epp_if_numeric_and_logical_conditions() {
+        let template = "<% if $n > 2 and $on { -%>\nyes\n<% } -%>\n";
+        let yes = PuppetValue::Hash(HashMap::from([
+            ("n".to_string(), PuppetValue::Integer(5)),
+            ("on".to_string(), PuppetValue::Bool(true)),
+        ]));
+        assert_eq!(render_epp(template, &yes), "yes\n");
+        let no = PuppetValue::Hash(HashMap::from([
+            ("n".to_string(), PuppetValue::Integer(1)),
+            ("on".to_string(), PuppetValue::Bool(true)),
+        ]));
+        assert_eq!(render_epp(template, &no), "");
+    }
+
+    #[test]
+    fn epp_if_negation_and_parens() {
+        let template = "<% if !($a == $b) { -%>\ndiff\n<% } -%>\n";
+        let params = PuppetValue::Hash(HashMap::from([
+            ("a".to_string(), PuppetValue::String("1".to_string())),
+            ("b".to_string(), PuppetValue::String("2".to_string())),
+        ]));
+        assert_eq!(render_epp(template, &params), "diff\n");
     }
 
     #[test]
