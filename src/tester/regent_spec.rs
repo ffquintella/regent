@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::{CoverageReport, FileCoverage, TestCase, TestResults, TestStatus};
-use crate::tester::puppet_eval::{EvaluationTrace, PuppetCatalog, PuppetEvaluator, PuppetValue};
+use crate::tester::puppet_eval::{
+    normalize_rtype, EvaluationTrace, PuppetCatalog, PuppetEvaluator, PuppetValue,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct RegentPlan {
@@ -18,6 +20,11 @@ pub struct RegentTest {
     pub name: String,
     pub subject: String,
     pub title: Option<String>,
+    /// `let(:node) { 'foo.example.com' }`. Real Puppet/PDK derives the
+    /// `fqdn`/`hostname`/`domain` facts from this; we do the same so manifests
+    /// that default a parameter to `$fqdn` resolve instead of rendering undef.
+    #[serde(default)]
+    pub node: Option<String>,
     pub facts: Option<HashMap<String, JsonValue>>,
     pub params: Option<HashMap<String, JsonValue>>,
     pub expectations: Vec<Expectation>,
@@ -30,6 +37,10 @@ pub enum Expectation {
     Compile {
         #[serde(default)]
         negate: bool,
+        /// `compile.with_all_deps` — additionally assert that every relationship
+        /// reference in the catalog resolves to a declared resource.
+        #[serde(default)]
+        check_all_deps: bool,
     },
     #[serde(rename = "contain")]
     Contain {
@@ -37,6 +48,10 @@ pub enum Expectation {
         title: String,
         #[serde(default)]
         attributes: HashMap<String, JsonValue>,
+        /// `that_requires` / `that_comes_before` / `that_notifies` /
+        /// `that_subscribes_to` references attached to this resource.
+        #[serde(default)]
+        relationships: Vec<Relationship>,
         #[serde(default)]
         negate: bool,
     },
@@ -52,6 +67,107 @@ pub enum Expectation {
         #[serde(default)]
         negate: bool,
     },
+}
+
+/// One relationship assertion from a `contain_*` matcher, e.g.
+/// `contain_service('a').that_requires('Package[b]')`.
+#[derive(Debug, Deserialize)]
+pub struct Relationship {
+    /// `require`, `before`, `notify`, or `subscribe`.
+    pub kind: String,
+    /// The target reference text, e.g. `"Package[b]"`.
+    pub target: String,
+}
+
+/// A `Type[title]` reference, normalized for catalog lookups (type lowercased
+/// with `__` → `::`, surrounding quotes/whitespace stripped from the title).
+type ResourceRef = (String, String);
+
+/// The catalog's relationship edges, derived from the four relationship
+/// metaparameters. Puppet treats them as two ordering pairs plus refresh:
+///   require  => X   : X is applied before the declaring resource
+///   before   => X   : the declaring resource is applied before X
+///   subscribe => X  : X before declarer, and declarer refreshes from X
+///   notify   => X   : declarer before X, and X refreshes from declarer
+/// `before` holds ordering edges (a applied before b); `notify` holds refresh
+/// edges (a notifies b). The inverse forms collapse into the same edges, so a
+/// dependency declared from either end satisfies the matcher.
+#[derive(Default)]
+struct DepGraph {
+    before: HashSet<(ResourceRef, ResourceRef)>,
+    notify: HashSet<(ResourceRef, ResourceRef)>,
+}
+
+/// Parse a `Type[title]` reference. Returns `None` for text that isn't a
+/// resource reference (those are simply not relationships).
+fn parse_resource_ref(text: &str) -> Option<ResourceRef> {
+    let open = text.find('[')?;
+    let close = text.rfind(']')?;
+    if close <= open {
+        return None;
+    }
+    let rtype = text[..open].trim();
+    let title = text[open + 1..close]
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"');
+    if rtype.is_empty() || title.is_empty() {
+        return None;
+    }
+    Some((normalize_rtype(rtype), title.to_string()))
+}
+
+/// Collect every resource reference in a metaparameter value, flattening
+/// arrays (`require => [File['a'], Service['b']]`).
+fn collect_refs(value: &PuppetValue, out: &mut Vec<ResourceRef>) {
+    match value {
+        PuppetValue::String(text) => {
+            if let Some(reference) = parse_resource_ref(text) {
+                out.push(reference);
+            }
+        }
+        PuppetValue::Array(items) => {
+            for item in items {
+                collect_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+const RELATIONSHIP_METAPARAMS: [&str; 4] = ["require", "before", "notify", "subscribe"];
+
+fn build_dep_graph(catalog: &PuppetCatalog) -> DepGraph {
+    let mut graph = DepGraph::default();
+    for resource in catalog.iter_resources() {
+        let here: ResourceRef = (resource.resource_type.clone(), resource.title.clone());
+        for meta in RELATIONSHIP_METAPARAMS {
+            let Some(value) = resource.attributes.get(meta) else {
+                continue;
+            };
+            let mut refs = Vec::new();
+            collect_refs(value, &mut refs);
+            for target in refs {
+                match meta {
+                    "require" => {
+                        graph.before.insert((target, here.clone()));
+                    }
+                    "before" => {
+                        graph.before.insert((here.clone(), target));
+                    }
+                    "subscribe" => {
+                        graph.before.insert((target.clone(), here.clone()));
+                        graph.notify.insert((target, here.clone()));
+                    }
+                    "notify" => {
+                        graph.before.insert((here.clone(), target.clone()));
+                        graph.notify.insert((here.clone(), target));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    graph
 }
 
 pub struct RegentSpecRunner {
@@ -156,7 +272,8 @@ impl RegentSpecRunner {
         covered_classes: &mut HashSet<String>,
         covered_defines: &mut HashSet<String>,
     ) -> Result<TestCase> {
-        let facts = PuppetValue::from_json_map(test.facts.as_ref());
+        let mut facts = PuppetValue::from_json_map(test.facts.as_ref());
+        derive_node_facts(&mut facts, test.node.as_deref());
         let params = PuppetValue::from_json_map(test.params.as_ref());
 
         let catalog_result = self.evaluate_subject(test, &facts, &params);
@@ -169,8 +286,18 @@ impl RegentSpecRunner {
         let mut failures = Vec::new();
         for expectation in &test.expectations {
             match expectation {
-                Expectation::Compile { negate } => match (&catalog_result, *negate) {
-                    (Ok(_), false) | (Err(_), true) => {}
+                Expectation::Compile {
+                    negate,
+                    check_all_deps,
+                } => match (&catalog_result, *negate) {
+                    (Ok(catalog), false) => {
+                        if *check_all_deps {
+                            if let Err(err) = self.check_all_deps(catalog) {
+                                failures.push(err.to_string());
+                            }
+                        }
+                    }
+                    (Err(_), true) => {}
                     (Err(err), false) => failures.push(format!("compile failed: {err}")),
                     (Ok(_), true) => {
                         failures.push("expected compile to fail, but it succeeded".to_string())
@@ -180,6 +307,7 @@ impl RegentSpecRunner {
                     resource_type,
                     title,
                     attributes,
+                    relationships,
                     negate,
                 } => {
                     let Ok(catalog) = &catalog_result else {
@@ -191,7 +319,11 @@ impl RegentSpecRunner {
                         }
                         continue;
                     };
-                    let check = self.check_resource(catalog, resource_type, title, attributes);
+                    let check = self
+                        .check_resource(catalog, resource_type, title, attributes)
+                        .and_then(|()| {
+                            self.check_relationships(catalog, resource_type, title, relationships)
+                        });
                     match (check, *negate) {
                         (Ok(()), false) | (Err(_), true) => {}
                         (Err(err), false) => failures.push(err.to_string()),
@@ -352,6 +484,97 @@ impl RegentSpecRunner {
         }
         Ok(())
     }
+
+    /// Validate `that_requires` / `that_comes_before` / `that_notifies` /
+    /// `that_subscribes_to` references against the catalog's dependency edges.
+    /// A relationship is satisfied whether it was declared on the subject or on
+    /// the target (the inverse metaparameter), matching rspec-puppet.
+    fn check_relationships(
+        &self,
+        catalog: &PuppetCatalog,
+        resource_type: &str,
+        title: &str,
+        relationships: &[Relationship],
+    ) -> Result<()> {
+        if relationships.is_empty() {
+            return Ok(());
+        }
+        let graph = build_dep_graph(catalog);
+        let subject: ResourceRef = (normalize_rtype(resource_type), title.to_string());
+        for rel in relationships {
+            let Some(target) = parse_resource_ref(&rel.target) else {
+                return Err(anyhow::anyhow!(
+                    "relationship target {:?} is not a valid Type['title'] reference",
+                    rel.target
+                ));
+            };
+            let (satisfied, verb) = match rel.kind.as_str() {
+                "require" => (
+                    graph.before.contains(&(target.clone(), subject.clone())),
+                    "require",
+                ),
+                "before" => (
+                    graph.before.contains(&(subject.clone(), target.clone())),
+                    "come before",
+                ),
+                "notify" => (
+                    graph.notify.contains(&(subject.clone(), target.clone())),
+                    "notify",
+                ),
+                "subscribe" => (
+                    graph.notify.contains(&(target.clone(), subject.clone())),
+                    "subscribe to",
+                ),
+                other => {
+                    return Err(anyhow::anyhow!("unknown relationship kind {:?}", other));
+                }
+            };
+            if !satisfied {
+                return Err(anyhow::anyhow!(
+                    "expected {}[{}] to {} {}[{}], but no such relationship is in the catalog",
+                    subject.0,
+                    subject.1,
+                    verb,
+                    target.0,
+                    target.1
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `compile.with_all_deps` — every relationship reference in the catalog
+    /// must point at a resource that is actually declared.
+    fn check_all_deps(&self, catalog: &PuppetCatalog) -> Result<()> {
+        let mut missing = Vec::new();
+        for resource in catalog.iter_resources() {
+            for meta in RELATIONSHIP_METAPARAMS {
+                let Some(value) = resource.attributes.get(meta) else {
+                    continue;
+                };
+                let mut refs = Vec::new();
+                collect_refs(value, &mut refs);
+                for (rtype, rtitle) in refs {
+                    if !catalog.contains(&rtype, &rtitle) {
+                        missing.push(format!(
+                            "{}[{}] -> {}[{}]",
+                            resource.resource_type, resource.title, rtype, rtitle
+                        ));
+                    }
+                }
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            missing.sort();
+            missing.dedup();
+            Err(anyhow::anyhow!(
+                "catalog has unresolved dependencies: {}",
+                missing.join(", ")
+            ))
+        }
+    }
 }
 
 fn regex_marker(value: &JsonValue) -> Option<&str> {
@@ -360,6 +583,53 @@ fn regex_marker(value: &JsonValue) -> Option<&str> {
         return None;
     }
     obj.get("__regex__").and_then(|v| v.as_str())
+}
+
+/// Synthesize the node-derived facts that real Puppet/PDK populate from the
+/// node name (`let(:node) { 'foo.example.com' }`). Without these, a manifest
+/// that defaults a parameter to `$fqdn` (or `$hostname`/`$domain`) renders
+/// `undef` under the native evaluator. We set both the legacy top-scope facts
+/// and the structured `networking` hash, plus `trusted['certname']`. Facts the
+/// spec set explicitly always win — we only fill keys that are absent.
+fn derive_node_facts(facts: &mut PuppetValue, node: Option<&str>) {
+    let Some(node) = node.map(str::trim).filter(|n| !n.is_empty()) else {
+        return;
+    };
+    let PuppetValue::Hash(map) = facts else {
+        return;
+    };
+
+    let (hostname, domain) = match node.split_once('.') {
+        Some((host, domain)) => (host.to_string(), domain.to_string()),
+        None => (node.to_string(), String::new()),
+    };
+
+    let mut fill = |key: &str, value: PuppetValue| {
+        map.entry(key.to_string()).or_insert(value);
+    };
+    fill("fqdn", PuppetValue::String(node.to_string()));
+    fill("hostname", PuppetValue::String(hostname.clone()));
+    fill("clientcert", PuppetValue::String(node.to_string()));
+    if !domain.is_empty() {
+        fill("domain", PuppetValue::String(domain.clone()));
+    }
+
+    // Structured `networking` fact mirrors the legacy values.
+    let mut networking = HashMap::new();
+    networking.insert("fqdn".to_string(), PuppetValue::String(node.to_string()));
+    networking.insert("hostname".to_string(), PuppetValue::String(hostname));
+    if !domain.is_empty() {
+        networking.insert("domain".to_string(), PuppetValue::String(domain));
+    }
+    fill("networking", PuppetValue::Hash(networking));
+
+    // `trusted['certname']` defaults to the node's certname (the node name).
+    let mut trusted = HashMap::new();
+    trusted.insert(
+        "certname".to_string(),
+        PuppetValue::String(node.to_string()),
+    );
+    fill("trusted", PuppetValue::Hash(trusted));
 }
 
 /// Does a `raise_error` message constraint match the actual error text?
@@ -427,9 +697,13 @@ mod coverage_tests {
                 name: format!("{name} spec"),
                 subject: name.to_string(),
                 title: None,
+                node: None,
                 facts: None,
                 params: None,
-                expectations: vec![Expectation::Compile { negate: false }],
+                expectations: vec![Expectation::Compile {
+                    negate: false,
+                    check_all_deps: false,
+                }],
             }],
         }
     }
@@ -457,6 +731,7 @@ mod coverage_tests {
                 name: format!("{subject} raises"),
                 subject: subject.to_string(),
                 title: None,
+                node: None,
                 facts: None,
                 params: None,
                 expectations: vec![Expectation::RaiseError { message, negate }],
@@ -561,5 +836,41 @@ mod coverage_tests {
         assert_eq!(untouched.lines_covered, 0, "untouched.pp must stay at 0");
         assert!(report.overall_coverage > 0.0);
         assert!(report.overall_coverage < 100.0);
+    }
+
+    #[test]
+    fn node_name_derives_fqdn_hostname_domain() {
+        // A class that defaults parameters to the node-derived facts, the way a
+        // real module would (`String $api_server = $fqdn`). Without node-fact
+        // derivation these render `undef`.
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        fs::create_dir_all(&manifests).unwrap();
+        fs::write(
+            manifests.join("servers.pp"),
+            "class servers(\n  String $api_server = $fqdn,\n  String $host = $hostname,\n  String $dom = $domain,\n) {\n  notify { \"server-${api_server}-${host}-${dom}\": }\n}\n",
+        )
+        .unwrap();
+
+        let plan = RegentPlan {
+            tests: vec![RegentTest {
+                name: "servers on node".to_string(),
+                subject: "servers".to_string(),
+                title: None,
+                node: Some("web01.example.com".to_string()),
+                facts: None,
+                params: None,
+                expectations: vec![Expectation::Contain {
+                    resource_type: "notify".to_string(),
+                    title: "server-web01.example.com-web01-example.com".to_string(),
+                    attributes: HashMap::new(),
+                    relationships: Vec::new(),
+                    negate: false,
+                }],
+            }],
+        };
+
+        let (st, msg) = status(plan, &dir);
+        assert_eq!(st, TestStatus::Passed, "{msg:?}");
     }
 }

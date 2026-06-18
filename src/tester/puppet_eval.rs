@@ -136,6 +136,14 @@ impl PuppetCatalog {
             .get(resource_type)
             .and_then(|map| map.get(title))
     }
+
+    /// Every resource in the catalog, in unspecified order. Used by
+    /// relationship checks that must scan the whole graph.
+    pub fn iter_resources(&self) -> impl Iterator<Item = &PuppetResource> {
+        self.resources
+            .values()
+            .flat_map(|by_title| by_title.values())
+    }
 }
 
 pub struct PuppetEvaluator {
@@ -1561,7 +1569,7 @@ impl<'a> EvalContext<'a> {
     }
 }
 
-fn normalize_rtype(rtype: &str) -> String {
+pub(crate) fn normalize_rtype(rtype: &str) -> String {
     rtype.to_lowercase().replace("__", "::")
 }
 

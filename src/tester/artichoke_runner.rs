@@ -766,7 +766,7 @@ begin
     end
 
     class Example
-      attr_accessor :name, :expectations, :facts, :params, :title, :subject
+      attr_accessor :name, :expectations, :facts, :params, :title, :subject, :node
       def initialize(name)
         @name = name
         @expectations = []
@@ -774,6 +774,7 @@ begin
         @params = nil
         @title = nil
         @subject = nil
+        @node = nil
       end
     end
 
@@ -835,6 +836,10 @@ begin
       @current_example.facts = normalize_value(resolve_let(:facts))
       @current_example.params = normalize_value(resolve_let(:params))
       @current_example.title = normalize_value(resolve_let(:title))
+      # `let(:node) {{ 'foo.example.com' }}` — the node name from which real
+      # Puppet/PDK derives the $fqdn/$hostname/$domain facts. Captured here so
+      # the Rust evaluator can synthesize those facts (see regent_spec.rs).
+      @current_example.node = normalize_value(resolve_let(:node))
       @current_example.subject = resolve_subject
       @tests << @current_example
       @current_example = nil
@@ -863,12 +868,17 @@ begin
           "name" => example.name,
           "subject" => example.subject,
           "title" => example.title,
+          "node" => example.node,
           "facts" => example.facts,
           "params" => example.params,
           "expectations" => example.expectations.map do |exp|
             case exp.kind
             when "compile"
-              {{ "kind" => "compile", "negate" => exp.negate }}
+              {{
+                "kind" => "compile",
+                "negate" => exp.negate,
+                "check_all_deps" => exp.check_all_deps
+              }}
             when "raise_error"
               {{
                 "kind" => "raise_error",
@@ -881,6 +891,7 @@ begin
                 "resource_type" => exp.resource_type,
                 "title" => exp.title,
                 "attributes" => normalize_value(exp.attributes || {{}}),
+                "relationships" => exp.relationships,
                 "negate" => exp.negate
               }}
             end
@@ -950,13 +961,17 @@ begin
   end
 
   class ContainMatcher
-    attr_reader :resource_type, :title, :attributes, :absent_attributes
+    attr_reader :resource_type, :title, :attributes, :absent_attributes, :relationships
 
     def initialize(resource_type, title)
       @resource_type = resource_type
       @title = title
       @attributes = {{}}
       @absent_attributes = []
+      # Each entry: {{ "kind" => "require"|"before"|"notify"|"subscribe",
+      #               "target" => "Type[title]" }}. The Rust evaluation layer
+      # resolves these against the compiled catalog's relationship edges.
+      @relationships = []
     end
 
     def with(attrs = nil, **kwargs)
@@ -973,10 +988,21 @@ begin
       self
     end
 
-    def that_requires(*); self; end
-    def that_comes_before(*); self; end
-    def that_notifies(*); self; end
-    def that_subscribes_to(*); self; end
+    # Relationship matchers. Each accepts one reference or an array of them,
+    # written as `Type['title']` strings (rspec-puppet's `that_requires(...)`
+    # &c.). The references are collected and validated in Rust against the
+    # catalog's dependency edges.
+    def that_requires(*refs); add_relationships("require", refs); end
+    def that_comes_before(*refs); add_relationships("before", refs); end
+    def that_notifies(*refs); add_relationships("notify", refs); end
+    def that_subscribes_to(*refs); add_relationships("subscribe", refs); end
+
+    def add_relationships(kind, refs)
+      refs.flatten.each do |ref|
+        @relationships << {{ "kind" => kind, "target" => ref.to_s }}
+      end
+      self
+    end
     def only_with(attrs = nil, **kwargs)
       with(attrs, **kwargs)
     end
@@ -1024,6 +1050,18 @@ begin
       @expect_error = true
       args.each {{ |a| @error_message = a if a.is_a?(Regexp) || a.is_a?(String) }}
       self
+    end
+
+    # `compile.with_all_deps` — also assert that every require/before/notify/
+    # subscribe reference in the compiled catalog points at a resource that
+    # actually exists. The Rust evaluation layer performs the check.
+    def with_all_deps
+      @check_all_deps = true
+      self
+    end
+
+    def check_all_deps
+      @check_all_deps ? true : false
     end
 
     def kind
