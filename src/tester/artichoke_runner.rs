@@ -8,17 +8,61 @@ use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
 
-/// Returns `true` when `path` lives under `<spec_dir>/acceptance/`.
+/// Default rspec discovery pattern when none is supplied — mirrors
+/// puppetlabs_spec_helper's `:spec_standalone` task. Excludes `spec/acceptance`
+/// (beaker) and `spec/fixtures` (vendored dependency modules).
+pub const DEFAULT_SPEC_PATTERN: &str =
+    "spec/{aliases,classes,defines,functions,hosts,integration,plans,tasks,type_aliases,types,unit}/**/*_spec.rb";
+
+/// Parse the leading `spec/{a,b,c}/...` brace list out of an rspec `--pattern`,
+/// returning the allowed top-level directory names under `spec/`. Returns
+/// `None` when the pattern isn't of that shape (e.g. a single explicit file),
+/// in which case the caller applies only the hard exclusions.
+fn allowed_spec_dirs(pattern: &str) -> Option<Vec<String>> {
+    let rest = pattern.strip_prefix("spec/")?;
+    let inner = rest.strip_prefix('{')?;
+    let close = inner.find('}')?;
+    Some(
+        inner[..close]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Decide whether a discovered `*_spec.rb` under `spec_dir` should run in the
+/// embedded unit engine.
 ///
-/// Acceptance specs are beaker-driven (they `require 'beaker-rspec'` and run
-/// against real or virtualized nodes over SSH), so the embedded unit-test
-/// engine must not try to load them — matching puppetlabs_spec_helper, which
-/// excludes `spec/acceptance` from its standalone `rspec` run.
-fn is_acceptance_spec(spec_dir: &std::path::Path, path: &std::path::Path) -> bool {
-    path.strip_prefix(spec_dir)
-        .ok()
-        .and_then(|rel| rel.components().next())
-        .map_or(false, |first| first.as_os_str() == "acceptance")
+/// `spec/acceptance/**` is always skipped (beaker-driven, `require
+/// 'beaker-rspec'`), and `spec/fixtures/**` is always skipped (vendored
+/// dependency modules carry their own specs that are not under test here) —
+/// these hold at any depth, so a fixture module's own `spec/acceptance` is
+/// excluded too. When `pattern` carries a `spec/{...}` whitelist, the file's
+/// first path component must additionally be one of those dirs.
+fn spec_is_runnable(spec_dir: &std::path::Path, path: &std::path::Path, pattern: &str) -> bool {
+    let Ok(rel) = path.strip_prefix(spec_dir) else {
+        return true;
+    };
+
+    // Hard exclusions at any depth (covers fixture modules' nested specs).
+    for component in rel.components() {
+        let name = component.as_os_str();
+        if name == "acceptance" || name == "fixtures" {
+            return false;
+        }
+    }
+
+    // Honor the pattern's top-level directory whitelist when it has one. A
+    // custom non-brace pattern (e.g. an explicit single file) carries no
+    // whitelist, so we defer to the hard exclusions above.
+    match allowed_spec_dirs(pattern) {
+        Some(allowed) => match rel.components().next() {
+            Some(first) => allowed.iter().any(|dir| first.as_os_str() == dir.as_str()),
+            None => false,
+        },
+        None => true,
+    }
 }
 
 /// Pure-Ruby reimplementation of `Hash#merge`, `Hash#merge!`, and `Hash#update`.
@@ -84,6 +128,11 @@ impl<'a> ArtichokeTestRunner<'a> {
         }
 
         eprintln!("Artichoke runner: discover spec files");
+        let pattern = self
+            .config
+            .pattern
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SPEC_PATTERN.to_string());
         let mut spec_files = Vec::new();
         for entry in WalkDir::new(&spec_dir).into_iter().flatten() {
             let path = entry.path();
@@ -95,11 +144,12 @@ impl<'a> ArtichokeTestRunner<'a> {
             {
                 continue;
             }
-            // Acceptance tests (spec/acceptance/**) are driven by beaker against
-            // real nodes, not by the embedded unit-test engine. Skip them the way
-            // puppetlabs_spec_helper's :spec_standalone task does, so a module's
-            // `rspec`-style run doesn't try to `require 'beaker-rspec'`.
-            if is_acceptance_spec(&spec_dir, path) {
+            // Restrict to the module's own runnable specs: skip beaker-driven
+            // acceptance tests and vendored fixture modules, and honor the
+            // pattern's top-level dir whitelist (puppetlabs_spec_helper's
+            // :spec_standalone behavior) so we never try to `require
+            // 'beaker-rspec'`.
+            if !spec_is_runnable(&spec_dir, path, &pattern) {
                 continue;
             }
             spec_files.push(path.to_path_buf());
@@ -2463,38 +2513,70 @@ impl Default for Summary {
 
 #[cfg(test)]
 mod discovery_tests {
-    use super::is_acceptance_spec;
+    use super::{allowed_spec_dirs, spec_is_runnable, DEFAULT_SPEC_PATTERN};
     use std::path::Path;
+
+    fn runnable(rel: &str) -> bool {
+        spec_is_runnable(
+            Path::new("/mod/spec"),
+            &Path::new("/mod/spec").join(rel),
+            DEFAULT_SPEC_PATTERN,
+        )
+    }
 
     #[test]
     fn skips_acceptance_specs() {
-        let spec = Path::new("/mod/spec");
-        assert!(is_acceptance_spec(
-            spec,
-            Path::new("/mod/spec/acceptance/ssh_spec.rb")
-        ));
-        assert!(is_acceptance_spec(
-            spec,
-            Path::new("/mod/spec/acceptance/suites/install_spec.rb")
+        assert!(!runnable("acceptance/ssh_spec.rb"));
+        assert!(!runnable("acceptance/suites/install_spec.rb"));
+    }
+
+    #[test]
+    fn skips_fixture_module_specs() {
+        // Vendored dependency modules carry their own specs (including their
+        // own beaker acceptance suites) that are not under test here.
+        assert!(!runnable("fixtures/modules/concat/spec/classes/concat_spec.rb"));
+        assert!(!runnable(
+            "fixtures/modules/concat/spec/acceptance/fragments_spec.rb"
         ));
     }
 
     #[test]
     fn keeps_unit_specs() {
+        assert!(runnable("classes/ssh_spec.rb"));
+        assert!(runnable("defines/config_spec.rb"));
+        assert!(runnable("unit/facter/foo_spec.rb"));
+    }
+
+    #[test]
+    fn whitelist_excludes_unlisted_top_dirs() {
+        // Not in the default brace list → not run.
+        assert!(!runnable("acceptance_helpers/util_spec.rb"));
+        assert!(!runnable("spec_helper_spec.rb"));
+    }
+
+    #[test]
+    fn custom_single_file_pattern_defers_to_hard_exclusions() {
         let spec = Path::new("/mod/spec");
-        assert!(!is_acceptance_spec(
+        let pattern = "spec/classes/ssh_spec.rb";
+        assert!(spec_is_runnable(
             spec,
-            Path::new("/mod/spec/classes/ssh_spec.rb")
+            &spec.join("classes/ssh_spec.rb"),
+            pattern
         ));
-        assert!(!is_acceptance_spec(
+        // Hard exclusions still apply even with a custom pattern.
+        assert!(!spec_is_runnable(
             spec,
-            Path::new("/mod/spec/defines/config_spec.rb")
+            &spec.join("acceptance/x_spec.rb"),
+            pattern
         ));
-        // A directory merely named with an "acceptance" prefix is not the
-        // acceptance suite and must still run.
-        assert!(!is_acceptance_spec(
-            spec,
-            Path::new("/mod/spec/acceptance_helpers/util_spec.rb")
-        ));
+    }
+
+    #[test]
+    fn parses_brace_whitelist() {
+        let dirs = allowed_spec_dirs(DEFAULT_SPEC_PATTERN).unwrap();
+        assert!(dirs.contains(&"classes".to_string()));
+        assert!(dirs.contains(&"unit".to_string()));
+        assert!(!dirs.contains(&"acceptance".to_string()));
+        assert!(allowed_spec_dirs("spec/classes/ssh_spec.rb").is_none());
     }
 }

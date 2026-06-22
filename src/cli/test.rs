@@ -18,7 +18,8 @@ impl TestCommand {
         coverage: bool,
         coverage_dir: Option<&Path>,
     ) -> anyhow::Result<()> {
-        let effective_pattern = pattern.unwrap_or("spec/{aliases,classes,defines,functions,hosts,integration,plans,tasks,type_aliases,types,unit}/**/*_spec.rb");
+        let effective_pattern =
+            pattern.unwrap_or(regent::tester::artichoke_runner::DEFAULT_SPEC_PATTERN);
         println!(
             "{} Running tests with pattern: {}",
             "⚙".cyan(),
