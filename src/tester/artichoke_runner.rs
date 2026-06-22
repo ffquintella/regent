@@ -8,6 +8,19 @@ use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
 
+/// Returns `true` when `path` lives under `<spec_dir>/acceptance/`.
+///
+/// Acceptance specs are beaker-driven (they `require 'beaker-rspec'` and run
+/// against real or virtualized nodes over SSH), so the embedded unit-test
+/// engine must not try to load them — matching puppetlabs_spec_helper, which
+/// excludes `spec/acceptance` from its standalone `rspec` run.
+fn is_acceptance_spec(spec_dir: &std::path::Path, path: &std::path::Path) -> bool {
+    path.strip_prefix(spec_dir)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map_or(false, |first| first.as_os_str() == "acceptance")
+}
+
 /// Pure-Ruby reimplementation of `Hash#merge`, `Hash#merge!`, and `Hash#update`.
 ///
 /// Artichoke's Rust-backed `Hash#merge` rejects a trailing implicit hash —
@@ -74,14 +87,22 @@ impl<'a> ArtichokeTestRunner<'a> {
         let mut spec_files = Vec::new();
         for entry in WalkDir::new(&spec_dir).into_iter().flatten() {
             let path = entry.path();
-            if path.is_file()
-                && path
+            if !path.is_file()
+                || !path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map_or(false, |name| name.ends_with("_spec.rb"))
             {
-                spec_files.push(path.to_path_buf());
+                continue;
             }
+            // Acceptance tests (spec/acceptance/**) are driven by beaker against
+            // real nodes, not by the embedded unit-test engine. Skip them the way
+            // puppetlabs_spec_helper's :spec_standalone task does, so a module's
+            // `rspec`-style run doesn't try to `require 'beaker-rspec'`.
+            if is_acceptance_spec(&spec_dir, path) {
+                continue;
+            }
+            spec_files.push(path.to_path_buf());
         }
 
         eprintln!("Artichoke runner: build load paths");
@@ -2437,5 +2458,43 @@ impl Default for Summary {
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::is_acceptance_spec;
+    use std::path::Path;
+
+    #[test]
+    fn skips_acceptance_specs() {
+        let spec = Path::new("/mod/spec");
+        assert!(is_acceptance_spec(
+            spec,
+            Path::new("/mod/spec/acceptance/ssh_spec.rb")
+        ));
+        assert!(is_acceptance_spec(
+            spec,
+            Path::new("/mod/spec/acceptance/suites/install_spec.rb")
+        ));
+    }
+
+    #[test]
+    fn keeps_unit_specs() {
+        let spec = Path::new("/mod/spec");
+        assert!(!is_acceptance_spec(
+            spec,
+            Path::new("/mod/spec/classes/ssh_spec.rb")
+        ));
+        assert!(!is_acceptance_spec(
+            spec,
+            Path::new("/mod/spec/defines/config_spec.rb")
+        ));
+        // A directory merely named with an "acceptance" prefix is not the
+        // acceptance suite and must still run.
+        assert!(!is_acceptance_spec(
+            spec,
+            Path::new("/mod/spec/acceptance_helpers/util_spec.rb")
+        ));
     }
 }
