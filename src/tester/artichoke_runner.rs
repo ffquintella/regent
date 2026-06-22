@@ -8,6 +8,36 @@ use crate::ruby_interop::RubyEnvironment;
 
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
 
+/// Workaround for Artichoke treating a regex `^` as string-start rather than
+/// line-start. Ruby's `^`/`$` are always line-anchored, so `"a\nb".gsub(/^/, …)`
+/// must touch every line. Specs lean on this for the common heredoc margin
+/// idiom (`<<-END.gsub(%r{^\s+\|}, '')`); without the fix only the first line is
+/// stripped, corrupting every template-content comparison. We redefine
+/// `String#gsub`/`gsub!` to apply a `^`-anchored pattern per line (exactly
+/// Ruby's semantics) and otherwise defer to the native implementation.
+pub(crate) const GSUB_MULTILINE_FIX: &str = r#"
+class String
+  unless method_defined?(:__regent_native_gsub)
+    alias __regent_native_gsub gsub
+    def gsub(*args, &block)
+      pattern = args[0]
+      if pattern.is_a?(Regexp) && pattern.source.start_with?("^") && include?("\n")
+        return split("\n", -1).map { |line| line.__regent_native_gsub(*args, &block) }.join("\n")
+      end
+      __regent_native_gsub(*args, &block)
+    end
+
+    alias __regent_native_gsub_bang gsub!
+    def gsub!(*args, &block)
+      replaced = gsub(*args, &block)
+      return nil if replaced == self
+      replace(replaced)
+      self
+    end
+  end
+end
+"#;
+
 /// Default rspec discovery pattern when none is supplied — mirrors
 /// puppetlabs_spec_helper's `:spec_standalone` task. Excludes `spec/acceptance`
 /// (beaker) and `spec/fixtures` (vendored dependency modules).
@@ -2534,6 +2564,7 @@ end
         // Apply the Hash#merge keyword-binding workaround immediately (not as a
         // require-on-demand virtual file) so every spec and helper sees it.
         env.eval(HASH_MERGE_FIX)?;
+        env.eval(GSUB_MULTILINE_FIX)?;
 
         Ok(())
     }

@@ -1530,15 +1530,28 @@ impl<'a> EvalContext<'a> {
                             .unwrap_or_else(|| PuppetValue::Hash(HashMap::new()));
                         PuppetValue::String(render_epp(&template, &params))
                     }
-                    "template" | "inline_template" => {
-                        // ERB templates aren't supported yet; fall back to a
-                        // placeholder so failures surface as content mismatches
-                        // rather than crashes.
-                        let source = arg_values
+                    "template" => {
+                        // `template('mod/file.erb')` — render the named ERB file
+                        // against the current scope. Falls back to a placeholder
+                        // when the file can't be found/read.
+                        let reference = arg_values
                             .first()
                             .map(|value| value.as_string())
                             .unwrap_or_default();
-                        PuppetValue::String(format!("<{name}:{source}>"))
+                        match self
+                            .resolve_template_file(&reference)
+                            .and_then(|path| std::fs::read_to_string(path).ok())
+                        {
+                            Some(tpl) => PuppetValue::String(render_erb(&tpl, &self.vars)),
+                            None => PuppetValue::String(format!("<template:{reference}>")),
+                        }
+                    }
+                    "inline_template" => {
+                        let tpl = arg_values
+                            .first()
+                            .map(|value| value.as_string())
+                            .unwrap_or_default();
+                        PuppetValue::String(render_erb(&tpl, &self.vars))
                     }
                     // Puppet's numeric type-conversion functions. `Integer('7')`
                     // must yield the integer `7`, not `Undef` — otherwise a
@@ -3848,6 +3861,287 @@ fn render_epp(template: &str, params: &PuppetValue) -> String {
     };
     let mut idx = 0;
     render_epp_block(&tokens, &mut idx, &params_map, true)
+}
+
+// ---------------------------------------------------------------------------
+// ERB templates (`template()` / `inline_template()`)
+// ---------------------------------------------------------------------------
+
+/// A lexed ERB fragment.
+enum ErbToken {
+    Text(String),
+    /// `<%= EXPR %>` — output the expression.
+    Output(String),
+    /// `<% CODE %>` — control flow (`if`/`unless`/`each`/`else`/`end`).
+    Code(String),
+}
+
+/// A parsed ERB node tree.
+enum ErbNode {
+    Text(String),
+    Output(String),
+    If {
+        cond: String,
+        negate: bool,
+        body: Vec<ErbNode>,
+        else_body: Vec<ErbNode>,
+    },
+    Each {
+        iterable: String,
+        var: String,
+        body: Vec<ErbNode>,
+    },
+}
+
+/// Render the subset of ERB that Puppet `template()` files use in practice:
+/// `<% if/unless EXPR -%>` … `<% else -%>` … `<% end -%>`, `<% ARR.each do |v|
+/// -%>` … `<% end -%>`, `<%= EXPR %>` output, and `-%>`/`<%-` whitespace
+/// trimming. Instance variables (`@x`) resolve against the Puppet `scope`.
+fn render_erb(template: &str, scope: &HashMap<String, PuppetValue>) -> String {
+    let tokens = tokenize_erb(template);
+    let mut idx = 0;
+    let nodes = parse_erb_nodes(&tokens, &mut idx);
+    let mut out = String::new();
+    render_erb_nodes(&nodes, scope, &mut out);
+    out
+}
+
+fn tokenize_erb(template: &str) -> Vec<ErbToken> {
+    let chars: Vec<char> = template.chars().collect();
+    let mut tokens: Vec<ErbToken> = Vec::new();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<' && chars.get(i + 1) == Some(&'%') {
+            // `<%-` trims trailing whitespace of the preceding text line.
+            let lead_trim = chars.get(i + 2) == Some(&'-');
+            if lead_trim {
+                while text.ends_with(' ') || text.ends_with('\t') {
+                    text.pop();
+                }
+            }
+            tokens.push(ErbToken::Text(std::mem::take(&mut text)));
+            let is_output = chars.get(i + 2) == Some(&'=');
+            let mut j = i + 2;
+            // Find the closing `%>`.
+            while j < chars.len() && !(chars[j] == '%' && chars.get(j + 1) == Some(&'>')) {
+                j += 1;
+            }
+            let mut code: String = chars[i + 2..j.min(chars.len())].iter().collect();
+            // A trailing `-` (`-%>`) trims the newline that follows the tag.
+            let trail_trim = code.ends_with('-');
+            if trail_trim {
+                code.pop();
+            }
+            if is_output {
+                code = code.trim_start_matches('=').to_string();
+                tokens.push(ErbToken::Output(code.trim().to_string()));
+            } else {
+                let trimmed = code.trim_start_matches('-').trim().to_string();
+                tokens.push(ErbToken::Code(trimmed));
+            }
+            i = j + 2; // skip past `%>`
+            if trail_trim {
+                // Drop a single immediately-following newline.
+                if chars.get(i) == Some(&'\n') {
+                    i += 1;
+                } else if chars.get(i) == Some(&'\r') && chars.get(i + 1) == Some(&'\n') {
+                    i += 2;
+                }
+            }
+        } else {
+            text.push(chars[i]);
+            i += 1;
+        }
+    }
+    tokens.push(ErbToken::Text(text));
+    tokens
+}
+
+/// Parse a flat token stream into nodes until a block terminator (`end`,
+/// `else`, `elsif`) or end of stream. `*idx` is left pointing at the terminator
+/// code token (if any) so the caller can branch on it.
+fn parse_erb_nodes(tokens: &[ErbToken], idx: &mut usize) -> Vec<ErbNode> {
+    let mut nodes = Vec::new();
+    while *idx < tokens.len() {
+        match &tokens[*idx] {
+            ErbToken::Text(t) => {
+                if !t.is_empty() {
+                    nodes.push(ErbNode::Text(t.clone()));
+                }
+                *idx += 1;
+            }
+            ErbToken::Output(code) => {
+                nodes.push(ErbNode::Output(code.clone()));
+                *idx += 1;
+            }
+            ErbToken::Code(code) => {
+                let lower = code.trim();
+                if lower == "end" || lower == "else" || lower.starts_with("elsif") {
+                    // Terminator for the enclosing block — stop, leave *idx here.
+                    return nodes;
+                }
+                if let Some(rest) = lower
+                    .strip_prefix("if ")
+                    .map(|r| (r, false))
+                    .or_else(|| lower.strip_prefix("unless ").map(|r| (r, true)))
+                {
+                    let (cond, negate) = rest;
+                    let cond = cond.to_string();
+                    *idx += 1;
+                    let body = parse_erb_nodes(tokens, idx);
+                    // Handle else/elsif chains.
+                    let mut else_body = Vec::new();
+                    if let Some(ErbToken::Code(term)) = tokens.get(*idx) {
+                        let term = term.trim().to_string();
+                        if term == "else" {
+                            *idx += 1;
+                            else_body = parse_erb_nodes(tokens, idx);
+                        } else if let Some(elsif_cond) = term.strip_prefix("elsif ") {
+                            // Represent `elsif` as a nested if in the else branch.
+                            let nested = ErbNode::If {
+                                cond: elsif_cond.to_string(),
+                                negate: false,
+                                body: {
+                                    *idx += 1;
+                                    parse_erb_nodes(tokens, idx)
+                                },
+                                else_body: Vec::new(),
+                            };
+                            else_body = vec![nested];
+                        }
+                    }
+                    // Consume the matching `end`.
+                    if matches!(tokens.get(*idx), Some(ErbToken::Code(t)) if t.trim() == "end") {
+                        *idx += 1;
+                    }
+                    nodes.push(ErbNode::If {
+                        cond,
+                        negate,
+                        body,
+                        else_body,
+                    });
+                } else if let Some((iterable, var)) = parse_erb_each(lower) {
+                    *idx += 1;
+                    let body = parse_erb_nodes(tokens, idx);
+                    if matches!(tokens.get(*idx), Some(ErbToken::Code(t)) if t.trim() == "end") {
+                        *idx += 1;
+                    }
+                    nodes.push(ErbNode::Each {
+                        iterable,
+                        var,
+                        body,
+                    });
+                } else {
+                    // Unsupported code (assignment, comment, …): ignore.
+                    *idx += 1;
+                }
+            }
+        }
+    }
+    nodes
+}
+
+/// Parse `<iterable>.each do |<var>|` → (iterable, var).
+fn parse_erb_each(code: &str) -> Option<(String, String)> {
+    let dot = code.find(".each")?;
+    let iterable = code[..dot].trim().to_string();
+    let bar_open = code.find('|')?;
+    let bar_close = code[bar_open + 1..].find('|')? + bar_open + 1;
+    let var = code[bar_open + 1..bar_close].trim().to_string();
+    if iterable.is_empty() || var.is_empty() {
+        return None;
+    }
+    Some((iterable, var))
+}
+
+fn render_erb_nodes(nodes: &[ErbNode], scope: &HashMap<String, PuppetValue>, out: &mut String) {
+    for node in nodes {
+        match node {
+            ErbNode::Text(t) => out.push_str(t),
+            ErbNode::Output(code) => {
+                let value = erb_eval_expr(code, scope);
+                if !matches!(value, PuppetValue::Undef) {
+                    out.push_str(&value.as_string());
+                }
+            }
+            ErbNode::If {
+                cond,
+                negate,
+                body,
+                else_body,
+            } => {
+                let truthy = erb_eval_cond(cond, scope) ^ negate;
+                if truthy {
+                    render_erb_nodes(body, scope, out);
+                } else {
+                    render_erb_nodes(else_body, scope, out);
+                }
+            }
+            ErbNode::Each {
+                iterable,
+                var,
+                body,
+            } => {
+                if let PuppetValue::Array(items) = erb_eval_expr(iterable, scope) {
+                    for item in items {
+                        let mut inner = scope.clone();
+                        inner.insert(var.clone(), item);
+                        render_erb_nodes(body, &inner, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve an ERB variable reference (`@name` or a bare loop variable `name`)
+/// against the scope.
+fn erb_lookup(name: &str, scope: &HashMap<String, PuppetValue>) -> PuppetValue {
+    let key = name.trim().trim_start_matches('@');
+    scope.get(key).cloned().unwrap_or(PuppetValue::Undef)
+}
+
+/// Evaluate an ERB output/iterable expression: a variable, or `VAR.join('sep')`.
+fn erb_eval_expr(code: &str, scope: &HashMap<String, PuppetValue>) -> PuppetValue {
+    let code = code.trim();
+    if let Some(dot) = code.find(".join(") {
+        let base = &code[..dot];
+        let after = &code[dot + ".join(".len()..];
+        let sep = after
+            .rsplit_once(')')
+            .map(|(inner, _)| inner)
+            .unwrap_or(after)
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"');
+        if let PuppetValue::Array(items) = erb_lookup(base, scope) {
+            let joined = items
+                .iter()
+                .map(|v| v.as_string())
+                .collect::<Vec<_>>()
+                .join(sep);
+            return PuppetValue::String(joined);
+        }
+        return PuppetValue::Undef;
+    }
+    erb_lookup(code, scope)
+}
+
+/// Evaluate an ERB `if`/`unless` condition. Supports `EXPR != nil`, `EXPR ==
+/// nil`, and a bare truthiness test.
+fn erb_eval_cond(code: &str, scope: &HashMap<String, PuppetValue>) -> bool {
+    let code = code.trim();
+    if let Some(base) = code.strip_suffix("!= nil").map(str::trim) {
+        return !matches!(erb_lookup(base, scope), PuppetValue::Undef);
+    }
+    if let Some(base) = code.strip_suffix("== nil").map(str::trim) {
+        return matches!(erb_lookup(base, scope), PuppetValue::Undef);
+    }
+    match erb_eval_expr(code, scope) {
+        PuppetValue::Undef => false,
+        PuppetValue::Bool(b) => b,
+        _ => true,
+    }
 }
 
 /// Render tokens starting at `*idx` until the closing `}` of the current block
