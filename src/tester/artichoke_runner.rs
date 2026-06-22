@@ -34,6 +34,20 @@ class String
       replace(replaced)
       self
     end
+
+    # Same `^` line-anchor fix for String#match: try each line and return the
+    # first match, emulating Ruby's line-anchored `^`.
+    alias __regent_native_match match
+    def match(pattern, *rest)
+      if pattern.is_a?(Regexp) && pattern.source.start_with?("^") && include?("\n")
+        split("\n", -1).each do |line|
+          m = line.__regent_native_match(pattern, *rest)
+          return m if m
+        end
+        return nil
+      end
+      __regent_native_match(pattern, *rest)
+    end
   end
 end
 "#;
@@ -814,6 +828,8 @@ end
             .collect::<Vec<String>>()
             .join(", ");
         let supported_os_literal = render_supported_os_ruby(supported_os);
+        let facter_sources_literal =
+            format!("{:?}", read_facter_sources(&self.config.module_path));
         format!(
             r##"
 begin
@@ -859,15 +875,17 @@ begin
     end
     class Context
       attr_reader :description, :subject, :klass
+      attr_accessor :before_hooks
       def initialize(description, subject, klass)
         @description = description
         @subject = subject
         @klass = klass
+        @before_hooks = []
       end
     end
 
     class Example
-      attr_accessor :name, :expectations, :facts, :params, :title, :subject, :node
+      attr_accessor :name, :expectations, :facts, :params, :title, :subject, :node, :value_results
       def initialize(name)
         @name = name
         @expectations = []
@@ -876,6 +894,9 @@ begin
         @title = nil
         @subject = nil
         @node = nil
+        # Results of in-Ruby value assertions (`expect(x).to eq(y)`), each a
+        # hash with "passed" (bool) and "message" (string or nil).
+        @value_results = []
       end
     end
 
@@ -932,15 +953,33 @@ begin
       inst.send(name)
     end
 
+    # Register a `before(:each)` hook on the current context.
+    def self.register_before(block)
+      @contexts.last.before_hooks << block if block && !@contexts.empty?
+    end
+
+    # Record the outcome of an in-Ruby value assertion (`expect(x).to eq(y)`).
+    def self.add_value_result(passed, message)
+      @current_example.value_results << {{ "passed" => passed, "message" => message }} if @current_example
+    end
+
     def self.start_example(description)
       @example_index += 1
       prefix = @contexts.map(&:description).compact.join(" ")
       label = description || "example #{{@example_index}}"
       name = [prefix, label].reject(&:empty?).join(" ")
       @current_example = Example.new(name)
-      yield
       leaf = @contexts.last
       @current_group_instance = leaf ? leaf.klass.new : nil
+      # Run `before(:each)` hooks (outermost context first), then the example
+      # body. An exception in either is recorded as a failed value assertion so
+      # one bad example doesn't abort the whole spec file.
+      begin
+        @contexts.each {{ |ctx| ctx.before_hooks.each {{ |hook| hook.call }} }}
+        yield
+      rescue => e
+        @current_example.value_results << {{ "passed" => false, "message" => "#{{e.class}}: #{{e.message}}" }}
+      end
       @current_example.facts = normalize_value(resolve_let(:facts))
       @current_example.params = normalize_value(resolve_let(:params))
       @current_example.title = normalize_value(resolve_let(:title))
@@ -972,14 +1011,10 @@ begin
 
     def self.build_plan
       @tests.map do |example|
-        {{
-          "name" => example.name,
-          "subject" => example.subject,
-          "title" => example.title,
-          "node" => example.node,
-          "facts" => example.facts,
-          "params" => example.params,
-          "expectations" => example.expectations.map do |exp|
+        value_exps = example.value_results.map do |r|
+          {{ "kind" => "value_assertion", "passed" => r["passed"], "message" => r["message"] }}
+        end
+        matcher_exps = example.expectations.map do |exp|
             case exp.kind
             when "compile"
               {{
@@ -1016,7 +1051,15 @@ begin
                 "negate" => exp.negate
               }}
             end
-          end
+        end
+        {{
+          "name" => example.name,
+          "subject" => example.subject,
+          "title" => example.title,
+          "node" => example.node,
+          "facts" => example.facts,
+          "params" => example.params,
+          "expectations" => value_exps + matcher_exps
         }}
       end
     end
@@ -1089,17 +1132,59 @@ begin
     end
   end
 
+  # `eq`/`eql` value matcher for in-Ruby assertions (`expect(x).to eq(y)`),
+  # used by non-catalog specs such as custom-fact unit tests.
+  class ValueMatcher
+    def initialize(expected)
+      @expected = expected
+    end
+
+    def matches?(actual)
+      actual == @expected
+    end
+
+    def value_matcher?
+      true
+    end
+
+    def failure_message(actual, negate)
+      if negate
+        "expected #{{actual.inspect}} not to eq #{{@expected.inspect}}"
+      else
+        "expected #{{actual.inspect}} to eq #{{@expected.inspect}}"
+      end
+    end
+  end
+
   class ExpectationTarget
+    def initialize(actual = nil, has_value = false)
+      @actual = actual
+      @has_value = has_value
+    end
+
     def to(matcher)
-      matcher.instance_variable_set(:@negate, false) if matcher
-      RegentSpec.add_expectation(matcher)
+      apply(matcher, false)
     end
 
     def not_to(matcher)
-      matcher.instance_variable_set(:@negate, true) if matcher
-      RegentSpec.add_expectation(matcher)
+      apply(matcher, true)
     end
     alias to_not not_to
+
+    def apply(matcher, negate)
+      # Value matcher (`eq`) on a concrete value: evaluate now and record the
+      # pass/fail. Catalog/raise matchers continue to be collected into the plan.
+      # (Use is_a?, not respond_to?: Artichoke routes respond_to? through a
+      # top-level respond_to_missing? whose `super` has no target and raises.)
+      if matcher.is_a?(ValueMatcher)
+        ok = matcher.matches?(@actual)
+        ok = !ok if negate
+        RegentSpec.add_value_result(ok, ok ? nil : matcher.failure_message(@actual, negate))
+      else
+        matcher.instance_variable_set(:@negate, negate) if matcher
+        RegentSpec.add_expectation(matcher)
+      end
+    end
   end
 
   class ContainMatcher
@@ -1395,15 +1480,26 @@ begin
     str = name.to_s
     str.start_with?("contain_") || (str.start_with?("have_") && str.end_with?("_resource_count")) || super
   end
-  def before(*); end
+  def before(scope = nil, &block)
+    RegentSpec.register_before(block)
+  end
   def after(*); end
   def subject(*); end
-  # Block form `expect {{ ... }}.to raise_error(...)`: the block and any value
-  # argument are ignored; the returned target only meaningfully accepts a
-  # RaiseErrorMatcher (other matchers are handled via `is_expected`).
-  def expect(*_args, &_block)
-    ExpectationTarget.new
+  # `expect(value)` captures the value for an `eq`-style assertion; the block
+  # form `expect {{ ... }}.to raise_error(...)` ignores the block (the subject
+  # is already compiled by the evaluator). A value matcher evaluates against the
+  # captured value; a RaiseErrorMatcher is handled as before.
+  def expect(*args, &_block)
+    if args.empty?
+      ExpectationTarget.new
+    else
+      ExpectationTarget.new(args.first, true)
+    end
   end
+  def eq(expected)
+    ValueMatcher.new(expected)
+  end
+  alias eql eq
   def raise_error(*args)
     message = nil
     args.each {{ |a| message = a if a.is_a?(Regexp) || a.is_a?(String) }}
@@ -1411,6 +1507,116 @@ begin
   end
   def raise_exception(*args)
     raise_error(*args)
+  end
+
+  # Minimal Facter runtime so custom-fact unit specs
+  # (`Facter.add(:x) {{ setcode {{ … }} }}` + `Facter.fact(:x).value`) execute.
+  module Facter
+    @regent_facts = {{}}
+    def self.add(name, &block)
+      fact = RegentFact.new(name.to_s)
+      fact.instance_eval(&block) if block
+      @regent_facts[name.to_s] = fact
+      fact
+    end
+    def self.fact(name)
+      @regent_facts[name.to_s]
+    end
+    def self.value(name)
+      f = @regent_facts[name.to_s]
+      f ? f.value : nil
+    end
+    # Facter.clear drops cached *values*; our facts re-run their setcode each
+    # call, so there's nothing to purge.
+    def self.clear; end
+    def self.version; "4.0.0"; end
+
+    class RegentFact
+      def initialize(name)
+        @name = name
+        @setcode = nil
+        @static = nil
+        @has_static = false
+      end
+
+      def setcode(value = nil, &block)
+        if block
+          @setcode = block
+        else
+          @static = value
+          @has_static = true
+        end
+      end
+
+      def value
+        return @static if @has_static
+        return nil unless @setcode
+        # Facter swallows exceptions raised inside a setcode block and yields
+        # nil for that fact (e.g. a regex `match(...)[0]` on a non-matching
+        # command output), so mirror that rather than failing the example.
+        begin
+          @setcode.call
+        rescue
+          nil
+        end
+      end
+    end
+
+    module Util
+      class Fact; end
+      module Resolution
+        # Default to a truthy path so `which('ssh')` guards proceed; specs that
+        # care stub this via `allow(...).to receive(:which)`.
+        def self.which(cmd)
+          "/usr/bin/#{{cmd}}"
+        end
+        def self.exec(_cmd)
+          nil
+        end
+      end
+    end
+  end
+
+  # Just-enough rspec-mocks: `allow(obj).to receive(:m).with(args).and_return(v)`
+  # installs a singleton method on `obj` returning `v`.
+  def allow(obj)
+    RegentAllowTarget.new(obj)
+  end
+  class RegentAllowTarget
+    def initialize(obj)
+      @obj = obj
+    end
+    def to(matcher)
+      matcher.install(@obj) if matcher.respond_to?(:install)
+      @obj
+    end
+    def not_to(_matcher)
+      @obj
+    end
+    alias to_not not_to
+  end
+  def receive(method_name)
+    RegentReceiveMatcher.new(method_name)
+  end
+  class RegentReceiveMatcher
+    def initialize(method_name)
+      @method = method_name
+      @return = nil
+    end
+    def with(*_args)
+      self
+    end
+    def and_return(*values)
+      @return = values.length == 1 ? values.first : values
+      self
+    end
+    def install(obj)
+      rm = self
+      obj.define_singleton_method(@method) {{ |*_a| rm.return_value }}
+    end
+    def return_value
+      @return
+    end
   end
   # rspec-puppet-facts stub: returns an OS hash derived from the module's
   # metadata.json (operatingsystem_support), so generated specs that wrap
@@ -1504,6 +1710,14 @@ begin
     class DevError < Error; end
   end
   failures = []
+  # Register the module's custom facts (lib/facter/**/*.rb) so unit specs that
+  # exercise them via `Facter.fact(:x).value` resolve. Best-effort.
+  begin
+    __regent_facter_sources = {facter_sources_literal}
+    eval(__regent_facter_sources) unless __regent_facter_sources.empty?
+  rescue => e
+    stderr << "facter load: #{{e.class}}: #{{e.message}}\n"
+  end
   spec_files = [{spec_file_literals}]
   spec_files.each do |path|
     begin
@@ -2638,6 +2852,30 @@ impl SupportedOs {
             format!("{}-{}-x86_64", self.os.to_lowercase(), self.release)
         }
     }
+}
+
+/// Concatenate the module's custom-fact Ruby (`lib/facter/**/*.rb`) so the
+/// embedded Facter runtime can register them for fact unit specs. Returns an
+/// empty string when there is no `lib/facter` tree.
+fn read_facter_sources(module_path: &std::path::Path) -> String {
+    let mut sources = Vec::new();
+    let mut stack = vec![module_path.join("lib").join("facter")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rb") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    sources.push(content);
+                }
+            }
+        }
+    }
+    sources.join("\n")
 }
 
 fn render_supported_os_ruby(entries: &[SupportedOs]) -> String {

@@ -101,6 +101,16 @@ pub enum Expectation {
         #[serde(default)]
         negate: bool,
     },
+    /// An in-Ruby value assertion (`expect(x).to eq(y)`) already evaluated by
+    /// the DSL — used by non-catalog specs (e.g. custom-fact unit tests). The
+    /// result is carried through verbatim.
+    #[serde(rename = "value_assertion")]
+    ValueAssertion {
+        #[serde(default)]
+        passed: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
 }
 
 /// One relationship assertion from a `contain_*` matcher, e.g.
@@ -418,6 +428,15 @@ impl RegentSpecRunner {
                         (true, true) => failures.push(format!(
                             "expected catalog NOT to have {count} {label}resource(s), but it did"
                         )),
+                    }
+                }
+                Expectation::ValueAssertion { passed, message } => {
+                    if !*passed {
+                        failures.push(
+                            message
+                                .clone()
+                                .unwrap_or_else(|| "value assertion failed".to_string()),
+                        );
                     }
                 }
                 Expectation::AllowValue { values, negate } => {
