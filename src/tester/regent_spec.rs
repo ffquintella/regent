@@ -514,25 +514,23 @@ impl RegentSpecRunner {
             self.evaluator
                 .evaluate_define_traced(subject, title, facts, params)
                 .with_context(|| format!("define {subject}"))
+        } else if self.evaluator.is_class(subject) {
+            // The class exists: surface its real compile error verbatim rather
+            // than wrapping it in a misleading "not found" context.
+            self.evaluator.evaluate_class_traced(subject, facts, params)
         } else {
-            self.evaluator
-                .evaluate_class_traced(subject, facts, params)
-                .with_context(|| {
-                    let known = self.evaluator.class_names();
-                    if known.is_empty() {
-                        format!(
-                            "class {subject}: no classes were loaded \
-                            (check that manifests/ exists and parses)"
-                        )
-                    } else {
-                        let preview: Vec<String> = known.iter().take(20).cloned().collect();
-                        format!(
-                            "class {subject}: not found among {} loaded classes (e.g. {})",
-                            known.len(),
-                            preview.join(", ")
-                        )
-                    }
-                })
+            let known = self.evaluator.class_names();
+            let detail = if known.is_empty() {
+                "no classes were loaded (check that manifests/ exists and parses)".to_string()
+            } else {
+                let preview: Vec<String> = known.iter().take(20).cloned().collect();
+                format!(
+                    "not found among {} loaded classes (e.g. {})",
+                    known.len(),
+                    preview.join(", ")
+                )
+            };
+            Err(anyhow::anyhow!("class {subject}: {detail}"))
         }
     }
 

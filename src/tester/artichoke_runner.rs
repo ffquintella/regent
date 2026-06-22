@@ -1000,7 +1000,10 @@ begin
       when Array
         value.map {{ |item| normalize_value(item) }}
       when Symbol
-        value.to_s
+        # rspec-puppet uses the bare symbol `:undef` to mean Puppet `undef`;
+        # map it to nil (→ JSON null → PuppetValue::Undef). Any other symbol is
+        # a plain string value.
+        value == :undef ? nil : value.to_s
       when Regexp
         {{ "__regex__" => value.source }}
       else

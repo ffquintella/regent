@@ -169,6 +169,10 @@ impl PuppetEvaluator {
         self.module.defines.contains_key(name)
     }
 
+    pub fn is_class(&self, name: &str) -> bool {
+        self.module.classes.contains_key(name)
+    }
+
     /// Whether `type_name` (a `types/` alias such as `Ssh::Yes_no` or a built-in
     /// data type) admits `value`. Returns `None` when the name is neither a
     /// known alias nor a built-in data type, so the caller can report the
@@ -510,6 +514,11 @@ fn discover_fixture_module_paths(module_path: &Path) -> Vec<std::path::PathBuf> 
 struct ClassDef {
     name: String,
     params: HashMap<String, Expr>,
+    /// Declared data type per parameter (`Enum['a','b'] $x`), when annotated.
+    /// Used to validate passed/defaulted values during compilation.
+    param_types: HashMap<String, TypeSpec>,
+    /// Parameters declared without a default value (required at the call site).
+    required_params: HashSet<String>,
     parent: Option<String>,
     body: Vec<Stmt>,
     origin_file: Option<PathBuf>,
@@ -519,8 +528,19 @@ struct ClassDef {
 struct DefineDef {
     name: String,
     params: HashMap<String, Expr>,
+    param_types: HashMap<String, TypeSpec>,
+    required_params: HashSet<String>,
     body: Vec<Stmt>,
     origin_file: Option<PathBuf>,
+}
+
+/// The parsed parameter list of a class or define: default-value expressions
+/// and (where annotated) declared data types, keyed by parameter name, plus
+/// the set of parameters declared without a default (required).
+struct ParsedParams {
+    params: HashMap<String, Expr>,
+    types: HashMap<String, TypeSpec>,
+    required: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -837,6 +857,44 @@ impl<'a> EvalContext<'a> {
         }
     }
 
+    /// Validate the parameters of the class/define under test against their
+    /// declared data types. To avoid false negatives on the many valid-value
+    /// compiles, only values *explicitly passed* via `let(:params)` are
+    /// type-checked (declared defaults are trusted); required parameters with
+    /// no supplied value raise the way Puppet does. Error text mirrors Puppet's
+    /// (`expects a <Type> value` plus the `Error while evaluating a Resource
+    /// Statement` wrapper) so spec `raise_error(/…/)` message constraints match.
+    fn validate_subject_params(
+        &self,
+        subject: &str,
+        param_types: &HashMap<String, TypeSpec>,
+        required: &HashSet<String>,
+        passed: &HashSet<String>,
+    ) -> Result<()> {
+        for name in required {
+            if !passed.contains(name) {
+                return Err(anyhow::anyhow!(
+                    "{subject}: expects a value for parameter '{name}'"
+                ));
+            }
+        }
+        for (name, ty) in param_types {
+            if !passed.contains(name) {
+                continue;
+            }
+            let value = self.vars.get(name).cloned().unwrap_or(PuppetValue::Undef);
+            if !eval_type_match(&value, ty, &self.module.type_aliases) {
+                return Err(anyhow::anyhow!(
+                    "{subject}: parameter '{name}' {}, got {} \
+                     (Error while evaluating a Resource Statement)",
+                    expects_clause(ty, &self.module.type_aliases),
+                    value.as_string()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn evaluate_class(&mut self, name: &str) -> Result<()> {
         if self.evaluated_classes.contains(name) {
             return Ok(());
@@ -864,6 +922,22 @@ impl<'a> EvalContext<'a> {
         self.apply_param_defaults(&class_def.params, &mut local_vars)?;
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
+
+        // Validate parameters only for the class under test (the outermost
+        // class — an empty class_stack), not for nested `include`d classes
+        // whose defaults we trust.
+        if self.class_stack.is_empty() {
+            let passed = match &self.params {
+                PuppetValue::Hash(h) => h.keys().cloned().collect(),
+                _ => HashSet::new(),
+            };
+            self.validate_subject_params(
+                &format!("Class[{name}]"),
+                &class_def.param_types,
+                &class_def.required_params,
+                &passed,
+            )?;
+        }
 
         // Publish each class parameter under its fully-qualified name
         // (`class::param`) so other classes can read it as `$class::param`.
@@ -961,6 +1035,21 @@ impl<'a> EvalContext<'a> {
         self.apply_param_defaults(&define_def.params, &mut local_vars)?;
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
+
+        // Validate the define-under-test's parameters (see
+        // validate_subject_params); `name` here is the literal title-less
+        // define name, so reference it as the resource being declared.
+        let passed = match &self.params {
+            PuppetValue::Hash(h) => h.keys().cloned().collect(),
+            _ => HashSet::new(),
+        };
+        self.validate_subject_params(
+            &format!("{}[{title}]", normalize_rtype(name)),
+            &define_def.param_types,
+            &define_def.required_params,
+            &passed,
+        )?;
+
         // The define under test is itself a catalog resource, carrying its
         // resolved parameters (passed values merged with declared defaults), so
         // `contain_<type>('title').with_<param>(...)` can match — including
@@ -1757,6 +1846,27 @@ fn type_bounds(args: &[TypeArg], offset: usize) -> (Option<i64>, Option<i64>) {
     (bound(args.get(offset)), bound(args.get(offset + 1)))
 }
 
+/// Render the `expects …` fragment of a parameter type-mismatch error so it
+/// matches the phrasings Puppet emits (which module specs assert against). An
+/// `Optional[T]` is reported as `expects a value of type Undef or <T>`; any
+/// other type as `expects a <Type> value`.
+fn expects_clause(ty: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> String {
+    let resolved = resolve_alias(ty, aliases);
+    if resolved.name == "Optional" {
+        let inner = resolved.args.iter().find_map(|arg| match arg {
+            TypeArg::Type(spec) => Some(resolve_alias(spec, aliases).name),
+            _ => None,
+        });
+        return match inner {
+            Some(name) => format!("expects a value of type Undef or {name}"),
+            None => "expects a value of type Undef".to_string(),
+        };
+    }
+    // Use the bare type name (no size/element bounds) so `String[1]` reports as
+    // "expects a String value", matching Puppet's basic mismatch phrasing.
+    format!("expects a {} value", resolved.name)
+}
+
 /// Follow alias references (`Ssh::Yes_no` → `Enum['yes','no']`, possibly through
 /// several hops) until reaching a built-in data type or an unknown name. Puppet
 /// forbids recursive aliases, so the chain is finite; a step cap guards against
@@ -2086,7 +2196,11 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_class_def(&mut self) -> Result<ClassDef> {
         let name = self.expect_ident()?;
-        let params = self.parse_param_list()?;
+        let ParsedParams {
+            params,
+            types,
+            required,
+        } = self.parse_param_list()?;
         let parent = if self.consume_keyword("inherits") {
             self.consume_leading_namespace_prefix();
             Some(self.expect_ident()?)
@@ -2097,6 +2211,8 @@ impl<'a> PuppetParser<'a> {
         Ok(ClassDef {
             name,
             params,
+            param_types: types,
+            required_params: required,
             parent,
             body,
             origin_file: None,
@@ -2105,26 +2221,49 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_define_def(&mut self) -> Result<DefineDef> {
         let name = self.expect_ident()?;
-        let params = self.parse_param_list()?;
+        let ParsedParams {
+            params,
+            types,
+            required,
+        } = self.parse_param_list()?;
         let body = self.parse_block()?;
         Ok(DefineDef {
             name,
             params,
+            param_types: types,
+            required_params: required,
             body,
             origin_file: None,
         })
     }
 
-    fn parse_param_list(&mut self) -> Result<HashMap<String, Expr>> {
+    fn parse_param_list(&mut self) -> Result<ParsedParams> {
         let mut params = HashMap::new();
+        let mut types = HashMap::new();
+        let mut required = HashSet::new();
         if !self.consume(TokenKind::LParen) {
-            return Ok(params);
+            return Ok(ParsedParams {
+                params,
+                types,
+                required,
+            });
         }
         while !self.consume(TokenKind::RParen) && !self.is_eof() {
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.index += 1;
                 continue;
             }
+            // An optional data-type annotation precedes the `$var`. A leading
+            // capitalized identifier starts a type (`Optional[Enum['a','b']]`,
+            // `Stdlib::Port`, `Boolean`, …); capture it so the value can later
+            // be validated against it.
+            let mut param_type = None;
+            if self.peek_kind() == Some(TokenKind::Ident) {
+                if let Ok(spec) = self.parse_type_value() {
+                    param_type = Some(spec);
+                }
+            }
+            // Skip any leftover tokens (e.g. a `*` splat marker) up to the var.
             while self.peek_kind() != Some(TokenKind::Var)
                 && self.peek_kind() != Some(TokenKind::Comma)
                 && self.peek_kind() != Some(TokenKind::RParen)
@@ -2134,10 +2273,14 @@ impl<'a> PuppetParser<'a> {
             }
             if self.peek_kind() == Some(TokenKind::Var) {
                 let name = self.expect_var()?;
+                if let Some(spec) = param_type {
+                    types.insert(name.clone(), spec);
+                }
                 if self.consume(TokenKind::Equal) {
                     let expr = self.parse_expr()?;
                     params.insert(name, expr);
                 } else {
+                    required.insert(name.clone());
                     params.insert(name, Expr::Undef);
                 }
             } else {
@@ -2145,7 +2288,11 @@ impl<'a> PuppetParser<'a> {
             }
             self.consume(TokenKind::Comma);
         }
-        Ok(params)
+        Ok(ParsedParams {
+            params,
+            types,
+            required,
+        })
     }
 
     /// Parse `|$a[, $b][, …]|` — the parameter list of an `.each` lambda.
