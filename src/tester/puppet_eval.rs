@@ -282,6 +282,170 @@ struct PuppetModule {
     /// exact written name. Used for `allow_value` matching and parameter type
     /// validation.
     type_aliases: HashMap<String, TypeSpec>,
+    /// Module Hiera data (hiera.yaml + data/*.yaml) for automatic class
+    /// parameter lookup.
+    hiera: Hiera,
+}
+
+/// Module-level Hiera (data-in-modules): the ordered, fact-interpolated path
+/// templates from `hiera.yaml` plus every loaded `data/**/*.yaml` file. Drives
+/// automatic class-parameter lookup (`<class>::<param>`).
+#[derive(Default, Debug, Clone)]
+struct Hiera {
+    /// Ordered path templates relative to the datadir, each possibly containing
+    /// `%{facts.x.y}` placeholders.
+    paths: Vec<String>,
+    /// Loaded data keyed by relative path (e.g. `os/RedHat/9.yaml`).
+    data: HashMap<String, HashMap<String, PuppetValue>>,
+}
+
+impl Hiera {
+    fn load(module_path: &Path) -> Hiera {
+        let mut paths = Vec::new();
+        let mut datadir = "data".to_string();
+        if let Ok(content) = std::fs::read_to_string(module_path.join("hiera.yaml")) {
+            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                if let Some(d) = yaml
+                    .get("defaults")
+                    .and_then(|d| d.get("datadir"))
+                    .and_then(|v| v.as_str())
+                {
+                    datadir = d.to_string();
+                }
+                if let Some(h) = yaml.get("hierarchy").and_then(|v| v.as_sequence()) {
+                    for entry in h {
+                        if let Some(ps) = entry.get("paths").and_then(|v| v.as_sequence()) {
+                            for p in ps {
+                                if let Some(s) = p.as_str() {
+                                    paths.push(s.to_string());
+                                }
+                            }
+                        } else if let Some(p) = entry.get("path").and_then(|v| v.as_str()) {
+                            paths.push(p.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut data = HashMap::new();
+        let datadir_path = module_path.join(&datadir);
+        let mut stack = vec![datadir_path.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(&datadir_path) else {
+                    continue;
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if let Ok(serde_yaml::Value::Mapping(map)) =
+                    serde_yaml::from_str::<serde_yaml::Value>(&content)
+                {
+                    let mut m = HashMap::new();
+                    for (k, v) in map {
+                        if let Some(ks) = k.as_str() {
+                            m.insert(ks.to_string(), yaml_to_puppet(&v));
+                        }
+                    }
+                    data.insert(rel_str, m);
+                }
+            }
+        }
+        Hiera { paths, data }
+    }
+
+    /// Look up `key` (e.g. `ssh::server::include`) across the fact-interpolated
+    /// hierarchy, first match wins. A path whose placeholders can't all be
+    /// resolved from `facts` is skipped (as Hiera does).
+    fn lookup(&self, key: &str, facts: &PuppetValue) -> Option<PuppetValue> {
+        for template in &self.paths {
+            let Some(rel) = hiera_interpolate(template, facts) else {
+                continue;
+            };
+            if let Some(value) = self.data.get(&rel).and_then(|m| m.get(key)) {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
+}
+
+/// Convert a YAML value to a [`PuppetValue`] (null → Undef).
+fn yaml_to_puppet(value: &serde_yaml::Value) -> PuppetValue {
+    match value {
+        serde_yaml::Value::Null => PuppetValue::Undef,
+        serde_yaml::Value::Bool(b) => PuppetValue::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                PuppetValue::Integer(i)
+            } else {
+                PuppetValue::String(n.to_string())
+            }
+        }
+        serde_yaml::Value::String(s) => PuppetValue::String(s.clone()),
+        serde_yaml::Value::Sequence(items) => {
+            PuppetValue::Array(items.iter().map(yaml_to_puppet).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut m = HashMap::new();
+            for (k, v) in map {
+                if let Some(ks) = k.as_str() {
+                    m.insert(ks.to_string(), yaml_to_puppet(v));
+                }
+            }
+            PuppetValue::Hash(m)
+        }
+        _ => PuppetValue::Undef,
+    }
+}
+
+/// Interpolate a Hiera path template's `%{facts.a.b}` / `%{::a.b}` placeholders
+/// against `facts`. Returns `None` if any placeholder can't be resolved.
+fn hiera_interpolate(template: &str, facts: &PuppetValue) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("%{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}')?;
+        let expr = after[..end].trim();
+        let dotted = expr
+            .strip_prefix("facts.")
+            .or_else(|| expr.strip_prefix("::"))
+            .unwrap_or(expr);
+        out.push_str(&hiera_navigate(facts, dotted)?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+fn hiera_navigate(facts: &PuppetValue, dotted: &str) -> Option<String> {
+    let mut current = facts;
+    for part in dotted.split('.') {
+        match current {
+            PuppetValue::Hash(map) => current = map.get(part)?,
+            _ => return None,
+        }
+    }
+    match current {
+        PuppetValue::String(s) => Some(s.clone()),
+        PuppetValue::Integer(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 impl PuppetModule {
@@ -323,6 +487,7 @@ impl PuppetModule {
         primary_manifest_files.sort();
         // Primary module's aliases overwrite any same-named fixture alias.
         load_type_aliases_into(module_path, &mut type_aliases);
+        let hiera = Hiera::load(module_path);
 
         Ok(Self {
             classes,
@@ -330,6 +495,7 @@ impl PuppetModule {
             module_paths,
             primary_manifest_files,
             type_aliases,
+            hiera,
         })
     }
 }
@@ -920,6 +1086,22 @@ impl<'a> EvalContext<'a> {
             }
         }
         self.apply_param_defaults(&class_def.params, &mut local_vars)?;
+        // Automatic class-parameter lookup from Hiera: for each parameter not
+        // explicitly passed, a `<class>::<param>` data value overrides the
+        // manifest default (Puppet precedence: passed > Hiera > default).
+        let passed_keys: HashSet<String> = match &self.params {
+            PuppetValue::Hash(h) => h.keys().cloned().collect(),
+            _ => HashSet::new(),
+        };
+        for param in class_def.params.keys() {
+            if passed_keys.contains(param) {
+                continue;
+            }
+            let key = format!("{name}::{param}");
+            if let Some(value) = self.module.hiera.lookup(&key, &self.facts) {
+                local_vars.insert(param.clone(), value);
+            }
+        }
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
 
@@ -1029,8 +1211,13 @@ impl<'a> EvalContext<'a> {
             .with_context(|| format!("define {name} not found"))?
             .clone();
         self.evaluated_defines.insert(name.to_string());
+        // Within a defined type both `$title` and `$name` default to the
+        // resource title (a `name` parameter can override `$name`, applied via
+        // param defaults/overrides below).
         self.vars
             .insert("title".to_string(), PuppetValue::String(title.to_string()));
+        self.vars
+            .insert("name".to_string(), PuppetValue::String(title.to_string()));
         let mut local_vars = HashMap::new();
         self.apply_param_defaults(&define_def.params, &mut local_vars)?;
         self.apply_param_overrides(&mut local_vars)?;
@@ -1553,6 +1740,24 @@ impl<'a> EvalContext<'a> {
                             .unwrap_or_default();
                         PuppetValue::String(render_erb(&tpl, &self.vars))
                     }
+                    // stdlib `dirname`/`basename` — used e.g. to derive an
+                    // include directory from a glob path (`dirname($include)`).
+                    "dirname" => match arg_values.first() {
+                        Some(PuppetValue::String(p)) => {
+                            let trimmed = p.trim_end_matches('/');
+                            let dir = trimmed.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                            PuppetValue::String(dir.to_string())
+                        }
+                        _ => PuppetValue::Undef,
+                    },
+                    "basename" => match arg_values.first() {
+                        Some(PuppetValue::String(p)) => {
+                            let trimmed = p.trim_end_matches('/');
+                            let base = trimmed.rsplit_once('/').map(|(_, b)| b).unwrap_or(trimmed);
+                            PuppetValue::String(base.to_string())
+                        }
+                        _ => PuppetValue::Undef,
+                    },
                     // Puppet's numeric type-conversion functions. `Integer('7')`
                     // must yield the integer `7`, not `Undef` — otherwise a
                     // subsequent comparison (`Integer('7') >= 10`) falls back to
@@ -1859,23 +2064,84 @@ fn type_bounds(args: &[TypeArg], offset: usize) -> (Option<i64>, Option<i64>) {
     (bound(args.get(offset)), bound(args.get(offset + 1)))
 }
 
+/// Whether a type is pattern-based (Pattern/Regexp/Enum, or a Variant that
+/// contains one) — the kinds Puppet describes with "expects a match for …"
+/// rather than "expects a <Type> value".
+fn is_pattern_like(ty: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> bool {
+    let r = resolve_alias(ty, aliases);
+    match r.name.as_str() {
+        "Pattern" | "Regexp" | "Enum" => true,
+        "Variant" => r.args.iter().any(|arg| match arg {
+            TypeArg::Type(inner) => is_pattern_like(inner, aliases),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Render a type the way Puppet prints it in a mismatch error, expanding an
+/// alias to `Name = <definition>` (recursively) so e.g. `Stdlib::Absolutepath`
+/// becomes `Stdlib::Absolutepath = Variant[Stdlib::Windowspath = Pattern[…],
+/// Stdlib::Unixpath = Pattern[…]]`.
+fn error_render(ty: &TypeSpec, aliases: &HashMap<String, TypeSpec>, depth: usize) -> String {
+    if depth > 12 {
+        return ty.name.clone();
+    }
+    // Alias reference: `Name = <expansion>`.
+    if !is_data_type(&ty.name) {
+        if let Some(def) = aliases.get(&ty.name) {
+            return format!("{} = {}", ty.name, error_render(def, aliases, depth + 1));
+        }
+        return ty.name.clone();
+    }
+    if ty.args.is_empty() {
+        return ty.name.clone();
+    }
+    let args = ty
+        .args
+        .iter()
+        .map(|arg| match arg {
+            TypeArg::Type(inner) => error_render(inner, aliases, depth + 1),
+            TypeArg::Str(s) => format!("'{s}'"),
+            TypeArg::Int(n) => n.to_string(),
+            TypeArg::Regex(r) => format!("/{r}/"),
+            TypeArg::Default => "default".to_string(),
+            TypeArg::Struct(_) => "...".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{}[{}]", ty.name, args)
+}
+
 /// Render the `expects …` fragment of a parameter type-mismatch error so it
-/// matches the phrasings Puppet emits (which module specs assert against). An
-/// `Optional[T]` is reported as `expects a value of type Undef or <T>`; any
-/// other type as `expects a <Type> value`.
+/// matches the phrasings Puppet emits (which module specs assert against):
+/// "expects a match for <expanded type>" for pattern-based types, "expects a
+/// value of type Undef or <T>" for `Optional[T]` of a plain type, otherwise
+/// "expects a <Type> value". For `Optional[X]` the validation only fires on a
+/// non-undef value, so a pattern-based inner `X` is described directly (the way
+/// Puppet reports the failing branch).
 fn expects_clause(ty: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> String {
     let resolved = resolve_alias(ty, aliases);
     if resolved.name == "Optional" {
         let inner = resolved.args.iter().find_map(|arg| match arg {
-            TypeArg::Type(spec) => Some(resolve_alias(spec, aliases).name),
+            TypeArg::Type(spec) => Some(spec.clone()),
             _ => None,
         });
         return match inner {
-            Some(name) => format!("expects a value of type Undef or {name}"),
+            Some(inner) if is_pattern_like(&inner, aliases) => {
+                format!("expects a match for {}", error_render(&inner, aliases, 0))
+            }
+            Some(inner) => format!(
+                "expects a value of type Undef or {}",
+                resolve_alias(&inner, aliases).name
+            ),
             None => "expects a value of type Undef".to_string(),
         };
     }
-    // Use the bare type name (no size/element bounds) so `String[1]` reports as
+    if is_pattern_like(ty, aliases) {
+        return format!("expects a match for {}", error_render(ty, aliases, 0));
+    }
+    // Bare type name (no size/element bounds) so `String[1]` reports as
     // "expects a String value", matching Puppet's basic mismatch phrasing.
     format!("expects a {} value", resolved.name)
 }

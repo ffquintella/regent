@@ -1641,7 +1641,7 @@ begin
   end
   def regent_os_facts(os, release)
     family = regent_os_family(os)
-    name = os.to_s.downcase
+    name = os.to_s
     {{
       :os => {{ "family" => family, "name" => name, "release" => {{ "full" => release, "major" => release }} }},
       :osfamily => family, :operatingsystem => name,
@@ -2888,7 +2888,11 @@ fn render_supported_os_ruby(entries: &[SupportedOs]) -> String {
             buf.push_str(", ");
         }
         let key = ruby_string_literal(&entry.key());
-        let os = ruby_string_literal(&entry.os.to_lowercase());
+        // os.name / operatingsystem keep the metadata's proper case ("RedHat",
+        // "Debian", …) — real facter does, and Hiera paths
+        // (`os/%{facts.os.name}/…`) and spec `%r{Debian-11}` case branches
+        // depend on it. Only the rspec-puppet-facts *key* is lowercased.
+        let os = ruby_string_literal(&entry.os);
         let release = ruby_string_literal(&entry.release);
         let family = ruby_string_literal(entry.osfamily());
         // rspec-puppet-facts returns os_facts with *symbol* top-level keys

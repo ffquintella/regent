@@ -562,10 +562,17 @@ impl RegentSpecRunner {
     ) -> Result<()> {
         let resource_type = resource_type.to_lowercase();
         let Some(resource) = catalog.find(&resource_type, title) else {
+            let present: Vec<String> = catalog
+                .iter_resources()
+                .filter(|r| r.resource_type == resource_type)
+                .map(|r| r.title.clone())
+                .collect();
             return Err(anyhow::anyhow!(
-                "missing resource {}[{}]",
+                "missing resource {}[{}] (present {}: {:?})",
                 resource_type,
-                title
+                title,
+                resource_type,
+                present
             ));
         };
         for (key, value) in attributes {

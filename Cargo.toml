@@ -1,6 +1,6 @@
 [package]
 name = "regent"
-version = "0.7.16"
+version = "0.7.17"
 edition = "2021"
 authors = ["Felipe Quintella"]
 license = "AGPL-3.0"
@@ -52,6 +52,7 @@ ureq = { version = "2", features = ["tls", "json"] }
 
 # Artichoke Ruby integration
 artichoke = { git = "https://github.com/artichoke/artichoke.git" }
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 tempfile = "3.0"
