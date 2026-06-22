@@ -864,8 +864,15 @@ begin
       parent = @contexts.last
       base = parent ? parent.klass : ExampleGroup
       @contexts << Context.new(description, subject, Class.new(base))
-      yield
-      @contexts.pop
+      # Pop in an ensure so a spec file that raises mid-load (an unsupported
+      # helper inside a nested describe/context) unwinds its frames instead of
+      # leaving them on the stack to pollute every later file's example names
+      # and subject resolution.
+      begin
+        yield
+      ensure
+        @contexts.pop
+      end
     end
 
     def self.register_shared(name, block)
@@ -954,6 +961,13 @@ begin
               {{
                 "kind" => "raise_error",
                 "message" => normalize_value(exp.error_message),
+                "negate" => exp.negate
+              }}
+            when "resource_count"
+              {{
+                "kind" => "resource_count",
+                "resource_type" => exp.resource_type,
+                "count" => exp.count,
                 "negate" => exp.negate
               }}
             else
@@ -1168,6 +1182,26 @@ begin
     end
   end
 
+  # `have_<type>_resource_count(n)` / `have_resource_count(n)`. Records the
+  # expected number of resources (of a given type, or of all non-class
+  # resources) in the compiled catalog; the count is verified in Rust.
+  class ResourceCountMatcher
+    attr_reader :resource_type, :count
+
+    def initialize(resource_type, count)
+      @resource_type = resource_type
+      @count = count
+    end
+
+    def kind
+      "resource_count"
+    end
+
+    def negate
+      @negate ? true : false
+    end
+  end
+
   # NOTE: the group block is run with `block.call`, not `instance_eval(&block)`.
   # A `let(:x) {{ super() }}` defined inside this block is a proc, and Artichoke
   # binds its `super` to the method dynamically enclosing the proc's creation.
@@ -1258,16 +1292,25 @@ begin
   # resource type not hardcoded above produce a working ContainMatcher.
   # `__` in the method name maps to `::` in the resource type, matching the
   # rspec-puppet convention.
+  def have_resource_count(count)
+    ResourceCountMatcher.new(nil, count)
+  end
   def method_missing(name, *args, &block)
     str = name.to_s
     if str.start_with?("contain_") && args.length == 1
       resource_type = str.sub("contain_", "").gsub("__", "::")
       return ContainMatcher.new(resource_type, args.first.to_s)
     end
+    # `have_<type>_resource_count(n)` -> count resources of <type> ("__" => "::").
+    if args.length == 1 && (m = str.match(/\Ahave_(.+)_resource_count\z/))
+      resource_type = m[1].gsub("__", "::")
+      return ResourceCountMatcher.new(resource_type, args.first)
+    end
     super
   end
   def respond_to_missing?(name, include_private = false)
-    name.to_s.start_with?("contain_") || super
+    str = name.to_s
+    str.start_with?("contain_") || (str.start_with?("have_") && str.end_with?("_resource_count")) || super
   end
   def before(*); end
   def after(*); end
@@ -1342,13 +1385,13 @@ begin
       require path
     rescue => e
       backtrace = e.backtrace ? e.backtrace.join("\n") : ""
-      failures << "#{{path}}: #{{e.class}}: #{{e.message}}\n#{{backtrace}}"
+      failures << {{ "file" => path, "error" => "#{{e.class}}: #{{e.message}}", "backtrace" => backtrace }}
     end
   end
-  plan = {{ "tests" => RegentSpec.build_plan }}
-  if failures.any?
-    raise failures.join("\\n")
-  end
+  # A spec file that fails to load (an unsupported helper, a missing constant)
+  # is reported as a single failed example rather than aborting the whole run,
+  # so every spec that *did* load still contributes its pass/fail result.
+  plan = {{ "tests" => RegentSpec.build_plan, "load_errors" => failures }}
   RegentSpec.to_json(plan)
 rescue => e
   backtrace = e.backtrace ? e.backtrace.join("\n") : ""
@@ -2484,8 +2527,14 @@ fn render_supported_os_ruby(entries: &[SupportedOs]) -> String {
         let os = ruby_string_literal(&entry.os.to_lowercase());
         let release = ruby_string_literal(&entry.release);
         let family = ruby_string_literal(entry.osfamily());
+        // rspec-puppet-facts returns os_facts with *symbol* top-level keys
+        // (`:os`, `:osfamily`, …); the structured `:os` value uses string keys
+        // (`'family'`, `'release' => { 'major' => … }`). Specs routinely do
+        // `os_facts[:os]['family']`, so the top level must be symbols. The DSL's
+        // `normalize_value` later stringifies every key, so the Rust evaluator
+        // still receives the string-keyed fact hash Puppet expects.
         buf.push_str(&format!(
-            "{key} => {{ \"os\" => {{ \"family\" => {family}, \"name\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }} }}, \"osfamily\" => {family}, \"operatingsystem\" => {os}, \"operatingsystemrelease\" => {release}, \"operatingsystemmajrelease\" => {release}, \"architecture\" => \"x86_64\", \"kernel\" => {family} }}"
+            "{key} => {{ :os => {{ \"family\" => {family}, \"name\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }} }}, :osfamily => {family}, :operatingsystem => {os}, :operatingsystemrelease => {release}, :operatingsystemmajrelease => {release}, :architecture => \"x86_64\", :kernel => {family} }}"
         ));
     }
     buf.push_str(" }");

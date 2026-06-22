@@ -13,6 +13,19 @@ use crate::tester::puppet_eval::{
 #[derive(Debug, Deserialize)]
 pub struct RegentPlan {
     pub tests: Vec<RegentTest>,
+    /// Spec files that raised while being loaded (unsupported helper, missing
+    /// constant, …). Each becomes one failed example so the rest of the suite
+    /// still reports real results instead of the whole run aborting.
+    #[serde(default)]
+    pub load_errors: Vec<LoadError>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoadError {
+    pub file: String,
+    pub error: String,
+    #[serde(default)]
+    pub backtrace: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +77,18 @@ pub enum Expectation {
     RaiseError {
         #[serde(default)]
         message: Option<JsonValue>,
+        #[serde(default)]
+        negate: bool,
+    },
+    /// `is_expected.to have_<type>_resource_count(n)` (or the typeless
+    /// `have_resource_count(n)`). Asserts the compiled catalog holds exactly
+    /// `count` resources of `resource_type` — or, when `resource_type` is
+    /// `None`, that many non-class resources in total.
+    #[serde(rename = "resource_count")]
+    ResourceCount {
+        #[serde(default)]
+        resource_type: Option<String>,
+        count: i64,
         #[serde(default)]
         negate: bool,
     },
@@ -185,6 +210,16 @@ impl RegentSpecRunner {
         let mut failure_lines = Vec::new();
         let mut covered_classes: HashSet<String> = HashSet::new();
         let mut covered_defines: HashSet<String> = HashSet::new();
+        for load_error in &plan.load_errors {
+            let name = format!("{} (failed to load)", load_error.file);
+            failure_lines.push(format!("{}: {}", name, load_error.error));
+            results.add_test_case(TestCase {
+                name,
+                status: TestStatus::Failed,
+                duration_ms: 0,
+                message: Some(load_error.error.clone()),
+            });
+        }
         for test in plan.tests {
             let case_result = self.run_test(&test, &mut covered_classes, &mut covered_defines)?;
             if case_result.status == TestStatus::Failed {
@@ -330,6 +365,49 @@ impl RegentSpecRunner {
                         (Ok(()), true) => failures.push(format!(
                             "expected catalog NOT to contain {}[{}] (with matching attrs), but it did",
                             resource_type, title
+                        )),
+                    }
+                }
+                Expectation::ResourceCount {
+                    resource_type,
+                    count,
+                    negate,
+                } => {
+                    let Ok(catalog) = &catalog_result else {
+                        if !*negate {
+                            failures.push(format!(
+                                "compile failed: {}",
+                                catalog_result.as_ref().err().unwrap()
+                            ));
+                        }
+                        continue;
+                    };
+                    let actual = match resource_type {
+                        Some(rt) => {
+                            let rt = normalize_rtype(rt);
+                            catalog
+                                .iter_resources()
+                                .filter(|r| r.resource_type == rt)
+                                .count() as i64
+                        }
+                        // rspec-puppet's bare resource_count excludes the
+                        // implicit `class` resources from the total.
+                        None => catalog
+                            .iter_resources()
+                            .filter(|r| r.resource_type != "class")
+                            .count() as i64,
+                    };
+                    let label = resource_type
+                        .as_deref()
+                        .map(|rt| format!("{rt} "))
+                        .unwrap_or_default();
+                    match (actual == *count, *negate) {
+                        (true, false) | (false, true) => {}
+                        (false, false) => failures.push(format!(
+                            "expected catalog to have {count} {label}resource(s), but found {actual}"
+                        )),
+                        (true, true) => failures.push(format!(
+                            "expected catalog NOT to have {count} {label}resource(s), but it did"
                         )),
                     }
                 }
@@ -705,6 +783,7 @@ mod coverage_tests {
                     check_all_deps: false,
                 }],
             }],
+            load_errors: Vec::new(),
         }
     }
 
@@ -736,6 +815,7 @@ mod coverage_tests {
                 params: None,
                 expectations: vec![Expectation::RaiseError { message, negate }],
             }],
+            load_errors: Vec::new(),
         }
     }
 
@@ -868,6 +948,7 @@ mod coverage_tests {
                     negate: false,
                 }],
             }],
+            load_errors: Vec::new(),
         };
 
         let (st, msg) = status(plan, &dir);
