@@ -342,7 +342,7 @@ impl RegentSpecRunner {
                         }
                     }
                     (Err(_), true) => {}
-                    (Err(err), false) => failures.push(format!("compile failed: {err}")),
+                    (Err(err), false) => failures.push(format!("compile failed: {err:#}")),
                     (Ok(_), true) => {
                         failures.push("expected compile to fail, but it succeeded".to_string())
                     }
@@ -479,7 +479,7 @@ impl RegentSpecRunner {
                     name: test.name.clone(),
                     status: TestStatus::Failed,
                     duration_ms: 0,
-                    message: Some(format!("compile failed: {err}")),
+                    message: Some(format!("compile failed: {err:#}")),
                 });
             }
         }

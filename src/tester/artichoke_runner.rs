@@ -1388,8 +1388,50 @@ begin
   # context per supported OS/release. Falls back to a single "default" entry
   # if metadata.json is missing, malformed, or empty.
   REGENT_SUPPORTED_OS = {supported_os_literal}
-  def on_supported_os(_opts = nil)
-    REGENT_SUPPORTED_OS
+  def regent_os_family(os)
+    case os.to_s.downcase
+    when "redhat", "centos", "rocky", "almalinux", "oraclelinux", "fedora", "scientific" then "RedHat"
+    when "debian", "ubuntu" then "Debian"
+    when "sles", "suse", "opensuse" then "Suse"
+    when "solaris" then "Solaris"
+    when "freebsd" then "FreeBSD"
+    when "openbsd" then "OpenBSD"
+    when "darwin" then "Darwin"
+    when "windows" then "windows"
+    when "archlinux", "arch" then "Archlinux"
+    when "gentoo" then "Gentoo"
+    else "RedHat"
+    end
+  end
+  def regent_os_facts(os, release)
+    family = regent_os_family(os)
+    name = os.to_s.downcase
+    {{
+      :os => {{ "family" => family, "name" => name, "release" => {{ "full" => release, "major" => release }} }},
+      :osfamily => family, :operatingsystem => name,
+      :operatingsystemrelease => release, :operatingsystemmajrelease => release,
+      :architecture => "x86_64", :kernel => family
+    }}
+  end
+  # rspec-puppet-facts `on_supported_os([opts])`. With no opts (or no
+  # `:supported_os` key) we return the module-metadata-derived set. When a spec
+  # passes an explicit supported_os list to restrict the matrix, honor it and
+  # synthesize facts for exactly those operatingsystem/release entries.
+  def on_supported_os(opts = nil)
+    list = opts && (opts[:supported_os] || opts["supported_os"])
+    return REGENT_SUPPORTED_OS unless list
+    result = {{}}
+    list.each do |entry|
+      os = entry["operatingsystem"] || entry[:operatingsystem]
+      next unless os
+      releases = entry["operatingsystemrelease"] || entry[:operatingsystemrelease] || [""]
+      releases.each do |rel|
+        rel = rel.to_s
+        key = rel.empty? ? "#{{os.downcase}}-x86_64" : "#{{os.downcase}}-#{{rel}}-x86_64"
+        result[key] = regent_os_facts(os, rel)
+      end
+    end
+    result.empty? ? REGENT_SUPPORTED_OS : result
   end
   def private_class_method(*); end
   def public_class_method(*); end
