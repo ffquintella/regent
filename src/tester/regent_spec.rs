@@ -92,6 +92,15 @@ pub enum Expectation {
         #[serde(default)]
         negate: bool,
     },
+    /// `is_expected.to allow_value(v)` on a `describe '<TypeAlias>'` block.
+    /// Each value is checked against the described Puppet type alias.
+    #[serde(rename = "allow_value")]
+    AllowValue {
+        #[serde(default)]
+        values: Vec<JsonValue>,
+        #[serde(default)]
+        negate: bool,
+    },
 }
 
 /// One relationship assertion from a `contain_*` matcher, e.g.
@@ -409,6 +418,29 @@ impl RegentSpecRunner {
                         (true, true) => failures.push(format!(
                             "expected catalog NOT to have {count} {label}resource(s), but it did"
                         )),
+                    }
+                }
+                Expectation::AllowValue { values, negate } => {
+                    let type_name = test.subject.trim();
+                    for value in values {
+                        let pv = PuppetValue::from_json(value);
+                        match self.evaluator.type_allows(type_name, &pv) {
+                            None => failures.push(format!(
+                                "unknown Puppet type {type_name:?} (no matching types/ alias)"
+                            )),
+                            // For `.to` (negate=false) the value must be allowed;
+                            // for `.not_to` (negate=true) it must be rejected.
+                            // Failure when allowed == negate.
+                            Some(allowed) if allowed == *negate => {
+                                let verb = if *negate {
+                                    "unexpectedly allows"
+                                } else {
+                                    "does not allow"
+                                };
+                                failures.push(format!("{type_name} {verb} value {pv:?}"));
+                            }
+                            Some(_) => {}
+                        }
                     }
                 }
                 Expectation::RaiseError { message, negate } => {

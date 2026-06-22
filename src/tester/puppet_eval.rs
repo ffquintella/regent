@@ -169,6 +169,21 @@ impl PuppetEvaluator {
         self.module.defines.contains_key(name)
     }
 
+    /// Whether `type_name` (a `types/` alias such as `Ssh::Yes_no` or a built-in
+    /// data type) admits `value`. Returns `None` when the name is neither a
+    /// known alias nor a built-in data type, so the caller can report the
+    /// missing type rather than silently passing. Powers `allow_value`.
+    pub fn type_allows(&self, type_name: &str, value: &PuppetValue) -> Option<bool> {
+        if !self.module.type_aliases.contains_key(type_name) && !is_data_type(type_name) {
+            return None;
+        }
+        let spec = TypeSpec {
+            name: type_name.to_string(),
+            args: Vec::new(),
+        };
+        Some(eval_type_match(value, &spec, &self.module.type_aliases))
+    }
+
     pub fn class_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.module.classes.keys().cloned().collect();
         names.sort();
@@ -258,6 +273,11 @@ struct PuppetModule {
     /// manifests/ tree (fixture modules excluded). Used to compute the coverage
     /// denominator.
     primary_manifest_files: Vec<PathBuf>,
+    /// Puppet type aliases (`type Foo::Bar = Enum[...]`) discovered under the
+    /// `types/` tree of the primary module and its fixtures, keyed by their
+    /// exact written name. Used for `allow_value` matching and parameter type
+    /// validation.
+    type_aliases: HashMap<String, TypeSpec>,
 }
 
 impl PuppetModule {
@@ -268,10 +288,12 @@ impl PuppetModule {
         let mut classes = HashMap::new();
         let mut defines = HashMap::new();
         let mut module_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+        let mut type_aliases: HashMap<String, TypeSpec> = HashMap::new();
 
         // Load fixtures first so the primary module's defs win on conflict.
         for fixture_path in fixture_module_paths {
             register_module_path(&mut module_paths, fixture_path);
+            load_type_aliases_into(fixture_path, &mut type_aliases);
             // Be tolerant: a single broken fixture should not block the run.
             let mut sink = Vec::new();
             if let Err(err) =
@@ -295,12 +317,15 @@ impl PuppetModule {
         )
         .with_context(|| format!("load manifests for {}", module_path.display()))?;
         primary_manifest_files.sort();
+        // Primary module's aliases overwrite any same-named fixture alias.
+        load_type_aliases_into(module_path, &mut type_aliases);
 
         Ok(Self {
             classes,
             defines,
             module_paths,
             primary_manifest_files,
+            type_aliases,
         })
     }
 }
@@ -398,6 +423,61 @@ fn load_manifests_into(
         }
     }
     Ok(())
+}
+
+/// Load every `type Foo::Bar = <type>` alias under `<module_path>/types/`
+/// (recursively) into `aliases`. Best-effort: an unreadable or unparseable
+/// file is skipped rather than failing the run.
+fn load_type_aliases_into(module_path: &Path, aliases: &mut HashMap<String, TypeSpec>) {
+    let mut stack = vec![module_path.join("types")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("pp") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some((name, spec)) = parse_type_alias(&content) {
+                aliases.insert(name, spec);
+            }
+        }
+    }
+}
+
+/// Parse a single `type <Name> = <type-expression>` statement out of a type
+/// alias file (comments and surrounding whitespace are ignored). Returns the
+/// alias name and its parsed [`TypeSpec`].
+fn parse_type_alias(source: &str) -> Option<(String, TypeSpec)> {
+    let mut parser = PuppetParser::new(source);
+    // Skip to the `type` keyword (comments aren't tokenized, so it's normally
+    // the very first token).
+    loop {
+        if parser.is_eof() {
+            return None;
+        }
+        let is_type_kw = parser.peek_kind() == Some(TokenKind::Ident)
+            && parser.peek_token().map(|t| t.text.as_str()) == Some("type");
+        if is_type_kw {
+            parser.index += 1;
+            break;
+        }
+        parser.index += 1;
+    }
+    let name = parser.expect_ident().ok()?;
+    if !parser.consume(TokenKind::Equal) {
+        return None;
+    }
+    let spec = parser.parse_type_value().ok()?;
+    Some((name, spec))
 }
 
 /// Discover modules under `spec/fixtures/modules/` for inclusion in the evaluator's namespace.
@@ -649,6 +729,18 @@ enum TypeArg {
     Regex(String),
     /// A nested type (e.g. the `String` in `Array[String]`).
     Type(TypeSpec),
+    /// The field set of a `Struct[{ ... }]` type.
+    Struct(Vec<StructField>),
+}
+
+/// One key of a `Struct` type: `Optional['name'] => <type>` or
+/// `'name' => <type>`. `optional` is true when the key is wrapped in
+/// `Optional[...]` (the key may be absent from a matching hash).
+#[derive(Debug, Clone)]
+struct StructField {
+    key: String,
+    optional: bool,
+    value: TypeSpec,
 }
 
 impl TypeSpec {
@@ -667,6 +759,21 @@ impl TypeSpec {
                 TypeArg::Str(s) => format!("'{s}'"),
                 TypeArg::Regex(r) => format!("/{r}/"),
                 TypeArg::Type(spec) => spec.render(),
+                TypeArg::Struct(fields) => {
+                    let body = fields
+                        .iter()
+                        .map(|f| {
+                            let key = if f.optional {
+                                format!("Optional['{}']", f.key)
+                            } else {
+                                format!("'{}'", f.key)
+                            };
+                            format!("{} => {}", key, f.value.render())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{{ {body} }}")
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1197,7 +1304,7 @@ impl<'a> EvalContext<'a> {
     fn eval_match(&mut self, left: &Expr, right: &Expr) -> Result<bool> {
         let subject = self.eval_expr(left)?;
         if let Expr::Type(spec) = right {
-            return Ok(eval_type_match(&subject, spec));
+            return Ok(eval_type_match(&subject, spec, &self.module.type_aliases));
         }
         eval_regex_match(&subject, &self.eval_expr(right)?)
     }
@@ -1214,7 +1321,7 @@ impl<'a> EvalContext<'a> {
             Expr::Regex(regex_src) => {
                 eval_regex_match(subject, &PuppetValue::String(regex_src.clone()))
             }
-            Expr::Type(spec) => Ok(eval_type_match(subject, spec)),
+            Expr::Type(spec) => Ok(eval_type_match(subject, spec, &self.module.type_aliases)),
             Expr::Array(items) => {
                 for item in items {
                     if self.case_branch_matches(item, subject)? {
@@ -1392,7 +1499,7 @@ impl<'a> EvalContext<'a> {
                         continue;
                     }
                     if let Expr::Type(spec) = key {
-                        if eval_type_match(&subject_value, spec) {
+                        if eval_type_match(&subject_value, spec, &self.module.type_aliases) {
                             matched = Some(value);
                             break;
                         }
@@ -1650,25 +1757,101 @@ fn type_bounds(args: &[TypeArg], offset: usize) -> (Option<i64>, Option<i64>) {
     (bound(args.get(offset)), bound(args.get(offset + 1)))
 }
 
+/// Follow alias references (`Ssh::Yes_no` → `Enum['yes','no']`, possibly through
+/// several hops) until reaching a built-in data type or an unknown name. Puppet
+/// forbids recursive aliases, so the chain is finite; a step cap guards against
+/// a malformed file looping.
+fn resolve_alias(spec: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> TypeSpec {
+    let mut current = spec.clone();
+    let mut steps = 0;
+    while !is_data_type(&current.name) {
+        match aliases.get(&current.name) {
+            Some(def) if steps < 64 => {
+                current = def.clone();
+                steps += 1;
+            }
+            _ => break,
+        }
+    }
+    current
+}
+
+/// Whether a (resolved) type is, or contains, a plain `String`. Drives the
+/// real-Puppet quirk that an optional `Struct` key whose value type admits a
+/// String also accepts an explicit `undef` (e.g. `String[1]` and
+/// `Variant[String[1], Integer[0]]` do; `Enum`/`Integer`/`Pattern` do not).
+fn type_admits_string(spec: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> bool {
+    let resolved = resolve_alias(spec, aliases);
+    match resolved.name.as_str() {
+        "String" => true,
+        "Variant" | "Optional" => resolved.args.iter().any(|arg| {
+            matches!(arg, TypeArg::Type(inner) if type_admits_string(inner, aliases))
+        }),
+        _ => false,
+    }
+}
+
+/// Translate the Ruby regex dialect Puppet patterns are written in into the
+/// subset Rust's `regex` crate accepts: `\/` (escaped delimiter) collapses to
+/// `/`, `\Z` (Ruby end-of-string-before-newline) maps to `\z`, and `\0` (null)
+/// to `\x00`. Patterns that still don't compile are handled by the caller.
+fn ruby_regex_to_rust(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some('/') => {
+                    out.push('/');
+                    chars.next();
+                }
+                Some('Z') => {
+                    out.push_str("\\z");
+                    chars.next();
+                }
+                Some('0') => {
+                    out.push_str("\\x00");
+                    chars.next();
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Compile a Puppet-authored regex pattern for matching.
+fn compile_puppet_regex(src: &str) -> Option<Regex> {
+    Regex::new(&ruby_regex_to_rust(src)).ok()
+}
+
 /// Whether `value` matches a single type argument (used for `Variant`,
 /// `Optional`, and `Array`/`Hash` element types).
-fn type_arg_matches(value: &PuppetValue, arg: &TypeArg) -> bool {
+fn type_arg_matches(value: &PuppetValue, arg: &TypeArg, aliases: &HashMap<String, TypeSpec>) -> bool {
     match arg {
-        TypeArg::Type(spec) => eval_type_match(value, spec),
+        TypeArg::Type(spec) => eval_type_match(value, spec, aliases),
         TypeArg::Str(s) => matches!(value, PuppetValue::String(v) if v == s),
         TypeArg::Int(n) => matches!(value, PuppetValue::Integer(v) if v == n),
-        TypeArg::Regex(re) => Regex::new(re)
-            .map(|r| r.is_match(&value.as_string()))
-            .unwrap_or(false),
+        TypeArg::Regex(re) => matches!(value, PuppetValue::String(text)
+            if compile_puppet_regex(re).map(|r| r.is_match(text)).unwrap_or(false)),
         TypeArg::Default => true,
+        // A bare struct field set in argument position has no standalone
+        // meaning; treat it as unconstrained.
+        TypeArg::Struct(_) => true,
     }
 }
 
 /// Structurally match a value against a Puppet data type, enforcing length and
-/// numeric bounds, element types, and enum/pattern membership. Unmodeled type
-/// names match leniently (treated as `Any`) so a test never fails purely
-/// because the embedded evaluator doesn't implement an exotic type.
-fn eval_type_match(value: &PuppetValue, spec: &TypeSpec) -> bool {
+/// numeric bounds, element types, enum/pattern membership, and `Struct` field
+/// shapes. Alias references (`Ssh::Yes_no`, `Stdlib::Port`) are resolved via
+/// `aliases`. A name that is neither a built-in type nor a known alias matches
+/// leniently (treated as `Any`) so a test never fails purely because the
+/// embedded evaluator doesn't implement an exotic type.
+fn eval_type_match(value: &PuppetValue, spec: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> bool {
+    let spec = resolve_alias(spec, aliases);
+    let spec = &spec;
     match spec.name.as_str() {
         "Any" | "Data" | "Default" | "Type" => true,
         "Undef" => matches!(value, PuppetValue::Undef),
@@ -1678,12 +1861,12 @@ fn eval_type_match(value: &PuppetValue, spec: &TypeSpec) -> bool {
                 || spec
                     .args
                     .first()
-                    .is_none_or(|arg| type_arg_matches(value, arg))
+                    .is_none_or(|arg| type_arg_matches(value, arg, aliases))
         }
         "Sensitive" => spec
             .args
             .first()
-            .is_none_or(|arg| type_arg_matches(value, arg)),
+            .is_none_or(|arg| type_arg_matches(value, arg, aliases)),
         "Boolean" => matches!(value, PuppetValue::Bool(_)),
         "String" => match value {
             PuppetValue::String(s) => {
@@ -1713,8 +1896,8 @@ fn eval_type_match(value: &PuppetValue, spec: &TypeSpec) -> bool {
                     TypeArg::Type(t) => Some(t),
                     _ => None,
                 });
-                let elems_ok =
-                    elem_type.is_none_or(|t| items.iter().all(|item| eval_type_match(item, t)));
+                let elems_ok = elem_type
+                    .is_none_or(|t| items.iter().all(|item| eval_type_match(item, t, aliases)));
                 let int_args: Vec<i64> = spec
                     .args
                     .iter()
@@ -1761,17 +1944,62 @@ fn eval_type_match(value: &PuppetValue, spec: &TypeSpec) -> bool {
                 .any(|arg| matches!(arg, TypeArg::Str(member) if member == s)),
             _ => false,
         },
-        "Pattern" | "Regexp" => {
-            let text = value.as_string();
-            spec.args.iter().any(|arg| match arg {
+        "Pattern" | "Regexp" => match value {
+            // A Puppet `Pattern` only matches String values — an Integer or
+            // Boolean is never coerced to its text form for the test.
+            PuppetValue::String(text) => spec.args.iter().any(|arg| match arg {
                 TypeArg::Regex(re) | TypeArg::Str(re) => {
-                    Regex::new(re).map(|r| r.is_match(&text)).unwrap_or(false)
+                    compile_puppet_regex(re).map(|r| r.is_match(text)).unwrap_or(false)
                 }
                 _ => false,
-            })
-        }
-        "Variant" => spec.args.iter().any(|arg| type_arg_matches(value, arg)),
-        // Unmodeled type (e.g. Struct): match leniently rather than failing.
+            }),
+            _ => false,
+        },
+        "Variant" => spec
+            .args
+            .iter()
+            .any(|arg| type_arg_matches(value, arg, aliases)),
+        "Struct" => match value {
+            PuppetValue::Hash(map) => {
+                let Some(TypeArg::Struct(fields)) = spec.args.first() else {
+                    // Struct with no captured field set — match leniently.
+                    return true;
+                };
+                // Every present key must be a declared field and match its
+                // value type. For an `Optional['k']` key, an explicit `undef`
+                // value is also accepted (Puppet widens the value type to
+                // include undef when the key is optional).
+                for (key, val) in map {
+                    match fields.iter().find(|f| &f.key == key) {
+                        // `Optional['k']` makes the key's *presence* optional;
+                        // when present, the value is matched strictly against
+                        // its declared type. The one exception is a quirk of
+                        // real Puppet that modules rely on: an optional key
+                        // whose value type is a plain `String` also accepts an
+                        // explicit `undef` (Enum/Integer/Pattern/alias fields do
+                        // not — they reject undef strictly).
+                        Some(field) => {
+                            if matches!(val, PuppetValue::Undef)
+                                && field.optional
+                                && type_admits_string(&field.value, aliases)
+                            {
+                                continue;
+                            }
+                            if !eval_type_match(val, &field.value, aliases) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+                // Every required (non-Optional) field must be present.
+                fields
+                    .iter()
+                    .all(|f| f.optional || map.contains_key(&f.key))
+            }
+            _ => false,
+        },
+        // Unmodeled type: match leniently rather than failing.
         _ => true,
     }
 }
@@ -2657,6 +2885,9 @@ impl<'a> PuppetParser<'a> {
         if self.consume_keyword("default") {
             return Ok(TypeArg::Default);
         }
+        if self.peek_kind() == Some(TokenKind::LBrace) {
+            return self.parse_struct_fields();
+        }
         match self.peek_kind() {
             Some(TokenKind::Number) => Ok(TypeArg::Int(self.expect_number()?)),
             Some(TokenKind::Minus) => {
@@ -2683,6 +2914,73 @@ impl<'a> PuppetParser<'a> {
                 Ok(TypeArg::Default)
             }
         }
+    }
+
+    /// Parse the `{ Optional['k'] => <type>, 'k2' => <type>, … }` body of a
+    /// `Struct` type into its field set.
+    fn parse_struct_fields(&mut self) -> Result<TypeArg> {
+        self.expect(TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        while !self.consume(TokenKind::RBrace) && !self.is_eof() {
+            if self.consume(TokenKind::Comma) {
+                continue;
+            }
+            let Some((key, optional)) = self.parse_struct_key()? else {
+                // Unrecognized key shape — skip a token to stay robust.
+                self.index += 1;
+                continue;
+            };
+            self.consume(TokenKind::FatArrow);
+            let value = self.parse_type_value()?;
+            fields.push(StructField {
+                key,
+                optional,
+                value,
+            });
+            self.consume(TokenKind::Comma);
+        }
+        Ok(TypeArg::Struct(fields))
+    }
+
+    /// Parse a Struct key: a bare `'name'` string, or `Optional['name']` /
+    /// `NotUndef['name']` (the latter marks the key required-and-not-undef; we
+    /// model both wrappers' presence requirement, treating only `Optional` as
+    /// truly optional).
+    fn parse_struct_key(&mut self) -> Result<Option<(String, bool)>> {
+        match self.peek_kind() {
+            Some(TokenKind::String) => Ok(Some((self.expect_string()?, false))),
+            Some(TokenKind::Ident) => {
+                let ident = self.expect_ident()?;
+                let optional = ident == "Optional";
+                // Consume the `['name']` wrapper.
+                if self.consume(TokenKind::LBracket) {
+                    let name = self.expect_string().unwrap_or_default();
+                    self.consume(TokenKind::RBracket);
+                    Ok(Some((name, optional)))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Parse a type used in value position (a Struct field's value, a Hash's
+    /// value type, …). Any leading identifier is treated as a type name —
+    /// including alias references like `Ssh::Yes_no` or `Stdlib::Port` — so it
+    /// is not gated by [`is_data_type`].
+    fn parse_type_value(&mut self) -> Result<TypeSpec> {
+        if self.peek_kind() == Some(TokenKind::Ident) {
+            let ident = self.expect_ident()?;
+            if let Expr::Type(spec) = self.parse_type_spec(ident)? {
+                return Ok(spec);
+            }
+        }
+        // Fallback: an unrecognized value type matches leniently.
+        Ok(TypeSpec {
+            name: "Any".to_string(),
+            args: Vec::new(),
+        })
     }
 
     fn parse_inline_expr(source: &str) -> Result<Expr> {
@@ -3951,6 +4249,60 @@ mod tests {
         fs::create_dir_all(&manifests).unwrap();
         fs::write(manifests.join(format!("{name}.pp")), manifest).unwrap();
         dir
+    }
+
+    #[test]
+    fn type_aliases_drive_allow_value_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = dir.path().join("types");
+        fs::create_dir_all(&types).unwrap();
+        fs::write(
+            types.join("yes_no.pp"),
+            "type Ssh::Yes_no = Enum['yes', 'no']\n",
+        )
+        .unwrap();
+        // A Struct that references the alias and uses Optional keys with a
+        // String-valued field (which exercises the undef quirk) plus an
+        // Enum-valued field (which must reject undef).
+        fs::write(
+            types.join("cfg.pp"),
+            "type Ssh::Cfg = Struct[{\n  Optional['Name'] => String[1],\n  Optional['Flag'] => Ssh::Yes_no,\n}]\n",
+        )
+        .unwrap();
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+
+        let s = |v: &str| PuppetValue::String(v.to_string());
+        // Enum alias.
+        assert_eq!(ev.type_allows("Ssh::Yes_no", &s("yes")), Some(true));
+        assert_eq!(ev.type_allows("Ssh::Yes_no", &s("maybe")), Some(false));
+        assert_eq!(
+            ev.type_allows("Ssh::Yes_no", &PuppetValue::Undef),
+            Some(false)
+        );
+        // Unknown type -> None so the caller can report it.
+        assert_eq!(ev.type_allows("Ssh::Nope", &s("x")), None);
+
+        // Struct single-key hashes.
+        let hash = |k: &str, v: PuppetValue| {
+            PuppetValue::Hash(HashMap::from([(k.to_string(), v)]))
+        };
+        // Valid Enum field value.
+        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Flag", s("no"))), Some(true));
+        // Invalid Enum field value, and undef rejected for an Enum field.
+        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Flag", s("x"))), Some(false));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Flag", PuppetValue::Undef)),
+            Some(false)
+        );
+        // String field: a value matches, and undef is accepted (the Puppet
+        // quirk for String-typed optional struct keys).
+        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Name", s("eth0"))), Some(true));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Name", PuppetValue::Undef)),
+            Some(true)
+        );
+        // Unknown struct key is rejected.
+        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Bogus", s("x"))), Some(false));
     }
 
     #[test]

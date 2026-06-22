@@ -970,6 +970,12 @@ begin
                 "count" => exp.count,
                 "negate" => exp.negate
               }}
+            when "allow_value"
+              {{
+                "kind" => "allow_value",
+                "values" => exp.values.map {{ |v| normalize_value(v) }},
+                "negate" => exp.negate
+              }}
             else
               {{
                 "kind" => "contain",
@@ -1023,12 +1029,30 @@ begin
       end
     end
 
+    # Build a JSON string body char-by-char. Artichoke's regex `gsub` corrupts
+    # multibyte UTF-8 (it misaligns byte offsets, mangling e.g. Japanese
+    # example names), so we avoid regex entirely: escape the JSON control set
+    # and any C0 control char, and pass every other character — including raw
+    # multibyte UTF-8, which is valid inside a JSON string — through unchanged.
     def self.escape_json(text)
-      text.gsub(/\\/) {{ '\\\\' }}
-          .gsub(/"/) {{ '\\"' }}
-          .gsub(/\n/) {{ '\\n' }}
-          .gsub(/\r/) {{ '\\r' }}
-          .gsub(/\t/) {{ '\\t' }}
+      result = ""
+      text.to_s.each_char do |ch|
+        case ch
+        when "\\" then result << "\\\\"
+        when "\"" then result << "\\\""
+        when "\n" then result << "\\n"
+        when "\r" then result << "\\r"
+        when "\t" then result << "\\t"
+        else
+          code = ch.ord
+          if code < 0x20
+            result << ("\\u" + code.to_s(16).rjust(4, "0"))
+          else
+            result << ch
+          end
+        end
+      end
+      result
     end
   end
 
@@ -1202,6 +1226,26 @@ begin
     end
   end
 
+  # `allow_value(v[, v2, …])` / `allow_values(...)` for type-alias specs, e.g.
+  # a `describe 'Ssh::Yes_no'` block asserting `is_expected.to allow_value`.
+  # Records the candidate value(s); the Rust evaluator resolves the described
+  # type alias and checks each value against it.
+  class AllowValueMatcher
+    attr_reader :values
+
+    def initialize(values)
+      @values = values
+    end
+
+    def kind
+      "allow_value"
+    end
+
+    def negate
+      @negate ? true : false
+    end
+  end
+
   # NOTE: the group block is run with `block.call`, not `instance_eval(&block)`.
   # A `let(:x) {{ super() }}` defined inside this block is a proc, and Artichoke
   # binds its `super` to the method dynamically enclosing the proc's creation.
@@ -1294,6 +1338,12 @@ begin
   # rspec-puppet convention.
   def have_resource_count(count)
     ResourceCountMatcher.new(nil, count)
+  end
+  def allow_value(*values)
+    AllowValueMatcher.new(values)
+  end
+  def allow_values(*values)
+    AllowValueMatcher.new(values)
   end
   def method_missing(name, *args, &block)
     str = name.to_s
