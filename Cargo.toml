@@ -1,6 +1,6 @@
 [package]
 name = "regent"
-version = "0.7.17"
+version = "0.7.18"
 edition = "2021"
 authors = ["Felipe Quintella"]
 license = "AGPL-3.0"
@@ -15,7 +15,7 @@ tokio = { version = "1.0", features = ["full"] }
 
 # Data formats
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 
 # Output formatting
 colored = "3.0"
@@ -53,6 +53,7 @@ ureq = { version = "2", features = ["tls", "json"] }
 # Artichoke Ruby integration
 artichoke = { git = "https://github.com/artichoke/artichoke.git" }
 serde_yaml = "0.9.34"
+indexmap = "2.14.0"
 
 [dev-dependencies]
 tempfile = "3.0"

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -582,7 +583,7 @@ impl RegentSpecRunner {
                 .cloned()
                 .unwrap_or(PuppetValue::Undef);
             if let Some(pattern) = regex_marker(value) {
-                let regex = Regex::new(pattern).map_err(|err| {
+                let regex = compile_spec_regex(pattern).map_err(|err| {
                     anyhow::anyhow!(
                         "resource {}[{}] attribute {}: invalid regex {:?}: {}",
                         resource_type,
@@ -605,7 +606,11 @@ impl RegentSpecRunner {
                 continue;
             }
             let expected = PuppetValue::from_json(value);
-            if expected != actual {
+            // rspec-puppet compares parameter values loosely across the
+            // string/number boundary (a spec asserting `order => '10'` matches a
+            // catalog Integer `10`), so fall back to string equality when the
+            // structured values differ only by scalar type.
+            if expected != actual && expected.as_string() != actual.as_string() {
                 return Err(anyhow::anyhow!(
                     "resource {}[{}] attribute {} expected {:?} got {:?}",
                     resource_type,
@@ -749,7 +754,7 @@ fn derive_node_facts(facts: &mut PuppetValue, node: Option<&str>) {
     }
 
     // Structured `networking` fact mirrors the legacy values.
-    let mut networking = HashMap::new();
+    let mut networking = IndexMap::new();
     networking.insert("fqdn".to_string(), PuppetValue::String(node.to_string()));
     networking.insert("hostname".to_string(), PuppetValue::String(hostname));
     if !domain.is_empty() {
@@ -758,7 +763,7 @@ fn derive_node_facts(facts: &mut PuppetValue, node: Option<&str>) {
     fill("networking", PuppetValue::Hash(networking));
 
     // `trusted['certname']` defaults to the node's certname (the node name).
-    let mut trusted = HashMap::new();
+    let mut trusted = IndexMap::new();
     trusted.insert(
         "certname".to_string(),
         PuppetValue::String(node.to_string()),
@@ -771,12 +776,23 @@ fn derive_node_facts(facts: &mut PuppetValue, node: Option<&str>) {
 /// substring (rspec checks the full message, but our error text carries extra
 /// context wrapping, so substring is the lenient choice), and no constraint
 /// matches any error.
+/// Compile a regex that came from a spec (`%r{…}`). Ruby anchors `^`/`$` to
+/// line boundaries by default, so enable multi-line mode — otherwise a
+/// `/^Subsystem …$/` content matcher never matches a line in the middle of a
+/// multi-line rendered file.
+fn compile_spec_regex(src: &str) -> Result<Regex> {
+    RegexBuilder::new(src)
+        .multi_line(true)
+        .build()
+        .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
 fn error_matches(pattern: Option<&JsonValue>, message: &str) -> Result<bool> {
     match pattern {
         None | Some(JsonValue::Null) => Ok(true),
         Some(value) => {
             if let Some(src) = regex_marker(value) {
-                let regex = Regex::new(src)
+                let regex = compile_spec_regex(src)
                     .with_context(|| format!("invalid raise_error regex /{src}/"))?;
                 Ok(regex.is_match(message))
             } else if let Some(text) = value.as_str() {

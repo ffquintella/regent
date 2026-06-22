@@ -2,15 +2,21 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PuppetValue {
     String(String),
     Integer(i64),
+    Float(f64),
     Bool(bool),
     Array(Vec<PuppetValue>),
-    Hash(HashMap<String, PuppetValue>),
+    // Insertion-ordered so rendered templates / catalogs reproduce the key
+    // order Puppet preserves (e.g. an sshd_config built from an ordered data
+    // hash). Requires serde_json's `preserve_order` feature for the JSON→value
+    // path to keep order too.
+    Hash(IndexMap<String, PuppetValue>),
     Undef,
 }
 
@@ -19,9 +25,10 @@ impl PuppetValue {
         match value {
             serde_json::Value::Null => PuppetValue::Undef,
             serde_json::Value::Bool(value) => PuppetValue::Bool(*value),
-            serde_json::Value::Number(value) => {
-                PuppetValue::Integer(value.as_i64().unwrap_or_default())
-            }
+            serde_json::Value::Number(value) => match value.as_i64() {
+                Some(i) => PuppetValue::Integer(i),
+                None => PuppetValue::Float(value.as_f64().unwrap_or_default()),
+            },
             serde_json::Value::String(value) => PuppetValue::String(value.clone()),
             serde_json::Value::Array(values) => {
                 PuppetValue::Array(values.iter().map(PuppetValue::from_json).collect())
@@ -36,7 +43,7 @@ impl PuppetValue {
 
     pub fn from_json_map(map: Option<&HashMap<String, serde_json::Value>>) -> PuppetValue {
         let Some(map) = map else {
-            return PuppetValue::Hash(HashMap::new());
+            return PuppetValue::Hash(IndexMap::new());
         };
         PuppetValue::Hash(
             map.iter()
@@ -49,6 +56,7 @@ impl PuppetValue {
         match self {
             PuppetValue::String(value) => value.clone(),
             PuppetValue::Integer(value) => value.to_string(),
+            PuppetValue::Float(value) => format_puppet_float(*value),
             PuppetValue::Bool(value) => value.to_string(),
             PuppetValue::Array(values) => {
                 // Puppet stringifies an array with bracket delimiters and formats
@@ -96,6 +104,7 @@ impl PuppetValue {
             PuppetValue::Array(value) => !value.is_empty(),
             PuppetValue::Hash(value) => !value.is_empty(),
             PuppetValue::Integer(_) => true,
+            PuppetValue::Float(_) => true,
         }
     }
 
@@ -108,7 +117,7 @@ impl PuppetValue {
 pub struct PuppetResource {
     pub resource_type: String,
     pub title: String,
-    pub attributes: HashMap<String, PuppetValue>,
+    pub attributes: IndexMap<String, PuppetValue>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -246,6 +255,7 @@ impl PuppetEvaluator {
         params: &PuppetValue,
     ) -> Result<(PuppetCatalog, EvaluationTrace)> {
         let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
+        ctx.subject_class = Some(name.to_string());
         ctx.evaluate_class(name)?;
         let catalog = std::mem::take(&mut ctx.catalog);
         Ok((catalog, ctx.into_trace()))
@@ -400,7 +410,7 @@ fn yaml_to_puppet(value: &serde_yaml::Value) -> PuppetValue {
             PuppetValue::Array(items.iter().map(yaml_to_puppet).collect())
         }
         serde_yaml::Value::Mapping(map) => {
-            let mut m = HashMap::new();
+            let mut m = IndexMap::new();
             for (k, v) in map {
                 if let Some(ks) = k.as_str() {
                     m.insert(ks.to_string(), yaml_to_puppet(v));
@@ -998,6 +1008,10 @@ struct EvalContext<'a> {
     /// type. Merged into each subsequently-declared resource of that type for
     /// any attribute the declaration does not set itself.
     resource_defaults: HashMap<String, HashMap<String, PuppetValue>>,
+    /// The class under test, if the subject is a class. Only this class's
+    /// parameters are type-validated — classes pulled in via `include` (whether
+    /// from the subject class or from a defined type) are trusted.
+    subject_class: Option<String>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -1013,6 +1027,7 @@ impl<'a> EvalContext<'a> {
             evaluated_classes: HashSet::new(),
             evaluated_defines: HashSet::new(),
             resource_defaults: HashMap::new(),
+            subject_class: None,
         }
     }
 
@@ -1099,16 +1114,19 @@ impl<'a> EvalContext<'a> {
             }
             let key = format!("{name}::{param}");
             if let Some(value) = self.module.hiera.lookup(&key, &self.facts) {
-                local_vars.insert(param.clone(), value);
+                // A null data value is treated as "not set" so the manifest
+                // default stands (avoids clobbering e.g. `Array $x = []`).
+                if !matches!(value, PuppetValue::Undef) {
+                    local_vars.insert(param.clone(), value);
+                }
             }
         }
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
 
-        // Validate parameters only for the class under test (the outermost
-        // class — an empty class_stack), not for nested `include`d classes
-        // whose defaults we trust.
-        if self.class_stack.is_empty() {
+        // Validate parameters only for the class actually under test, never for
+        // classes pulled in via `include` (from the subject class or a define).
+        if self.subject_class.as_deref() == Some(name) {
             let passed = match &self.params {
                 PuppetValue::Hash(h) => h.keys().cloned().collect(),
                 _ => HashSet::new(),
@@ -1136,7 +1154,7 @@ impl<'a> EvalContext<'a> {
         self.catalog.add(PuppetResource {
             resource_type: "class".to_string(),
             title: name.to_string(),
-            attributes: HashMap::new(),
+            attributes: IndexMap::new(),
         });
 
         self.class_stack.push(name.to_string());
@@ -1153,7 +1171,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         title: &str,
-        attrs: &HashMap<String, PuppetValue>,
+        attrs: &IndexMap<String, PuppetValue>,
     ) -> Result<()> {
         let key = format!("{name}[{title}]");
         if self.in_progress.contains(&key) {
@@ -1241,7 +1259,7 @@ impl<'a> EvalContext<'a> {
         // resolved parameters (passed values merged with declared defaults), so
         // `contain_<type>('title').with_<param>(...)` can match — including
         // parameters left at their default, which would otherwise be Undef.
-        let mut resolved_attrs = HashMap::new();
+        let mut resolved_attrs = IndexMap::new();
         if let PuppetValue::Hash(params) = &self.params {
             for (key, value) in params {
                 resolved_attrs.insert(key.clone(), value.clone());
@@ -1315,7 +1333,7 @@ impl<'a> EvalContext<'a> {
                             _ => title_values.push(value.as_string()),
                         }
                     }
-                    let mut attributes = HashMap::new();
+                    let mut attributes = IndexMap::new();
                     for (key, expr) in attrs {
                         attributes.insert(key.clone(), self.eval_expr(expr)?);
                     }
@@ -1454,12 +1472,12 @@ impl<'a> EvalContext<'a> {
                     let defaults = match defaults_expr {
                         Some(expr) => match self.eval_expr(expr)? {
                             PuppetValue::Hash(map) => map,
-                            _ => HashMap::new(),
+                            _ => IndexMap::new(),
                         },
-                        None => HashMap::new(),
+                        None => IndexMap::new(),
                     };
                     for (title, attrs_value) in entries {
-                        let mut attributes: HashMap<String, PuppetValue> = defaults.clone();
+                        let mut attributes: IndexMap<String, PuppetValue> = defaults.clone();
                         if let PuppetValue::Hash(attrs) = attrs_value {
                             for (key, value) in attrs {
                                 attributes.insert(key, value);
@@ -1492,9 +1510,9 @@ impl<'a> EvalContext<'a> {
                     let attributes = match params_expr {
                         Some(expr) => match self.eval_expr(expr)? {
                             PuppetValue::Hash(map) => map,
-                            _ => HashMap::new(),
+                            _ => IndexMap::new(),
                         },
-                        None => HashMap::new(),
+                        None => IndexMap::new(),
                     };
                     for title in titles {
                         self.catalog.add(PuppetResource {
@@ -1514,13 +1532,13 @@ impl<'a> EvalContext<'a> {
                     let defaults = match params_expr {
                         Some(expr) => match self.eval_expr(expr)? {
                             PuppetValue::Hash(map) => map,
-                            _ => HashMap::new(),
+                            _ => IndexMap::new(),
                         },
-                        None => HashMap::new(),
+                        None => IndexMap::new(),
                     };
                     // stdlib's `ensure_packages` defaults each package to
                     // `ensure => present` unless overridden by the params.
-                    let with_ensure_default = |mut attrs: HashMap<String, PuppetValue>| {
+                    let with_ensure_default = |mut attrs: IndexMap<String, PuppetValue>| {
                         attrs
                             .entry("ensure".to_string())
                             .or_insert_with(|| PuppetValue::String("present".to_string()));
@@ -1650,7 +1668,7 @@ impl<'a> EvalContext<'a> {
                     .collect::<Result<Vec<_>>>()?,
             ),
             Expr::Hash(values) => {
-                let mut map = HashMap::new();
+                let mut map = IndexMap::new();
                 for (key, value) in values {
                     let key = self.eval_expr(key)?.as_string();
                     map.insert(key, self.eval_expr(value)?);
@@ -1680,8 +1698,18 @@ impl<'a> EvalContext<'a> {
                 body,
             } => self.eval_lambda(target, method, params, body)?,
             Expr::ResourceRef { rtype, title } => {
-                let title = self.eval_expr(title)?.as_string();
-                PuppetValue::String(format!("{rtype}[{title}]"))
+                // `Package[$packages]` where `$packages` is an array references
+                // one resource per element (`Package[a], Package[b]`), so expand
+                // an array title into an array of references.
+                match self.eval_expr(title)? {
+                    PuppetValue::Array(items) => PuppetValue::Array(
+                        items
+                            .iter()
+                            .map(|t| PuppetValue::String(format!("{rtype}[{}]", t.as_string())))
+                            .collect(),
+                    ),
+                    other => PuppetValue::String(format!("{rtype}[{}]", other.as_string())),
+                }
             }
             Expr::FunctionCall { name, args } => {
                 let arg_values: Vec<PuppetValue> = args
@@ -1697,7 +1725,7 @@ impl<'a> EvalContext<'a> {
                         let params = arg_values
                             .get(1)
                             .cloned()
-                            .unwrap_or_else(|| PuppetValue::Hash(HashMap::new()));
+                            .unwrap_or_else(|| PuppetValue::Hash(IndexMap::new()));
                         match self.resolve_template_file(&template_ref) {
                             Some(path) => match std::fs::read_to_string(&path) {
                                 Ok(template) => PuppetValue::String(render_epp(&template, &params)),
@@ -1714,7 +1742,7 @@ impl<'a> EvalContext<'a> {
                         let params = arg_values
                             .get(1)
                             .cloned()
-                            .unwrap_or_else(|| PuppetValue::Hash(HashMap::new()));
+                            .unwrap_or_else(|| PuppetValue::Hash(IndexMap::new()));
                         PuppetValue::String(render_epp(&template, &params))
                     }
                     "template" => {
@@ -1758,6 +1786,55 @@ impl<'a> EvalContext<'a> {
                         }
                         _ => PuppetValue::Undef,
                     },
+                    // stdlib `concat(a, b, …)` — concatenate arrays/values into a
+                    // single array (non-array args are appended as elements).
+                    "concat" => {
+                        let mut out = Vec::new();
+                        for value in &arg_values {
+                            match value {
+                                PuppetValue::Array(items) => out.extend(items.iter().cloned()),
+                                other => out.push(other.clone()),
+                            }
+                        }
+                        PuppetValue::Array(out)
+                    }
+                    // `join(array[, sep])` — join array elements with an optional
+                    // separator (default empty string).
+                    "join" => {
+                        let sep = arg_values
+                            .get(1)
+                            .map(|v| v.as_string())
+                            .unwrap_or_default();
+                        match arg_values.first() {
+                            Some(PuppetValue::Array(items)) => PuppetValue::String(
+                                items
+                                    .iter()
+                                    .map(|v| v.as_string())
+                                    .collect::<Vec<_>>()
+                                    .join(&sep),
+                            ),
+                            Some(other) => PuppetValue::String(other.as_string()),
+                            None => PuppetValue::Undef,
+                        }
+                    }
+                    // `flatten(array)` — recursively flatten nested arrays.
+                    "flatten" => {
+                        fn flatten_into(value: &PuppetValue, out: &mut Vec<PuppetValue>) {
+                            match value {
+                                PuppetValue::Array(items) => {
+                                    for item in items {
+                                        flatten_into(item, out);
+                                    }
+                                }
+                                other => out.push(other.clone()),
+                            }
+                        }
+                        let mut out = Vec::new();
+                        for value in &arg_values {
+                            flatten_into(value, &mut out);
+                        }
+                        PuppetValue::Array(out)
+                    }
                     // Puppet's numeric type-conversion functions. `Integer('7')`
                     // must yield the integer `7`, not `Undef` — otherwise a
                     // subsequent comparison (`Integer('7') >= 10`) falls back to
@@ -2070,7 +2147,9 @@ fn type_bounds(args: &[TypeArg], offset: usize) -> (Option<i64>, Option<i64>) {
 fn is_pattern_like(ty: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> bool {
     let r = resolve_alias(ty, aliases);
     match r.name.as_str() {
-        "Pattern" | "Regexp" | "Enum" => true,
+        // Puppet reports these with "expects a match for …" (Struct drills into
+        // the failing key, which is itself a match-for type in practice).
+        "Pattern" | "Regexp" | "Enum" | "Struct" => true,
         "Variant" => r.args.iter().any(|arg| match arg {
             TypeArg::Type(inner) => is_pattern_like(inner, aliases),
             _ => false,
@@ -2265,16 +2344,28 @@ fn eval_type_match(value: &PuppetValue, spec: &TypeSpec, aliases: &HashMap<Strin
             }
             _ => false,
         },
-        "Integer" | "Float" | "Numeric" => match value {
+        "Integer" => match value {
             PuppetValue::Integer(n) => {
                 let (min, max) = type_bounds(&spec.args, 0);
                 min.is_none_or(|m| *n >= m) && max.is_none_or(|m| *n <= m)
             }
             _ => false,
         },
+        "Float" => matches!(value, PuppetValue::Float(_)),
+        "Numeric" => match value {
+            PuppetValue::Integer(n) => {
+                let (min, max) = type_bounds(&spec.args, 0);
+                min.is_none_or(|m| *n >= m) && max.is_none_or(|m| *n <= m)
+            }
+            PuppetValue::Float(_) => true,
+            _ => false,
+        },
         "Scalar" | "ScalarData" => matches!(
             value,
-            PuppetValue::String(_) | PuppetValue::Integer(_) | PuppetValue::Bool(_)
+            PuppetValue::String(_)
+                | PuppetValue::Integer(_)
+                | PuppetValue::Float(_)
+                | PuppetValue::Bool(_)
         ),
         "Collection" => matches!(value, PuppetValue::Array(_) | PuppetValue::Hash(_)),
         "Array" | "Tuple" => match value {
@@ -4122,7 +4213,7 @@ fn source_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 fn render_epp(template: &str, params: &PuppetValue) -> String {
     let tokens = tokenize_epp(template);
     let params_map: HashMap<String, PuppetValue> = match params {
-        PuppetValue::Hash(m) => m.clone(),
+        PuppetValue::Hash(m) => m.clone().into_iter().collect(),
         _ => HashMap::new(),
     };
     let mut idx = 0;
@@ -4546,6 +4637,11 @@ fn render_epp_each(
             }
         }
         PuppetValue::Hash(entries) => {
+            // PuppetValue::Hash is unordered; iterate by sorted key so rendered
+            // output is deterministic (modules build these data hashes in key
+            // order, so this reproduces the expected file content).
+            // PuppetValue::Hash preserves insertion order (IndexMap), so iterate
+            // as-is — this reproduces the key order Puppet renders.
             for (key, value) in entries {
                 let mut scope = params.clone();
                 if vars.len() == 1 {
@@ -4942,6 +5038,18 @@ fn epp_truthy(value: &PuppetValue) -> bool {
         PuppetValue::Array(a) => !a.is_empty(),
         PuppetValue::Hash(h) => !h.is_empty(),
         PuppetValue::Integer(_) => true,
+        PuppetValue::Float(_) => true,
+    }
+}
+
+/// Render a float the way Puppet does (drop a trailing `.0` only when the value
+/// is integral is *not* Puppet's behavior — it always shows a decimal — so keep
+/// the natural Rust formatting, which yields `2.42`, `0.5`, `3` → `3`).
+fn format_puppet_float(value: f64) -> String {
+    if value.fract() == 0.0 && value.is_finite() {
+        format!("{value:.1}")
+    } else {
+        value.to_string()
     }
 }
 
@@ -4991,7 +5099,7 @@ mod tests {
 
         // Struct single-key hashes.
         let hash = |k: &str, v: PuppetValue| {
-            PuppetValue::Hash(HashMap::from([(k.to_string(), v)]))
+            PuppetValue::Hash(IndexMap::from([(k.to_string(), v)]))
         };
         // Valid Enum field value.
         assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Flag", s("no"))), Some(true));
@@ -5167,8 +5275,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("resource default must parse and evaluate");
 
@@ -5218,8 +5326,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("manifest with escaped quotes and embedded braces must parse");
         assert!(catalog.contains("notify", "{\"k\": \"v\", \"nested\": {\"a\": 1}}"));
@@ -5244,8 +5352,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("Integer() comparison must parse and evaluate");
         assert!(
@@ -5273,8 +5381,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("Integer() comparison must parse and evaluate");
         assert!(catalog.contains("notify", "ten_or_more"));
@@ -5295,8 +5403,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with template(...) followed by trailing comma must parse");
         let resource = catalog.find("file", "/x").expect("file resource present");
@@ -5319,7 +5427,7 @@ class foo {
         "#;
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut facts = HashMap::new();
+        let mut facts = IndexMap::new();
         facts.insert(
             "osfamily".to_string(),
             PuppetValue::String("RedHat".to_string()),
@@ -5327,7 +5435,7 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(facts),
             )
             .expect("manifest with =~ /.../ must parse");
@@ -5345,7 +5453,7 @@ class foo {
         "#;
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut facts = HashMap::new();
+        let mut facts = IndexMap::new();
         facts.insert(
             "osfamily".to_string(),
             PuppetValue::String("RedHat".to_string()),
@@ -5353,7 +5461,7 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(facts),
             )
             .expect("manifest with !~ /.../ must parse");
@@ -5371,7 +5479,7 @@ class foo {
         "#;
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut facts = HashMap::new();
+        let mut facts = IndexMap::new();
         facts.insert(
             "osfamily".to_string(),
             PuppetValue::String("RedHat".to_string()),
@@ -5379,7 +5487,7 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(facts),
             )
             .expect("/.../i flag must compile");
@@ -5398,7 +5506,7 @@ class foo {
         "#;
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut facts = HashMap::new();
+        let mut facts = IndexMap::new();
         facts.insert(
             "osfamily".to_string(),
             PuppetValue::String("RedHat".to_string()),
@@ -5406,7 +5514,7 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(facts),
             )
             .expect("manifest must parse");
@@ -5416,7 +5524,7 @@ class foo {
     fn eval_with_osfamily(manifest: &str, osfamily: &str) -> PuppetCatalog {
         let dir = write_module("foo", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut facts = HashMap::new();
+        let mut facts = IndexMap::new();
         facts.insert(
             "osfamily".to_string(),
             PuppetValue::String(osfamily.to_string()),
@@ -5424,7 +5532,7 @@ class foo {
         evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(facts),
             )
             .expect("manifest must parse")
@@ -5621,8 +5729,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "mymod",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("evaluating mymod (which includes mymod::foo) must succeed");
         assert!(catalog.contains("file", "/etc/sibling-loaded"));
@@ -5646,8 +5754,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "baseapp",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with `contain` must evaluate");
         assert!(catalog.contains("class", "baseapp::config"));
@@ -5671,8 +5779,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "baseapp",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with comma/array include forms must evaluate");
         for (class, file) in [
@@ -5728,8 +5836,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with epp(...) followed by trailing comma must parse");
         assert!(catalog.contains("file", "/y"));
@@ -5738,7 +5846,7 @@ class foo {
     #[test]
     fn epp_each_iterates_array_binding_loop_var() {
         let template = "<% $items.each |$i| { -%>\n- <%= $i %>\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([(
+        let params = PuppetValue::Hash(IndexMap::from([(
             "items".to_string(),
             PuppetValue::Array(vec![
                 PuppetValue::String("a".to_string()),
@@ -5751,9 +5859,9 @@ class foo {
     #[test]
     fn epp_each_iterates_hash_with_two_params() {
         let template = "<% $h.each |$k, $v| { -%>\n<%= $k %>=<%= $v %>\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([(
+        let params = PuppetValue::Hash(IndexMap::from([(
             "h".to_string(),
-            PuppetValue::Hash(HashMap::from([(
+            PuppetValue::Hash(IndexMap::from([(
                 "name".to_string(),
                 PuppetValue::String("nginx".to_string()),
             )])),
@@ -5765,7 +5873,7 @@ class foo {
     fn epp_each_with_nested_if_emits_per_element() {
         let template =
             "<% $xs.each |$x| { -%>\n<% if $x { %>on<% } else { %>off<% } %>\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([(
+        let params = PuppetValue::Hash(IndexMap::from([(
             "xs".to_string(),
             PuppetValue::Array(vec![PuppetValue::Bool(true), PuppetValue::Bool(false)]),
         )]));
@@ -5775,7 +5883,7 @@ class foo {
     #[test]
     fn epp_each_in_skipped_branch_emits_nothing() {
         let template = "<% if $on { -%>\n<% $xs.each |$x| { -%><%= $x %><% } -%>\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([
+        let params = PuppetValue::Hash(IndexMap::from([
             ("on".to_string(), PuppetValue::Bool(false)),
             (
                 "xs".to_string(),
@@ -5791,7 +5899,7 @@ class foo {
         // single missing variable, so the if-body *and* anything after it that
         // depended on the same flow vanished. Both should now render.
         let template = "<%= $ha_env %>\n<% if $ha_env != '' { -%>\nHA=on\n<% } -%>\n<% $extra.each |$e| { -%>\n- <%= $e %>\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([
+        let params = PuppetValue::Hash(IndexMap::from([
             (
                 "ha_env".to_string(),
                 PuppetValue::String("prod".to_string()),
@@ -5810,7 +5918,7 @@ class foo {
     #[test]
     fn epp_if_comparison_false_skips_only_its_branch() {
         let template = "<% if $env == 'prod' { -%>\nP\n<% } else { -%>\nQ\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([(
+        let params = PuppetValue::Hash(IndexMap::from([(
             "env".to_string(),
             PuppetValue::String("dev".to_string()),
         )]));
@@ -5820,12 +5928,12 @@ class foo {
     #[test]
     fn epp_if_numeric_and_logical_conditions() {
         let template = "<% if $n > 2 and $on { -%>\nyes\n<% } -%>\n";
-        let yes = PuppetValue::Hash(HashMap::from([
+        let yes = PuppetValue::Hash(IndexMap::from([
             ("n".to_string(), PuppetValue::Integer(5)),
             ("on".to_string(), PuppetValue::Bool(true)),
         ]));
         assert_eq!(render_epp(template, &yes), "yes\n");
-        let no = PuppetValue::Hash(HashMap::from([
+        let no = PuppetValue::Hash(IndexMap::from([
             ("n".to_string(), PuppetValue::Integer(1)),
             ("on".to_string(), PuppetValue::Bool(true)),
         ]));
@@ -5835,7 +5943,7 @@ class foo {
     #[test]
     fn epp_if_negation_and_parens() {
         let template = "<% if !($a == $b) { -%>\ndiff\n<% } -%>\n";
-        let params = PuppetValue::Hash(HashMap::from([
+        let params = PuppetValue::Hash(IndexMap::from([
             ("a".to_string(), PuppetValue::String("1".to_string())),
             ("b".to_string(), PuppetValue::String("2".to_string())),
         ]));
@@ -5888,8 +5996,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("manifest with unicode in comments must parse");
         assert!(catalog.contains("notify", "hello"));
@@ -5921,8 +6029,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with create_resources must evaluate");
         assert!(
@@ -5968,8 +6076,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with hash .each must evaluate");
         assert!(catalog.contains("file", "/tmp/one"));
@@ -5996,8 +6104,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with array .each must evaluate");
         assert!(catalog.contains("notify", "a"));
@@ -6026,8 +6134,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "ferrogate",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         assert!(
@@ -6057,8 +6165,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         assert!(catalog.contains("notify", "a"));
@@ -6082,8 +6190,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         assert!(catalog.contains("notify", "a"));
@@ -6108,8 +6216,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "baseapp",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         // Body still expanded.
@@ -6142,8 +6250,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class invoking a defined type must evaluate");
         assert!(catalog.contains("foo::app_secret", "primary"));
@@ -6175,8 +6283,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "profile",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class declaring a defined type must evaluate");
         let resource = catalog
@@ -6211,7 +6319,7 @@ class foo {
         "#;
         let dir = write_module("dockerapp", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut params = HashMap::new();
+        let mut params = IndexMap::new();
         params.insert(
             "image".to_string(),
             PuppetValue::String("nginx".to_string()),
@@ -6220,7 +6328,7 @@ class foo {
             .evaluate_define(
                 "dockerapp::run",
                 "web",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(params),
             )
             .expect("defined type subject must evaluate");
@@ -6253,7 +6361,7 @@ class foo {
         "#;
         let dir = write_module("dockerapp", manifest);
         let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
-        let mut params = HashMap::new();
+        let mut params = IndexMap::new();
         params.insert(
             "image".to_string(),
             PuppetValue::String("nginx".to_string()),
@@ -6262,7 +6370,7 @@ class foo {
             .evaluate_define(
                 "dockerapp::run",
                 "web",
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
                 &PuppetValue::Hash(params),
             )
             .unwrap();
@@ -6313,8 +6421,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         assert!(catalog.contains("notify", "a:z"));
@@ -6337,8 +6445,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         let resource = catalog.find("notify", "x").expect("notify[x] present");
@@ -6369,8 +6477,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with ensure_packages must evaluate");
         assert!(
@@ -6406,8 +6514,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .unwrap();
         assert!(catalog.contains("notify", "after"));
@@ -6434,8 +6542,8 @@ class foo {
         let catalog = evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("class with ensure_resource must evaluate");
         assert!(
@@ -6459,8 +6567,8 @@ class foo {
         evaluator
             .evaluate_class(
                 "foo",
-                &PuppetValue::Hash(HashMap::new()),
-                &PuppetValue::Hash(HashMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
             )
             .expect("manifest must parse and evaluate")
     }
