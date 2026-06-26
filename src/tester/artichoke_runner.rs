@@ -981,13 +981,15 @@ begin
         @current_example.value_results << {{ "passed" => false, "message" => "#{{e.class}}: #{{e.message}}" }}
       end
       @current_example.facts = normalize_value(resolve_let(:facts))
-      # A top-level parameter explicitly set to the `:undef` symbol means "use
-      # the class/define default" (rspec-puppet semantics, matching Puppet's
-      # `param => undef` → default), so drop those keys rather than passing an
-      # explicit undef that would fail a non-Optional parameter's type.
-      params_raw = resolve_let(:params)
-      params_raw = params_raw.reject {{ |_k, v| v == :undef }} if params_raw.is_a?(Hash)
-      @current_example.params = normalize_value(params_raw)
+      # A parameter explicitly set to the `:undef` symbol is passed through as an
+      # explicit Puppet `undef` (normalize_value maps `:undef` → nil → JSON null
+      # → PuppetValue::Undef). This mirrors rspec-puppet/Puppet: `param => undef`
+      # overrides the declared default with undef (so an Optional parameter reads
+      # back as undef instead of its default), and the native evaluator's
+      # parameter type-check then rejects undef on a non-Optional parameter the
+      # way real Puppet does. Do NOT drop these keys — dropping them would let the
+      # default render and silently mask a negative test.
+      @current_example.params = normalize_value(resolve_let(:params))
       @current_example.title = normalize_value(resolve_let(:title))
       # `let(:node) {{ 'foo.example.com' }}` — the node name from which real
       # Puppet/PDK derives the $fqdn/$hostname/$domain facts. Captured here so
