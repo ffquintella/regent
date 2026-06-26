@@ -1053,6 +1053,7 @@ begin
                 "resource_type" => exp.resource_type,
                 "title" => exp.title,
                 "attributes" => normalize_value(exp.attributes || {{}}),
+                "absent_attributes" => normalize_value(exp.absent_attributes || []),
                 "relationships" => exp.relationships,
                 "negate" => exp.negate
               }}
@@ -1217,7 +1218,7 @@ begin
     def without(attrs = nil, **kwargs)
       attrs = attrs || {{}}
       attrs = attrs.merge(kwargs) unless kwargs.empty?
-      attrs.each {{ |k, _v| @absent_attributes << k.to_s }}
+      attrs.each {{ |k, v| @absent_attributes << {{ "name" => k.to_s, "value" => v }} }}
       self
     end
 
@@ -1248,7 +1249,10 @@ begin
         self
       elsif str.start_with?("without_")
         attr = str.sub("without_", "")
-        @absent_attributes << attr
+        # `without_content(/re/)` carries a value the attribute must *not* match;
+        # `without_content` with no argument asserts the attribute is unset.
+        value = args.empty? ? nil : (args.length == 1 ? args.first : args)
+        @absent_attributes << {{ "name" => attr, "value" => value }}
         self
       elsif str.start_with?("only_with_")
         attr = str.sub("only_with_", "")

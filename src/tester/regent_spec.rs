@@ -62,6 +62,11 @@ pub enum Expectation {
         title: String,
         #[serde(default)]
         attributes: HashMap<String, JsonValue>,
+        /// `without_<attr>` matchers. Each asserts the attribute does *not*
+        /// match the given value (regex or scalar); a `None` value asserts the
+        /// attribute is unset.
+        #[serde(default)]
+        absent_attributes: Vec<AbsentAttribute>,
         /// `that_requires` / `that_comes_before` / `that_notifies` /
         /// `that_subscribes_to` references attached to this resource.
         #[serde(default)]
@@ -112,6 +117,16 @@ pub enum Expectation {
         #[serde(default)]
         message: Option<String>,
     },
+}
+
+/// One `without_<attr>` assertion from a `contain_*` matcher, e.g.
+/// `contain_file('x').without_content(/Container/)`. A `value` of `None`
+/// (`without_content` with no argument) asserts the attribute is unset.
+#[derive(Debug, Deserialize)]
+pub struct AbsentAttribute {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<JsonValue>,
 }
 
 /// One relationship assertion from a `contain_*` matcher, e.g.
@@ -362,6 +377,7 @@ impl RegentSpecRunner {
                     resource_type,
                     title,
                     attributes,
+                    absent_attributes,
                     relationships,
                     negate,
                 } => {
@@ -376,6 +392,14 @@ impl RegentSpecRunner {
                     };
                     let check = self
                         .check_resource(catalog, resource_type, title, attributes)
+                        .and_then(|()| {
+                            self.check_absent_attributes(
+                                catalog,
+                                resource_type,
+                                title,
+                                absent_attributes,
+                            )
+                        })
                         .and_then(|()| {
                             self.check_relationships(catalog, resource_type, title, relationships)
                         });
@@ -619,6 +643,85 @@ impl RegentSpecRunner {
                     expected,
                     actual
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate `without_<attr>` matchers against a resource. With a value
+    /// (`without_content(/re/)` or `without_foo('bar')`) the attribute must
+    /// *not* match it; with no value (`without_content`) the attribute must be
+    /// unset. The resource must still exist — a missing resource is reported the
+    /// same way `check_resource` does.
+    fn check_absent_attributes(
+        &self,
+        catalog: &PuppetCatalog,
+        resource_type: &str,
+        title: &str,
+        absent: &[AbsentAttribute],
+    ) -> Result<()> {
+        if absent.is_empty() {
+            return Ok(());
+        }
+        let rtype = resource_type.to_lowercase();
+        let Some(resource) = catalog.find(&rtype, title) else {
+            return Err(anyhow::anyhow!("missing resource {}[{}]", rtype, title));
+        };
+        for entry in absent {
+            let actual = resource.attributes.get(&entry.name).cloned();
+            match entry.value.as_ref().and_then(regex_marker) {
+                // `without_<attr>(/re/)` — the attribute must not match the regex.
+                Some(pattern) => {
+                    let regex = compile_spec_regex(pattern).map_err(|err| {
+                        anyhow::anyhow!(
+                            "resource {}[{}] attribute {}: invalid regex {:?}: {}",
+                            rtype,
+                            title,
+                            entry.name,
+                            pattern,
+                            err
+                        )
+                    })?;
+                    let text = actual.unwrap_or(PuppetValue::Undef).as_string();
+                    if regex.is_match(&text) {
+                        return Err(anyhow::anyhow!(
+                            "resource {}[{}] attribute {} expected NOT to match /{}/ but got {:?}",
+                            rtype,
+                            title,
+                            entry.name,
+                            pattern,
+                            text
+                        ));
+                    }
+                }
+                None => match &entry.value {
+                    // `without_<attr>('v')` — the attribute must not equal `v`.
+                    Some(value) => {
+                        let unwanted = PuppetValue::from_json(value);
+                        let actual = actual.unwrap_or(PuppetValue::Undef);
+                        if unwanted == actual || unwanted.as_string() == actual.as_string() {
+                            return Err(anyhow::anyhow!(
+                                "resource {}[{}] attribute {} expected NOT to be {:?} but it was",
+                                rtype,
+                                title,
+                                entry.name,
+                                unwanted
+                            ));
+                        }
+                    }
+                    // `without_<attr>` — the attribute must be unset.
+                    None => {
+                        if !matches!(actual, None | Some(PuppetValue::Undef)) {
+                            return Err(anyhow::anyhow!(
+                                "resource {}[{}] expected NOT to have attribute {}, but it was set to {:?}",
+                                rtype,
+                                title,
+                                entry.name,
+                                actual.unwrap().as_string()
+                            ));
+                        }
+                    }
+                },
             }
         }
         Ok(())
@@ -902,6 +1005,93 @@ mod coverage_tests {
         (case.status.clone(), case.message.clone())
     }
 
+    /// A module whose `file` resource renders an EPP template that reads a
+    /// fully-qualified class variable (`$vaultmod::network`) from scope. Exercises
+    /// the EPP-scope and `without_content` fixes end to end.
+    fn write_epp_module() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        let templates = dir.path().join("templates");
+        fs::create_dir_all(&manifests).unwrap();
+        fs::create_dir_all(&templates).unwrap();
+        fs::write(
+            dir.path().join("metadata.json"),
+            r#"{ "name": "author-vaultmod", "version": "0.1.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            manifests.join("init.pp"),
+            "class vaultmod (\n  String $network = 'vault-net',\n) {\n  \
+             file { '/etc/vault.container':\n    \
+             content => epp('vaultmod/container.epp'),\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            templates.join("container.epp"),
+            "[Container]\nNetwork=<%= $vaultmod::network %>\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn contain_plan(absent_attributes: Vec<AbsentAttribute>) -> RegentPlan {
+        let mut attributes = HashMap::new();
+        attributes.insert("content".to_string(), regex("Network=vault-net"));
+        RegentPlan {
+            tests: vec![RegentTest {
+                name: "vaultmod renders container".to_string(),
+                subject: "vaultmod".to_string(),
+                title: None,
+                node: None,
+                facts: None,
+                params: None,
+                expectations: vec![Expectation::Contain {
+                    resource_type: "file".to_string(),
+                    title: "/etc/vault.container".to_string(),
+                    attributes,
+                    absent_attributes,
+                    relationships: Vec::new(),
+                    negate: false,
+                }],
+            }],
+            load_errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn epp_renders_scope_var_and_content_matches() {
+        let module = write_epp_module();
+        // with_content(/Network=vault-net/) must match — the scope var resolves
+        // instead of rendering `undef`.
+        let (st, msg) = status(contain_plan(Vec::new()), &module);
+        assert_eq!(st, TestStatus::Passed, "{msg:?}");
+    }
+
+    #[test]
+    fn without_content_passes_when_pattern_absent() {
+        let module = write_epp_module();
+        let absent = vec![AbsentAttribute {
+            name: "content".to_string(),
+            value: Some(regex("PublishPort")),
+        }];
+        let (st, msg) = status(contain_plan(absent), &module);
+        assert_eq!(st, TestStatus::Passed, "{msg:?}");
+    }
+
+    #[test]
+    fn without_content_fails_when_pattern_present() {
+        let module = write_epp_module();
+        // The rendered file *does* contain "Container", so `without_content`
+        // must now fail (previously a silent no-op that wrongly passed).
+        let absent = vec![AbsentAttribute {
+            name: "content".to_string(),
+            value: Some(regex("Container")),
+        }];
+        let (st, msg) = status(contain_plan(absent), &module);
+        assert_eq!(st, TestStatus::Failed);
+        assert!(msg.unwrap().contains("expected NOT to match"));
+    }
+
     #[test]
     fn raise_error_matches_failing_compile() {
         let module = write_failing_module();
@@ -1016,6 +1206,7 @@ mod coverage_tests {
                     resource_type: "notify".to_string(),
                     title: "server-web01.example.com-web01-example.com".to_string(),
                     attributes: HashMap::new(),
+                    absent_attributes: Vec::new(),
                     relationships: Vec::new(),
                     negate: false,
                 }],

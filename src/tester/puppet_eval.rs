@@ -1728,7 +1728,9 @@ impl<'a> EvalContext<'a> {
                             .unwrap_or_else(|| PuppetValue::Hash(IndexMap::new()));
                         match self.resolve_template_file(&template_ref) {
                             Some(path) => match std::fs::read_to_string(&path) {
-                                Ok(template) => PuppetValue::String(render_epp(&template, &params)),
+                                Ok(template) => PuppetValue::String(render_epp_with_scope(
+                                    &template, &params, &self.vars,
+                                )),
                                 Err(_) => PuppetValue::String(format!("<epp:{template_ref}>")),
                             },
                             None => PuppetValue::String(format!("<epp:{template_ref}>")),
@@ -1743,7 +1745,7 @@ impl<'a> EvalContext<'a> {
                             .get(1)
                             .cloned()
                             .unwrap_or_else(|| PuppetValue::Hash(IndexMap::new()));
-                        PuppetValue::String(render_epp(&template, &params))
+                        PuppetValue::String(render_epp_with_scope(&template, &params, &self.vars))
                     }
                     "template" => {
                         // `template('mod/file.erb')` — render the named ERB file
@@ -1853,6 +1855,11 @@ impl<'a> EvalContext<'a> {
                     "length" | "size" => {
                         PuppetValue::Integer(arg_values.first().map(value_length).unwrap_or(0))
                     }
+                    // `Sensitive($x)` wraps a value so it's redacted in logs. The
+                    // evaluator doesn't model a redacted type, so it stores the
+                    // underlying value — keeping `$wrapped.unwrap` (and any EPP
+                    // that unwraps it) rendering the real content instead of undef.
+                    "Sensitive" => arg_values.first().cloned().unwrap_or(PuppetValue::Undef),
                     _ => PuppetValue::Undef,
                 }
             }
@@ -4210,12 +4217,28 @@ fn source_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 /// Anything richer (function calls, arithmetic, iteration) renders the literal
 /// text of the surrounding template — close enough for content-regex matchers
 /// in unit tests.
+#[cfg(test)]
 fn render_epp(template: &str, params: &PuppetValue) -> String {
+    render_epp_with_scope(template, params, &HashMap::new())
+}
+
+/// Render an EPP template against its parameter hash plus the surrounding
+/// Puppet scope. Real EPP templates can read variables that aren't declared
+/// parameters — most importantly fully-qualified class variables like
+/// `$bastionvault::network` — so the caller's scope is layered underneath the
+/// explicit parameters (parameters win on a name clash, mirroring Puppet's
+/// local-scope shadowing). Without this, every `$class::var` reference in a
+/// template rendered as `undef`.
+fn render_epp_with_scope(
+    template: &str,
+    params: &PuppetValue,
+    scope: &HashMap<String, PuppetValue>,
+) -> String {
     let tokens = tokenize_epp(template);
-    let params_map: HashMap<String, PuppetValue> = match params {
-        PuppetValue::Hash(m) => m.clone().into_iter().collect(),
-        _ => HashMap::new(),
-    };
+    let mut params_map: HashMap<String, PuppetValue> = scope.clone();
+    if let PuppetValue::Hash(m) = params {
+        params_map.extend(m.clone());
+    }
     let mut idx = 0;
     render_epp_block(&tokens, &mut idx, &params_map, true)
 }
@@ -4853,6 +4876,22 @@ fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue 
 /// literal, or boolean/undef keyword.
 fn epp_eval_primary(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue {
     let s = source.trim();
+    // `Sensitive($x).unwrap` / `$x.unwrap` reveal the wrapped value in Puppet.
+    // The evaluator doesn't model a distinct Sensitive type, so treat both the
+    // `Sensitive(...)` constructor and a trailing `.unwrap` as transparent
+    // passthroughs on their operand — otherwise the whole expression resolved
+    // to `undef`.
+    if let Some(receiver) = s
+        .strip_suffix(".unwrap()")
+        .or_else(|| s.strip_suffix(".unwrap"))
+    {
+        return epp_eval(receiver.trim(), params);
+    }
+    if let Some(rest) = s.strip_prefix("Sensitive(") {
+        if let Some(inner) = rest.strip_suffix(')') {
+            return epp_eval(inner.trim(), params);
+        }
+    }
     if let Some(name) = s.strip_prefix('$') {
         return params.get(name).cloned().unwrap_or(PuppetValue::Undef);
     }
@@ -5913,6 +5952,54 @@ class foo {
             ),
         ]));
         assert_eq!(render_epp(template, &params), "prod\nHA=on\n- x\n- y\n");
+    }
+
+    #[test]
+    fn epp_reads_fully_qualified_scope_variables() {
+        // A `.container`/`config.hcl` template reading `$bastionvault::network`
+        // from the calling scope must render the scope value, not `undef`.
+        let template = "Network=<%= $bastionvault::network %>\nPort=<%= $bastionvault::port %>\n";
+        let scope = HashMap::from([
+            (
+                "bastionvault::network".to_string(),
+                PuppetValue::String("vault-net".to_string()),
+            ),
+            ("bastionvault::port".to_string(), PuppetValue::Integer(8200)),
+        ]);
+        let params = PuppetValue::Hash(IndexMap::new());
+        assert_eq!(
+            render_epp_with_scope(template, &params, &scope),
+            "Network=vault-net\nPort=8200\n"
+        );
+    }
+
+    #[test]
+    fn epp_parameters_take_precedence_over_scope() {
+        let template = "<%= $name %>\n";
+        let scope = HashMap::from([(
+            "name".to_string(),
+            PuppetValue::String("from-scope".to_string()),
+        )]);
+        let params = PuppetValue::Hash(IndexMap::from([(
+            "name".to_string(),
+            PuppetValue::String("from-param".to_string()),
+        )]));
+        assert_eq!(
+            render_epp_with_scope(template, &params, &scope),
+            "from-param\n"
+        );
+    }
+
+    #[test]
+    fn epp_unwrap_renders_underlying_value() {
+        // `Sensitive(...).unwrap` and a bare `$x.unwrap` both reveal the value
+        // instead of rendering `undef`.
+        let template = "tok=<%= $token.unwrap %>\nraw=<%= Sensitive($token).unwrap %>\n";
+        let params = PuppetValue::Hash(IndexMap::from([(
+            "token".to_string(),
+            PuppetValue::String("s3cr3t".to_string()),
+        )]));
+        assert_eq!(render_epp(template, &params), "tok=s3cr3t\nraw=s3cr3t\n");
     }
 
     #[test]
