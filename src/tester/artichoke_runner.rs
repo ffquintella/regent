@@ -184,7 +184,7 @@ impl<'a> ArtichokeTestRunner<'a> {
                 || !path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map_or(false, |name| name.ends_with("_spec.rb"))
+                    .is_some_and(|name| name.ends_with("_spec.rb"))
             {
                 continue;
             }

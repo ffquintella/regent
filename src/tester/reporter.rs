@@ -82,7 +82,7 @@ impl TestReporter {
                     report.push_str(&format!("      Message: {}\n", msg));
                 }
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Output section
@@ -162,7 +162,7 @@ impl TestReporter {
                     super::TestStatus::Pending => "skipped",
                 };
 
-                html.push_str(&format!("    <tr>\n"));
+                html.push_str("    <tr>\n");
                 html.push_str(&format!(
                     "      <td class='{}'>{}</td>\n",
                     status_class,
@@ -308,6 +308,6 @@ mod tests {
 
         assert!(text.contains("Test Report: unit"));
         // Should not crash even with empty test cases
-        assert!(text.len() > 0);
+        assert!(!text.is_empty());
     }
 }

@@ -72,7 +72,7 @@ impl MetadataValidator {
         // Validate required fields
         let required_fields = vec!["name", "version", "author", "summary"];
         for field in required_fields {
-            if !metadata.get(field).is_some() {
+            if metadata.get(field).is_none() {
                 issues.push(
                     LintIssue::new(
                         LintLevel::Error,

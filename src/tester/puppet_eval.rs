@@ -485,7 +485,7 @@ impl PuppetModule {
             }
         }
 
-        register_module_path(&mut module_paths, &module_path.to_path_buf());
+        register_module_path(&mut module_paths, module_path);
         let mut primary_manifest_files = Vec::new();
         load_manifests_into(
             module_path,
@@ -518,13 +518,13 @@ impl PuppetModule {
 ///   * the raw dir basename
 fn register_module_path(
     paths: &mut HashMap<String, std::path::PathBuf>,
-    module_path: &std::path::PathBuf,
+    module_path: &std::path::Path,
 ) {
     let mut insert = |name: &str| {
         if !name.is_empty() {
             paths
                 .entry(name.to_string())
-                .or_insert_with(|| module_path.clone());
+                .or_insert_with(|| module_path.to_path_buf());
         }
     };
     if let Ok(contents) = std::fs::read_to_string(module_path.join("metadata.json")) {
@@ -1860,6 +1860,25 @@ impl<'a> EvalContext<'a> {
                     // underlying value — keeping `$wrapped.unwrap` (and any EPP
                     // that unwraps it) rendering the real content instead of undef.
                     "Sensitive" => arg_values.first().cloned().unwrap_or(PuppetValue::Undef),
+                    // stdlib `pick(a, b, …)` — the first argument that is neither
+                    // undef nor empty string. Real Puppet raises when all are
+                    // absent; this evaluator returns Undef so a manifest that
+                    // relies on a later `if`/selector still resolves rather than
+                    // aborting the whole suite.
+                    "pick" => arg_values
+                        .iter()
+                        .find(|value| !is_absent(value))
+                        .cloned()
+                        .unwrap_or(PuppetValue::Undef),
+                    // stdlib `pick_default(a, b, …, default)` — like `pick` but
+                    // falls back to the *last* argument when every earlier one is
+                    // absent, even if that last argument is itself absent.
+                    "pick_default" => arg_values
+                        .iter()
+                        .find(|value| !is_absent(value))
+                        .or_else(|| arg_values.last())
+                        .cloned()
+                        .unwrap_or(PuppetValue::Undef),
                     _ => PuppetValue::Undef,
                 }
             }
@@ -1962,11 +1981,10 @@ impl<'a> EvalContext<'a> {
                         kept.push(element[0].clone());
                     }
                 }
-                "reject" => {
-                    if !result.is_truthy() {
+                "reject"
+                    if !result.is_truthy() => {
                         kept.push(element[0].clone());
                     }
-                }
                 _ => {}
             }
         }
@@ -2135,6 +2153,13 @@ fn value_empty(value: &PuppetValue) -> bool {
         PuppetValue::Undef => true,
         _ => false,
     }
+}
+
+/// Whether a value counts as "absent" for `pick`/`pick_default`: Puppet treats
+/// only `undef` and the empty string as absent (an empty array or hash is a
+/// legitimate pick).
+fn is_absent(value: &PuppetValue) -> bool {
+    matches!(value, PuppetValue::Undef) || matches!(value, PuppetValue::String(s) if s.is_empty())
 }
 
 /// Read a `(min, max)` pair of optional bounds from type arguments starting at
@@ -2840,8 +2865,8 @@ impl<'a> PuppetParser<'a> {
                 default,
             }));
         }
-        if self.consume_keyword("fail") {
-            if self.consume(TokenKind::LParen) {
+        if self.consume_keyword("fail")
+            && self.consume(TokenKind::LParen) {
                 let message = if let Expr::String(msg) = self.parse_expr()? {
                     msg
                 } else {
@@ -2850,7 +2875,6 @@ impl<'a> PuppetParser<'a> {
                 self.consume(TokenKind::RParen);
                 return Ok(Some(Stmt::Fail(message)));
             }
-        }
         if self.peek_kind() == Some(TokenKind::Var) {
             let save = self.index;
             let name = self.expect_var()?;
@@ -3027,9 +3051,8 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_attributes(&mut self) -> Result<HashMap<String, Expr>> {
         let mut attrs = HashMap::new();
-        while !self
-            .peek_kind()
-            .map_or(false, |kind| kind == TokenKind::RBrace)
+        while !(self
+            .peek_kind() == Some(TokenKind::RBrace))
             && !self.is_eof()
         {
             if self.peek_kind() == Some(TokenKind::Comma) {
@@ -3697,9 +3720,19 @@ struct Token {
     offset: usize,
 }
 
+/// A heredoc opening (`@("EOT")`) whose body has not been consumed yet. The
+/// body lives on the lines *after* the current one, so the lexer records the
+/// tag and the index of the placeholder `String` token, then fills the token
+/// in once it reaches the following newline.
+struct PendingHeredoc {
+    tag: String,
+    token_index: usize,
+}
+
 struct Lexer {
     chars: Vec<char>,
     index: usize,
+    pending_heredocs: Vec<PendingHeredoc>,
 }
 
 impl Lexer {
@@ -3707,12 +3740,20 @@ impl Lexer {
         Self {
             chars: input.chars().collect(),
             index: 0,
+            pending_heredocs: Vec::new(),
         }
     }
 
     fn tokenize(mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
         while let Some(ch) = self.peek() {
+            // A newline flushes any heredocs opened earlier on this line: their
+            // bodies are the lines that immediately follow.
+            if ch == '\n' && !self.pending_heredocs.is_empty() {
+                self.index += 1;
+                self.collect_pending_heredocs(&mut tokens);
+                continue;
+            }
             if ch.is_whitespace() {
                 self.index += 1;
                 continue;
@@ -3866,6 +3907,17 @@ impl Lexer {
                 '$' => {
                     let text = self.consume_variable();
                     tokens.push(self.make(TokenKind::Var, &text, offset));
+                }
+                '@' if self.peek_next() == Some('(') => {
+                    // Puppet heredoc opening: `@(TAG)`, `@("TAG")`, with optional
+                    // `:syntax` and `/escapes` before the `)`. The body follows on
+                    // later lines; emit a placeholder `String` token now and record
+                    // the tag so the next newline can fill it in.
+                    self.index += 2; // consume '@('
+                    let tag = self.consume_heredoc_spec();
+                    let token_index = tokens.len();
+                    tokens.push(self.make(TokenKind::String, "", offset));
+                    self.pending_heredocs.push(PendingHeredoc { tag, token_index });
                 }
                 _ => {
                     if ch.is_ascii_digit() {
@@ -4035,6 +4087,98 @@ impl Lexer {
         self.chars[start..self.index].iter().collect()
     }
 
+    /// Parse a heredoc opening spec, starting just after `@(` and ending after
+    /// the closing `)`. Returns the end-tag text (unquoted). The `:syntax` and
+    /// `/escapes` qualifiers are recognized and skipped — they don't affect the
+    /// captured text for this evaluator.
+    fn consume_heredoc_spec(&mut self) -> String {
+        // Optional leading whitespace before the tag.
+        while matches!(self.peek(), Some(' ') | Some('\t')) {
+            self.index += 1;
+        }
+        let tag = match self.peek() {
+            Some('"') | Some('\'') => {
+                let quote = self.peek().unwrap();
+                self.index += 1; // opening quote
+                let start = self.index;
+                while let Some(c) = self.peek() {
+                    if c == quote {
+                        break;
+                    }
+                    self.index += 1;
+                }
+                let tag: String = self.chars[start..self.index].iter().collect();
+                if self.peek() == Some(quote) {
+                    self.index += 1; // closing quote
+                }
+                tag
+            }
+            _ => {
+                // Bare tag: runs until whitespace, `:`, `/`, or `)`.
+                let start = self.index;
+                while let Some(c) = self.peek() {
+                    if c.is_whitespace() || matches!(c, ':' | '/' | ')') {
+                        break;
+                    }
+                    self.index += 1;
+                }
+                self.chars[start..self.index].iter().collect()
+            }
+        };
+        // Skip any `:syntax` / `/escapes` qualifiers up to and including `)`.
+        while let Some(c) = self.peek() {
+            self.index += 1;
+            if c == ')' {
+                break;
+            }
+        }
+        tag
+    }
+
+    /// Consume the bodies of every heredoc opened on the just-finished line, in
+    /// the order they were opened, and write each captured body into its
+    /// placeholder `String` token. Called right after the newline that ends the
+    /// opening line has been consumed.
+    fn collect_pending_heredocs(&mut self, tokens: &mut [Token]) {
+        let pending = std::mem::take(&mut self.pending_heredocs);
+        for heredoc in pending {
+            let body = self.read_heredoc_body(&heredoc.tag);
+            if let Some(token) = tokens.get_mut(heredoc.token_index) {
+                token.text = body;
+            }
+        }
+    }
+
+    /// Read heredoc lines from the current position until the end-tag line,
+    /// applying Puppet's optional margin (`|`) and trailing-newline chomp (`-`)
+    /// markers. Leaves `self.index` positioned just past the end-tag line.
+    fn read_heredoc_body(&mut self, tag: &str) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        loop {
+            let line_start = self.index;
+            while let Some(c) = self.peek() {
+                if c == '\n' {
+                    break;
+                }
+                self.index += 1;
+            }
+            let line: String = self.chars[line_start..self.index].iter().collect();
+            let had_newline = self.peek() == Some('\n');
+            if had_newline {
+                self.index += 1; // consume the line's newline
+            }
+            if let Some((margin, chomp)) = end_marker_match(&line, tag) {
+                return assemble_heredoc(&lines, margin, chomp);
+            }
+            lines.push(line);
+            if !had_newline {
+                // EOF before the terminator — return what we have rather than
+                // swallowing nothing.
+                return assemble_heredoc(&lines, 0, false);
+            }
+        }
+    }
+
     fn make(&self, kind: TokenKind, text: &str, offset: usize) -> Token {
         Token {
             kind,
@@ -4042,6 +4186,60 @@ impl Lexer {
             offset,
         }
     }
+}
+
+/// If `line` is a heredoc end-tag line for `tag`, return `(margin, chomp)`:
+/// `margin` is the number of leading whitespace columns to strip from body
+/// lines (from the `|` marker, else 0), and `chomp` is whether the `-` marker
+/// requested dropping the final newline. Returns `None` otherwise.
+fn end_marker_match(line: &str, tag: &str) -> Option<(usize, bool)> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let mut rest = &line[indent..];
+    let mut has_pipe = false;
+    if let Some(after) = rest.strip_prefix('|') {
+        has_pipe = true;
+        rest = after.trim_start_matches([' ', '\t']);
+    }
+    let mut chomp = false;
+    if let Some(after) = rest.strip_prefix('-') {
+        chomp = true;
+        rest = after.trim_start_matches([' ', '\t']);
+    }
+    if rest.trim_end_matches([' ', '\t']) == tag {
+        let margin = if has_pipe { indent } else { 0 };
+        Some((margin, chomp))
+    } else {
+        None
+    }
+}
+
+/// Join heredoc body lines into the final string: strip up to `margin` leading
+/// whitespace columns from each line, terminate every line with a newline, and
+/// drop the trailing newline when `chomp` is set.
+fn assemble_heredoc(lines: &[String], margin: usize, chomp: bool) -> String {
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(strip_margin(line, margin));
+        out.push('\n');
+    }
+    if chomp {
+        out.pop();
+    }
+    out
+}
+
+/// Remove up to `margin` leading space/tab characters from `line`.
+fn strip_margin(line: &str, margin: usize) -> &str {
+    let mut stripped = 0;
+    for (idx, c) in line.char_indices() {
+        if stripped < margin && (c == ' ' || c == '\t') {
+            stripped += 1;
+        } else {
+            return &line[idx..];
+        }
+    }
+    // The whole line was leading whitespace within the margin.
+    ""
 }
 
 /// Evaluate `<needle> in <haystack>`:
@@ -6830,6 +7028,83 @@ class foo {
             dependent.attributes.get("require"),
             Some(&PuppetValue::String("File[/etc/dep]".to_string())),
             "File['/etc/dep'] must stay a resource reference"
+        );
+    }
+
+    #[test]
+    fn heredoc_body_becomes_a_string_value() {
+        // A double-quoted heredoc must lex as a plain string whose body is the
+        // following lines — the `---` inside must NOT tokenize as minus signs
+        // and blow up the parse (the enc.pp regression).
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $body = @("YAML")
+                    ---
+                    classes:
+                      - role::base
+                    | YAML
+                  file { '/etc/enc.yaml':
+                    ensure  => file,
+                    content => $body,
+                  }
+                }
+            "#,
+        );
+        let resource = catalog
+            .find("file", "/etc/enc.yaml")
+            .expect("file[/etc/enc.yaml] declared");
+        assert_eq!(
+            resource.attributes.get("content"),
+            Some(&PuppetValue::String(
+                "---\nclasses:\n  - role::base\n".to_string()
+            )),
+            "heredoc body must be captured with the `|`-margin stripped"
+        );
+    }
+
+    #[test]
+    fn heredoc_interpolates_and_chomps() {
+        // Double-quoted tag interpolates `${...}`; the `-` end marker chomps the
+        // trailing newline.
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $who = 'world'
+                  $greeting = @("EOT")
+                    hello ${who}
+                    | - EOT
+                  notify { 'g': message => $greeting }
+                }
+            "#,
+        );
+        let resource = catalog.find("notify", "g").expect("notify[g] declared");
+        assert_eq!(
+            resource.attributes.get("message"),
+            Some(&PuppetValue::String("hello world".to_string())),
+            "heredoc must interpolate and chomp the final newline"
+        );
+    }
+
+    #[test]
+    fn pick_returns_first_present_argument() {
+        // `pick` skips undef/empty-string and returns the first real value, so a
+        // boolean-keyed selector fed by it resolves (the client.pp regression).
+        let catalog = eval_class_foo(
+            r#"
+                class foo {
+                  $is_windows = pick($facts['is_windows'], false)
+                  $path = $is_windows ? {
+                    true    => 'C:/app',
+                    default => '/opt/app',
+                  }
+                  file { $path: ensure => directory }
+                }
+            "#,
+        );
+        assert!(
+            catalog.contains("file", "/opt/app"),
+            "pick() must fall through to `false`, selecting the default arm"
         );
     }
 }

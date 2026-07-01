@@ -332,7 +332,7 @@ impl FixtureManager {
         }
 
         if let Some(ref modules) = self.config.modules {
-            for (module_name, _module) in modules {
+            for module_name in modules.keys() {
                 let fixture_path = self.fixtures_dir.join(module_name);
                 if !fixture_path.exists() {
                     return Ok(false);
@@ -354,7 +354,7 @@ impl FixtureManager {
         let mut count = 0;
 
         if let Some(ref modules) = self.config.modules {
-            for (module_name, _module) in modules {
+            for module_name in modules.keys() {
                 let fixture_path = self.fixtures_dir.join(module_name);
 
                 if fixture_path.exists() {
@@ -561,7 +561,7 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn forge_file_uri<'a>(metadata: &'a serde_json::Value, version: Option<&str>) -> Option<String> {
+fn forge_file_uri(metadata: &serde_json::Value, version: Option<&str>) -> Option<String> {
     if let Some(version) = version {
         if let Some(releases) = metadata.get("releases").and_then(|v| v.as_array()) {
             for release in releases {

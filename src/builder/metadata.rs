@@ -96,7 +96,7 @@ impl ModuleMetadata {
     /// Validate version requirement string
     fn validate_version_requirement(&self, req: &str) -> Result<()> {
         // Simple validation for patterns like ">=1.0.0", "~>2.0", etc.
-        let patterns = vec![">=", "<=", ">", "<", "~>", "="];
+        let patterns = [">=", "<=", ">", "<", "~>", "="];
         let has_valid_pattern = patterns.iter().any(|p| req.starts_with(p));
 
         if !has_valid_pattern {
@@ -156,7 +156,7 @@ impl ModuleMetadata {
 
     /// Get module short name
     pub fn get_short_name(&self) -> &str {
-        self.name.split('-').last().unwrap_or(&self.name)
+        self.name.split('-').next_back().unwrap_or(&self.name)
     }
 }
 

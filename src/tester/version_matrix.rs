@@ -156,7 +156,7 @@ impl MatrixTestResults {
 
         self.compatibility_matrix
             .entry(puppet_key)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(ruby_key, status.to_string());
 
         self.results.push(result);
@@ -260,7 +260,7 @@ impl TestMatrixRunner {
         let results = Arc::new(Mutex::new(results));
         let mut handles = vec![];
 
-        let chunk_size = (combinations.len() + threads - 1) / threads;
+        let chunk_size = combinations.len().div_ceil(threads);
 
         for chunk in combinations.chunks(chunk_size) {
             let chunk = chunk.to_vec();

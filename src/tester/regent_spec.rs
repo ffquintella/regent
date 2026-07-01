@@ -1002,7 +1002,7 @@ mod coverage_tests {
         let runner = RegentSpecRunner::new(dir.path()).unwrap();
         let results = runner.run_plan(plan).unwrap();
         let case = &results.test_cases[0];
-        (case.status.clone(), case.message.clone())
+        (case.status, case.message.clone())
     }
 
     /// A module whose `file` resource renders an EPP template that reads a

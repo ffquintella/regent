@@ -13,8 +13,10 @@ use zip::ZipWriter;
 
 /// Output format for module package
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BuildFormat {
     /// tar.gz (gzip compression) - default Puppet format
+    #[default]
     TarGz,
     /// tar.bz2 (bzip2 compression) - better compression
     TarBz2,
@@ -22,11 +24,6 @@ pub enum BuildFormat {
     Zip,
 }
 
-impl Default for BuildFormat {
-    fn default() -> Self {
-        BuildFormat::TarGz
-    }
-}
 
 /// Configuration for building a module package
 #[derive(Debug, Clone)]
@@ -198,11 +195,10 @@ impl TarballBuilder {
                         _ => regex_src.push(c),
                     }
                 }
-                if is_dir_pattern {
-                    regex_src.push_str("(?:/.*)?$");
-                } else {
-                    regex_src.push_str("(?:/.*)?$");
-                }
+                // A trailing-slash (dir) pattern and a plain pattern match the
+                // same way here: the path itself or anything under it (see the
+                // `is_dir_pattern` note below).
+                regex_src.push_str("(?:/.*)?$");
                 if let Ok(re) = regex::Regex::new(&regex_src) {
                     if re.is_match(path_str) {
                         return true;
@@ -314,9 +310,7 @@ impl TarballBuilder {
     /// Get output directory
     fn get_output_dir(&self) -> PathBuf {
         self.config
-            .output_dir
-            .as_ref()
-            .map(|p| p.clone())
+            .output_dir.clone()
             .unwrap_or_else(|| self.config.module_path.join("pkg"))
     }
 
@@ -492,7 +486,7 @@ mod tests {
         assert_eq!(config.module_path, PathBuf::from("/tmp/module"));
         assert_eq!(config.output_dir, Some(PathBuf::from("/tmp/output")));
         assert_eq!(config.version_override, Some("2.0.0".to_string()));
-        assert_eq!(config.respect_ignore_files, false);
+        assert!(!config.respect_ignore_files);
     }
 
     #[test]

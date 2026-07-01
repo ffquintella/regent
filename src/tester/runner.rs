@@ -85,8 +85,8 @@ impl<'a> TestRunner<'a> {
 
     /// Check if RSpec is installed
     fn check_rspec_installed(&self, ruby: &std::path::Path) -> Result<bool> {
-        let mut cmd = Command::new(&ruby);
-        cmd.args(&["-S", "gem", "list", "^rspec$"]);
+        let mut cmd = Command::new(ruby);
+        cmd.args(["-S", "gem", "list", "^rspec$"]);
         self.prepend_ruby_bindir(&mut cmd, ruby);
         let output = cmd
             .output()
@@ -98,7 +98,7 @@ impl<'a> TestRunner<'a> {
 
     fn check_rubygems_version(&self, ruby: &std::path::Path) -> Result<()> {
         let output = Command::new(ruby)
-            .args(&["-e", "print Gem::VERSION"])
+            .args(["-e", "print Gem::VERSION"])
             .output()
             .context("Failed to check RubyGems version")?;
 
@@ -118,7 +118,7 @@ impl<'a> TestRunner<'a> {
 
     fn check_ruby_version(&self, ruby: &std::path::Path) -> Result<()> {
         let output = Command::new(ruby)
-            .args(&["-e", "print RUBY_VERSION"])
+            .args(["-e", "print RUBY_VERSION"])
             .output()
             .context("Failed to check Ruby version")?;
 
@@ -189,7 +189,7 @@ impl<'a> TestRunner<'a> {
 
     fn ruby_version(&self, ruby: &std::path::Path) -> Result<String> {
         let output = Command::new(ruby)
-            .args(&["-e", "print RUBY_VERSION"])
+            .args(["-e", "print RUBY_VERSION"])
             .output()
             .context("Failed to read Ruby version")?;
         if !output.status.success() {
@@ -367,7 +367,7 @@ impl<'a> TestRunner<'a> {
 
     fn ensure_bundler(&self, ruby: &std::path::Path) -> Result<()> {
         let mut check_cmd = Command::new(ruby);
-        check_cmd.args(&["-S", "bundle", "--version"]);
+        check_cmd.args(["-S", "bundle", "--version"]);
         self.prepend_ruby_bindir(&mut check_cmd, ruby);
         let check = check_cmd.output();
         if let Ok(output) = check {
@@ -380,7 +380,7 @@ impl<'a> TestRunner<'a> {
             .bundler_version_from_lockfile()
             .unwrap_or_else(|| "2.4.21".to_string());
         let mut install_cmd = Command::new(ruby);
-        install_cmd.args(&[
+        install_cmd.args([
             "-S",
             "gem",
             "install",
@@ -541,7 +541,7 @@ impl<'a> TestRunner<'a> {
 
     fn ruby_bindir(&self, ruby: &std::path::Path) -> Option<std::path::PathBuf> {
         let output = Command::new(ruby)
-            .args(&["-e", "print Gem.bindir"])
+            .args(["-e", "print Gem.bindir"])
             .output()
             .ok()?;
         if !output.status.success() {

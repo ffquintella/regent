@@ -37,7 +37,7 @@ impl DependencyTree {
     pub fn add_dependency(&mut self, parent: String, child: String) {
         self.nodes
             .entry(parent)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(child);
     }
 

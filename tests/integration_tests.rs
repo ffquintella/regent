@@ -8,14 +8,13 @@ fn test_module_creation() {
         fs::remove_dir_all(test_dir).unwrap();
     }
 
-    // This would test the module creation logic
-    assert!(true);
+    // Placeholder: module-creation logic is covered by the CLI tests; this
+    // stub just exercises the temp-dir cleanup path.
 }
 
 #[test]
 fn test_validation() {
-    // Test validation logic
-    assert!(true);
+    // Placeholder: validation logic is covered by the validator unit tests.
 }
 
 #[test]
