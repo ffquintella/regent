@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use indexmap::IndexMap;
@@ -617,7 +616,7 @@ impl RegentSpecRunner {
                         err
                     )
                 })?;
-                if !regex.is_match(&actual.as_string()) {
+                if !regex.is_match(&actual.as_string()).unwrap_or(false) {
                     return Err(anyhow::anyhow!(
                         "resource {}[{}] attribute {} expected to match /{}/ but got {:?}",
                         resource_type,
@@ -683,7 +682,7 @@ impl RegentSpecRunner {
                         )
                     })?;
                     let text = actual.unwrap_or(PuppetValue::Undef).as_string();
-                    if regex.is_match(&text) {
+                    if regex.is_match(&text).unwrap_or(false) {
                         return Err(anyhow::anyhow!(
                             "resource {}[{}] attribute {} expected NOT to match /{}/ but got {:?}",
                             rtype,
@@ -883,11 +882,11 @@ fn derive_node_facts(facts: &mut PuppetValue, node: Option<&str>) {
 /// line boundaries by default, so enable multi-line mode — otherwise a
 /// `/^Subsystem …$/` content matcher never matches a line in the middle of a
 /// multi-line rendered file.
-fn compile_spec_regex(src: &str) -> Result<Regex> {
-    RegexBuilder::new(src)
-        .multi_line(true)
-        .build()
-        .map_err(|err| anyhow::anyhow!("{err}"))
+fn compile_spec_regex(src: &str) -> Result<fancy_regex::Regex> {
+    // `(?m)` enables multi-line mode (Ruby anchors `^`/`$` to line boundaries).
+    // `fancy-regex` also gives us look-around/backreference support the plain
+    // `regex` crate rejects, so spec matchers like `with_content(/(?=…)/)` work.
+    fancy_regex::Regex::new(&format!("(?m){src}")).map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 fn error_matches(pattern: Option<&JsonValue>, message: &str) -> Result<bool> {
@@ -897,7 +896,7 @@ fn error_matches(pattern: Option<&JsonValue>, message: &str) -> Result<bool> {
             if let Some(src) = regex_marker(value) {
                 let regex = compile_spec_regex(src)
                     .with_context(|| format!("invalid raise_error regex /{src}/"))?;
-                Ok(regex.is_match(message))
+                Ok(regex.is_match(message).unwrap_or(false))
             } else if let Some(text) = value.as_str() {
                 Ok(message.contains(text))
             } else {

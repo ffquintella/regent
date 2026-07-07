@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use regex::Regex;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use indexmap::IndexMap;
@@ -1890,6 +1889,16 @@ impl<'a> EvalContext<'a> {
                         .or_else(|| arg_values.last())
                         .cloned()
                         .unwrap_or(PuppetValue::Undef),
+                    // stdlib `shell_escape(string)` (`shellescape`) — escape a
+                    // value so it's safe to splice into a shell command, mirroring
+                    // Ruby's `Shellwords.escape`. Returning the escaped string
+                    // (instead of Undef) lets specs assert on command lines built
+                    // from it, e.g. `--domain=example.com` rather than
+                    // `--domain=undef`.
+                    "shell_escape" | "shellescape" => arg_values
+                        .first()
+                        .map(|value| PuppetValue::String(shell_escape(&value.as_string())))
+                        .unwrap_or(PuppetValue::Undef),
                     _ => PuppetValue::Undef,
                 }
             }
@@ -2021,9 +2030,34 @@ impl<'a> EvalContext<'a> {
     /// Resolve a Puppet template reference like `"rustion/rustion.toml.epp"`
     /// to an absolute filesystem path of the form `<module>/templates/<rest>`.
     fn resolve_template_file(&self, reference: &str) -> Option<std::path::PathBuf> {
-        let (module_name, rest) = reference.split_once('/')?;
-        let module_root = self.module.module_paths.get(module_name)?;
-        Some(module_root.join("templates").join(rest))
+        // Preferred form: `module/path` → `<module>/templates/path`.
+        if let Some((module_name, rest)) = reference.split_once('/') {
+            if let Some(module_root) = self.module.module_paths.get(module_name) {
+                let candidate = module_root.join("templates").join(rest);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+            // The name in `template('name/...')` may not match how the module
+            // registered on disk (fixtures, a `puppet-`-prefixed dir, an
+            // internal name differing from the dir). Rather than silently fall
+            // back to a `<template:…>` placeholder — which makes the rendered
+            // content, and any assertion on it, look wrong — try the sub-path
+            // under every known module's `templates/` dir.
+            for root in self.module.module_paths.values() {
+                let candidate = root.join("templates").join(rest);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        // Last resort: treat the whole reference as a path under some
+        // `templates/` dir (handles a bare `file.erb` with no module segment).
+        self.module
+            .module_paths
+            .values()
+            .map(|root| root.join("templates").join(reference))
+            .find(|candidate| candidate.is_file())
     }
 
     fn resolve_var(&mut self, var: &VarRef) -> PuppetValue {
@@ -2171,6 +2205,30 @@ fn value_empty(value: &PuppetValue) -> bool {
 /// legitimate pick).
 fn is_absent(value: &PuppetValue) -> bool {
     matches!(value, PuppetValue::Undef) || matches!(value, PuppetValue::String(s) if s.is_empty())
+}
+
+/// Escape a string for safe use in a shell command, matching Ruby's
+/// `Shellwords.escape` (which stdlib's `shell_escape` delegates to): an empty
+/// string becomes `''`, every character outside a small safe set is
+/// backslash-escaped, and newlines become a quoted literal newline.
+fn shell_escape(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '.' | ',' | ':' | '+' | '/'
+            | '@' => out.push(ch),
+            // A bare newline can't be backslash-escaped in a shell; quote it.
+            '\n' => out.push_str("'\n'"),
+            _ => {
+                out.push('\\');
+                out.push(ch);
+            }
+        }
+    }
+    out
 }
 
 /// Read a `(min, max)` pair of optional bounds from type arguments starting at
@@ -2333,9 +2391,14 @@ fn ruby_regex_to_rust(src: &str) -> String {
     out
 }
 
-/// Compile a Puppet-authored regex pattern for matching.
-fn compile_puppet_regex(src: &str) -> Option<Regex> {
-    Regex::new(&ruby_regex_to_rust(src)).ok()
+/// Match `text` against a Puppet-authored regex pattern. Uses `fancy-regex` so
+/// look-around (`(?=…)`, `(?<=…)`) and backreferences — which the plain `regex`
+/// crate rejects — are supported. An invalid pattern is treated as a non-match.
+fn puppet_regex_is_match(src: &str, text: &str) -> bool {
+    match fancy_regex::Regex::new(&ruby_regex_to_rust(src)) {
+        Ok(re) => re.is_match(text).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Whether `value` matches a single type argument (used for `Variant`,
@@ -2346,7 +2409,7 @@ fn type_arg_matches(value: &PuppetValue, arg: &TypeArg, aliases: &HashMap<String
         TypeArg::Str(s) => matches!(value, PuppetValue::String(v) if v == s),
         TypeArg::Int(n) => matches!(value, PuppetValue::Integer(v) if v == n),
         TypeArg::Regex(re) => matches!(value, PuppetValue::String(text)
-            if compile_puppet_regex(re).map(|r| r.is_match(text)).unwrap_or(false)),
+            if puppet_regex_is_match(re, text)),
         TypeArg::Default => true,
         // A bare struct field set in argument position has no standalone
         // meaning; treat it as unconstrained.
@@ -2471,9 +2534,7 @@ fn eval_type_match(value: &PuppetValue, spec: &TypeSpec, aliases: &HashMap<Strin
             // A Puppet `Pattern` only matches String values — an Integer or
             // Boolean is never coerced to its text form for the test.
             PuppetValue::String(text) => spec.args.iter().any(|arg| match arg {
-                TypeArg::Regex(re) | TypeArg::Str(re) => {
-                    compile_puppet_regex(re).map(|r| r.is_match(text)).unwrap_or(false)
-                }
+                TypeArg::Regex(re) | TypeArg::Str(re) => puppet_regex_is_match(re, text),
                 _ => false,
             }),
             _ => false,
@@ -4361,12 +4422,16 @@ fn eval_in(needle: &PuppetValue, haystack: &PuppetValue) -> bool {
 }
 
 /// Evaluate `subject =~ pattern`. The pattern's `as_string()` is compiled
-/// as a `regex::Regex` and matched (substring match — Puppet semantics).
+/// as a `fancy_regex::Regex` and matched (substring match — Puppet semantics).
+/// `fancy-regex` adds look-around/backreference support the plain `regex` crate
+/// lacks.
 fn eval_regex_match(subject: &PuppetValue, pattern: &PuppetValue) -> Result<bool> {
     let subject = subject.as_string();
     let pattern = pattern.as_string();
-    let re = Regex::new(&pattern).with_context(|| format!("invalid regex pattern: /{pattern}/"))?;
-    Ok(re.is_match(&subject))
+    let re = fancy_regex::Regex::new(&ruby_regex_to_rust(&pattern))
+        .with_context(|| format!("invalid regex pattern: /{pattern}/"))?;
+    re.is_match(&subject)
+        .with_context(|| format!("regex match failed: /{pattern}/"))
 }
 
 fn is_ident_start(ch: char) -> bool {
@@ -5314,6 +5379,106 @@ mod tests {
         dir
     }
 
+    /// Build a module dir with a `metadata.json` name, one ERB template, and an
+    /// `init.pp`. Returns the tempdir.
+    fn write_module_with_template(
+        metadata_name: &str,
+        template_rel: &str,
+        template_body: &str,
+        init_pp: &str,
+    ) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let manifests = dir.path().join("manifests");
+        fs::create_dir_all(&manifests).unwrap();
+        let template_path = dir.path().join("templates").join(template_rel);
+        fs::create_dir_all(template_path.parent().unwrap()).unwrap();
+        fs::write(
+            dir.path().join("metadata.json"),
+            format!(r#"{{"name":"{metadata_name}"}}"#),
+        )
+        .unwrap();
+        fs::write(&template_path, template_body).unwrap();
+        fs::write(manifests.join("init.pp"), init_pp).unwrap();
+        dir
+    }
+
+    #[test]
+    fn template_renders_and_chained_resources_stay_in_catalog() {
+        // A `file` whose content comes from an ERB template, chained with `~>`
+        // to a `service`. Both resources must be in the catalog and the ERB
+        // must actually render (not fall back to a `<template:…>` placeholder).
+        let dir = write_module_with_template(
+            "acme-sssd",
+            "sssd.conf.erb",
+            "[domain/<%= @domain %>]\n",
+            r#"
+                class sssd (String $domain = 'example.com') {
+                  file { '/etc/sssd/sssd.conf':
+                    ensure  => file,
+                    content => template('sssd/sssd.conf.erb'),
+                  }
+                  ~> service { 'sssd':
+                    ensure => running,
+                  }
+                }
+            "#,
+        );
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = ev
+            .evaluate_class(
+                "sssd",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("class with template() + ~> chain must evaluate");
+        let file = catalog
+            .find("file", "/etc/sssd/sssd.conf")
+            .expect("templated file resource present");
+        assert_eq!(
+            file.attributes.get("content"),
+            Some(&PuppetValue::String("[domain/example.com]\n".to_string()))
+        );
+        assert!(
+            catalog.contains("service", "sssd"),
+            "resource chained after the templated file must stay in the catalog"
+        );
+    }
+
+    #[test]
+    fn template_resolves_when_module_name_differs_from_reference() {
+        // `template('sssd/…')` while the module registers as `identity` (its
+        // metadata name). The lenient fallback must still find the template
+        // under a known `templates/` dir instead of emitting a placeholder.
+        let dir = write_module_with_template(
+            "acme-identity",
+            "sssd.conf.erb",
+            "rendered=<%= @domain %>",
+            r#"
+                class identity (String $domain = 'example.com') {
+                  file { '/etc/sssd/sssd.conf':
+                    ensure  => file,
+                    content => template('sssd/sssd.conf.erb'),
+                  }
+                }
+            "#,
+        );
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = ev
+            .evaluate_class(
+                "identity",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("class must evaluate");
+        let file = catalog
+            .find("file", "/etc/sssd/sssd.conf")
+            .expect("file resource present");
+        assert_eq!(
+            file.attributes.get("content"),
+            Some(&PuppetValue::String("rendered=example.com".to_string()))
+        );
+    }
+
     #[test]
     fn type_aliases_drive_allow_value_matching() {
         let dir = tempfile::tempdir().unwrap();
@@ -5660,6 +5825,71 @@ class foo {
             resource.attributes.get("mode"),
             Some(&PuppetValue::String("0644".to_string()))
         );
+    }
+
+    #[test]
+    fn shell_escape_returns_escaped_string_not_undef() {
+        // `shell_escape` must produce a usable value (a plain word passes
+        // through unchanged) rather than Undef, so a command line built with it
+        // reads `--domain=example.com`, not `--domain=undef`.
+        let manifest = r#"
+            class foo {
+              $domain = shell_escape('example.com')
+              notify { "run": message => "--domain=${domain}" }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("class using shell_escape must evaluate");
+        let resource = catalog.find("notify", "run").expect("notify present");
+        assert_eq!(
+            resource.attributes.get("message"),
+            Some(&PuppetValue::String("--domain=example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn shell_escape_quotes_shell_metacharacters() {
+        // Whitespace and shell metacharacters get backslash-escaped, matching
+        // Ruby's Shellwords.escape.
+        assert_eq!(shell_escape("a b"), "a\\ b");
+        assert_eq!(shell_escape("a;b|c"), "a\\;b\\|c");
+        assert_eq!(shell_escape(""), "''");
+        assert_eq!(shell_escape("plain.value-1"), "plain.value-1");
+    }
+
+    #[test]
+    fn regex_lookahead_is_supported() {
+        // The plain `regex` crate rejects look-around; `fancy-regex` accepts it.
+        // `foo(?=bar)` matches "foobar" but not "foobaz".
+        let manifest = r#"
+            class foo {
+              if $::hostname =~ /foo(?=bar)/ {
+                notify { 'lookahead_matched': }
+              }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let mut facts = IndexMap::new();
+        facts.insert(
+            "hostname".to_string(),
+            PuppetValue::String("foobar".to_string()),
+        );
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(facts),
+            )
+            .expect("manifest with a look-ahead regex must parse and evaluate");
+        assert!(catalog.contains("notify", "lookahead_matched"));
     }
 
     #[test]
