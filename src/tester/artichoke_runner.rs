@@ -1088,6 +1088,10 @@ begin
         value == :undef ? nil : value.to_s
       when Regexp
         {{ "__regex__" => value.source }}
+      when RegentSensitive
+        # Tag Sensitive-wrapped values so the Rust layer can recognize and
+        # transparently unwrap them (see PuppetValue::from_json).
+        {{ "__sensitive__" => normalize_value(value.unwrap) }}
       else
         value
       end
@@ -1140,6 +1144,49 @@ begin
       result
     end
   end
+
+  # `sensitive('secret')` in a spec — either as a `let(:params)` value or inside
+  # a `.with_*` matcher — wraps a value the way rspec-puppet's `sensitive` helper
+  # (RSpec::Puppet::Sensitive) does. Regent's evaluator models Sensitive
+  # transparently (see the `Sensitive(...)` handling in puppet_eval.rs), so this
+  # wrapper exists only to (a) let specs that call `sensitive(...)` load without a
+  # real Puppet/rspec-puppet on PATH and (b) carry the wrapped value through
+  # `normalize_value` as a tagged `{{"__sensitive__" => ...}}` that the Rust layer
+  # unwraps. Equality compares the unwrapped values, mirroring
+  # RSpec::Puppet::Sensitive#==.
+  class RegentSensitive
+    attr_reader :value
+    def initialize(value)
+      @value = value
+    end
+
+    def unwrap
+      @value
+    end
+
+    def sensitive?
+      true
+    end
+
+    def inspect
+      "Sensitive(#{{@value.inspect}})"
+    end
+
+    def ==(other)
+      if other.respond_to?(:unwrap)
+        unwrap == other.unwrap
+      else
+        unwrap == other
+      end
+    end
+  end
+  # Expose the wrapper under the name a spec might reference directly
+  # (`RSpec::Puppet::Sensitive.new(...)`), the class rspec-puppet defines.
+  module RSpec
+    module Puppet
+    end
+  end
+  RSpec::Puppet.const_set(:Sensitive, RegentSensitive) unless RSpec::Puppet.const_defined?(:Sensitive)
 
   # `eq`/`eql` value matcher for in-Ruby assertions (`expect(x).to eq(y)`),
   # used by non-catalog specs such as custom-fact unit tests.
@@ -1512,6 +1559,11 @@ begin
     ValueMatcher.new(expected)
   end
   alias eql eq
+  # rspec-puppet's `sensitive(value)` helper: wrap a value so it round-trips as a
+  # Puppet Sensitive. Used both in `let(:params)` and in `.with_*` matchers.
+  def sensitive(value)
+    RegentSensitive.new(value)
+  end
   def raise_error(*args)
     message = nil
     args.each {{ |a| message = a if a.is_a?(Regexp) || a.is_a?(String) }}

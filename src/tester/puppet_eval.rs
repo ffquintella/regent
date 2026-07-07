@@ -33,11 +33,22 @@ impl PuppetValue {
             serde_json::Value::Array(values) => {
                 PuppetValue::Array(values.iter().map(PuppetValue::from_json).collect())
             }
-            serde_json::Value::Object(map) => PuppetValue::Hash(
-                map.iter()
-                    .map(|(key, value)| (key.clone(), PuppetValue::from_json(value)))
-                    .collect(),
-            ),
+            serde_json::Value::Object(map) => {
+                // `sensitive('x')` in a spec arrives tagged as `{"__sensitive__": x}`
+                // (see normalize_value in artichoke_runner.rs). The evaluator models
+                // Sensitive transparently — matching the `Sensitive(...)` constructor
+                // handling — so unwrap it to the underlying value here.
+                if map.len() == 1 {
+                    if let Some(inner) = map.get("__sensitive__") {
+                        return PuppetValue::from_json(inner);
+                    }
+                }
+                PuppetValue::Hash(
+                    map.iter()
+                        .map(|(key, value)| (key.clone(), PuppetValue::from_json(value)))
+                        .collect(),
+                )
+            }
         }
     }
 
@@ -6198,6 +6209,35 @@ class foo {
             PuppetValue::String("s3cr3t".to_string()),
         )]));
         assert_eq!(render_epp(template, &params), "tok=s3cr3t\nraw=s3cr3t\n");
+    }
+
+    #[test]
+    fn from_json_unwraps_sensitive_marker() {
+        // `sensitive('x')` in a spec arrives as `{"__sensitive__": ...}` and must
+        // unwrap to the underlying value, transparently — a bare string here, and
+        // a nested structure when wrapped around a hash.
+        let scalar = serde_json::json!({ "__sensitive__": "s3cr3t" });
+        assert_eq!(
+            PuppetValue::from_json(&scalar),
+            PuppetValue::String("s3cr3t".to_string())
+        );
+
+        let nested = serde_json::json!({ "__sensitive__": { "user": "root" } });
+        assert_eq!(
+            PuppetValue::from_json(&nested),
+            PuppetValue::Hash(IndexMap::from([(
+                "user".to_string(),
+                PuppetValue::String("root".to_string())
+            )]))
+        );
+
+        // A plain hash that merely *contains* a `__sensitive__` key alongside
+        // others is left intact (only a lone marker is a Sensitive wrapper).
+        let not_marker = serde_json::json!({ "__sensitive__": "a", "other": "b" });
+        assert!(matches!(
+            PuppetValue::from_json(&not_marker),
+            PuppetValue::Hash(_)
+        ));
     }
 
     #[test]
