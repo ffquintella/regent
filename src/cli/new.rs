@@ -61,10 +61,11 @@ impl NewCommand {
         fs::write(module_path.join("metadata.json"), metadata)?;
         println!("{} {}/metadata.json", "✓".green(), name);
 
-        // Create manifests/init.pp
+        // Create manifests/init.pp — the module's main class lives here and is
+        // named after the module itself (Puppet autoloading: `class <module>`
+        // in `init.pp`), not `class <module>::<module>`.
         let init_pp = format!(
-            "# @summary A short summary of the purpose of this class\n#\n# A description of what this class does\n#\n# @example\n#   include {}::{}\nclass {}::{} (\n) {{\n  # Your class code here\n}}\n",
-            name, name, name, name
+            "# @summary A short summary of the purpose of this class\n#\n# A description of what this class does\n#\n# @example\n#   include {name}\nclass {name} (\n) {{\n  # Your class code here\n}}\n",
         );
         fs::write(module_path.join("manifests/init.pp"), init_pp)?;
         println!("{} {}/manifests/init.pp", "✓".green(), name);
