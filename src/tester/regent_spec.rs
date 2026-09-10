@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

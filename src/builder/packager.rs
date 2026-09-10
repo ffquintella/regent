@@ -12,8 +12,7 @@ use zip::CompressionMethod;
 use zip::ZipWriter;
 
 /// Output format for module package
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BuildFormat {
     /// tar.gz (gzip compression) - default Puppet format
     #[default]
@@ -23,7 +22,6 @@ pub enum BuildFormat {
     /// ZIP format - Windows compatibility
     Zip,
 }
-
 
 /// Configuration for building a module package
 #[derive(Debug, Clone)]
@@ -310,7 +308,8 @@ impl TarballBuilder {
     /// Get output directory
     fn get_output_dir(&self) -> PathBuf {
         self.config
-            .output_dir.clone()
+            .output_dir
+            .clone()
             .unwrap_or_else(|| self.config.module_path.join("pkg"))
     }
 

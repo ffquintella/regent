@@ -100,7 +100,10 @@ end
             .find(|(name, _)| name.contains(needle))
             .map(|(_, tc)| tc.clone())
             .unwrap_or_else(|| {
-                panic!("no test case containing {needle:?}; have {:?}", cases.keys())
+                panic!(
+                    "no test case containing {needle:?}; have {:?}",
+                    cases.keys()
+                )
             })
     };
 

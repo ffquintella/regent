@@ -192,7 +192,10 @@ mod tests {
 
     #[test]
     fn module_name_itself_maps_to_main_class() {
-        assert_eq!(fully_qualified_class_name("mymodule", "mymodule"), "mymodule");
+        assert_eq!(
+            fully_qualified_class_name("mymodule", "mymodule"),
+            "mymodule"
+        );
         assert_eq!(
             manifest_path_for_class("mymodule", "mymodule"),
             PathBuf::from("init.pp")
@@ -244,7 +247,10 @@ mod tests {
         GenerateCommand::class("server::config", dir.path()).unwrap();
 
         let path = dir.path().join("manifests/server/config.pp");
-        assert!(path.exists(), "expected manifests/server/config.pp to exist");
+        assert!(
+            path.exists(),
+            "expected manifests/server/config.pp to exist"
+        );
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("class mymodule::server::config ("));
     }

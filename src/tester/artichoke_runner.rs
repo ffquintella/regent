@@ -828,8 +828,7 @@ end
             .collect::<Vec<String>>()
             .join(", ");
         let supported_os_literal = render_supported_os_ruby(supported_os);
-        let facter_sources_literal =
-            format!("{:?}", read_facter_sources(&self.config.module_path));
+        let facter_sources_literal = format!("{:?}", read_facter_sources(&self.config.module_path));
         format!(
             r##"
 begin
@@ -3015,7 +3014,9 @@ mod discovery_tests {
     fn skips_fixture_module_specs() {
         // Vendored dependency modules carry their own specs (including their
         // own beaker acceptance suites) that are not under test here.
-        assert!(!runnable("fixtures/modules/concat/spec/classes/concat_spec.rb"));
+        assert!(!runnable(
+            "fixtures/modules/concat/spec/classes/concat_spec.rb"
+        ));
         assert!(!runnable(
             "fixtures/modules/concat/spec/acceptance/fragments_spec.rb"
         ));

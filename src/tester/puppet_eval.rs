@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1813,10 +1813,7 @@ impl<'a> EvalContext<'a> {
                     // `join(array[, sep])` — join array elements with an optional
                     // separator (default empty string).
                     "join" => {
-                        let sep = arg_values
-                            .get(1)
-                            .map(|v| v.as_string())
-                            .unwrap_or_default();
+                        let sep = arg_values.get(1).map(|v| v.as_string()).unwrap_or_default();
                         match arg_values.first() {
                             Some(PuppetValue::Array(items)) => PuppetValue::String(
                                 items
@@ -2001,10 +1998,9 @@ impl<'a> EvalContext<'a> {
                         kept.push(element[0].clone());
                     }
                 }
-                "reject"
-                    if !result.is_truthy() => {
-                        kept.push(element[0].clone());
-                    }
+                "reject" if !result.is_truthy() => {
+                    kept.push(element[0].clone());
+                }
                 _ => {}
             }
         }
@@ -2218,8 +2214,9 @@ fn shell_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '.' | ',' | ':' | '+' | '/'
-            | '@' => out.push(ch),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '.' | ',' | ':' | '+' | '/' | '@' => {
+                out.push(ch)
+            }
             // A bare newline can't be backslash-escaped in a shell; quote it.
             '\n' => out.push_str("'\n'"),
             _ => {
@@ -2353,9 +2350,10 @@ fn type_admits_string(spec: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> b
     let resolved = resolve_alias(spec, aliases);
     match resolved.name.as_str() {
         "String" => true,
-        "Variant" | "Optional" => resolved.args.iter().any(|arg| {
-            matches!(arg, TypeArg::Type(inner) if type_admits_string(inner, aliases))
-        }),
+        "Variant" | "Optional" => resolved
+            .args
+            .iter()
+            .any(|arg| matches!(arg, TypeArg::Type(inner) if type_admits_string(inner, aliases))),
         _ => false,
     }
 }
@@ -2403,7 +2401,11 @@ fn puppet_regex_is_match(src: &str, text: &str) -> bool {
 
 /// Whether `value` matches a single type argument (used for `Variant`,
 /// `Optional`, and `Array`/`Hash` element types).
-fn type_arg_matches(value: &PuppetValue, arg: &TypeArg, aliases: &HashMap<String, TypeSpec>) -> bool {
+fn type_arg_matches(
+    value: &PuppetValue,
+    arg: &TypeArg,
+    aliases: &HashMap<String, TypeSpec>,
+) -> bool {
     match arg {
         TypeArg::Type(spec) => eval_type_match(value, spec, aliases),
         TypeArg::Str(s) => matches!(value, PuppetValue::String(v) if v == s),
@@ -2423,7 +2425,11 @@ fn type_arg_matches(value: &PuppetValue, arg: &TypeArg, aliases: &HashMap<String
 /// `aliases`. A name that is neither a built-in type nor a known alias matches
 /// leniently (treated as `Any`) so a test never fails purely because the
 /// embedded evaluator doesn't implement an exotic type.
-fn eval_type_match(value: &PuppetValue, spec: &TypeSpec, aliases: &HashMap<String, TypeSpec>) -> bool {
+fn eval_type_match(
+    value: &PuppetValue,
+    spec: &TypeSpec,
+    aliases: &HashMap<String, TypeSpec>,
+) -> bool {
     let spec = resolve_alias(spec, aliases);
     let spec = &spec;
     match spec.name.as_str() {
@@ -2937,16 +2943,15 @@ impl<'a> PuppetParser<'a> {
                 default,
             }));
         }
-        if self.consume_keyword("fail")
-            && self.consume(TokenKind::LParen) {
-                let message = if let Expr::String(msg) = self.parse_expr()? {
-                    msg
-                } else {
-                    "fail".to_string()
-                };
-                self.consume(TokenKind::RParen);
-                return Ok(Some(Stmt::Fail(message)));
-            }
+        if self.consume_keyword("fail") && self.consume(TokenKind::LParen) {
+            let message = if let Expr::String(msg) = self.parse_expr()? {
+                msg
+            } else {
+                "fail".to_string()
+            };
+            self.consume(TokenKind::RParen);
+            return Ok(Some(Stmt::Fail(message)));
+        }
         if self.peek_kind() == Some(TokenKind::Var) {
             let save = self.index;
             let name = self.expect_var()?;
@@ -3123,10 +3128,7 @@ impl<'a> PuppetParser<'a> {
 
     fn parse_attributes(&mut self) -> Result<HashMap<String, Expr>> {
         let mut attrs = HashMap::new();
-        while !(self
-            .peek_kind() == Some(TokenKind::RBrace))
-            && !self.is_eof()
-        {
+        while !(self.peek_kind() == Some(TokenKind::RBrace)) && !self.is_eof() {
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.index += 1;
                 continue;
@@ -3989,7 +3991,8 @@ impl Lexer {
                     let tag = self.consume_heredoc_spec();
                     let token_index = tokens.len();
                     tokens.push(self.make(TokenKind::String, "", offset));
-                    self.pending_heredocs.push(PendingHeredoc { tag, token_index });
+                    self.pending_heredocs
+                        .push(PendingHeredoc { tag, token_index });
                 }
                 _ => {
                     if ch.is_ascii_digit() {
@@ -5511,26 +5514,37 @@ mod tests {
         assert_eq!(ev.type_allows("Ssh::Nope", &s("x")), None);
 
         // Struct single-key hashes.
-        let hash = |k: &str, v: PuppetValue| {
-            PuppetValue::Hash(IndexMap::from([(k.to_string(), v)]))
-        };
+        let hash =
+            |k: &str, v: PuppetValue| PuppetValue::Hash(IndexMap::from([(k.to_string(), v)]));
         // Valid Enum field value.
-        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Flag", s("no"))), Some(true));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Flag", s("no"))),
+            Some(true)
+        );
         // Invalid Enum field value, and undef rejected for an Enum field.
-        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Flag", s("x"))), Some(false));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Flag", s("x"))),
+            Some(false)
+        );
         assert_eq!(
             ev.type_allows("Ssh::Cfg", &hash("Flag", PuppetValue::Undef)),
             Some(false)
         );
         // String field: a value matches, and undef is accepted (the Puppet
         // quirk for String-typed optional struct keys).
-        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Name", s("eth0"))), Some(true));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Name", s("eth0"))),
+            Some(true)
+        );
         assert_eq!(
             ev.type_allows("Ssh::Cfg", &hash("Name", PuppetValue::Undef)),
             Some(true)
         );
         // Unknown struct key is rejected.
-        assert_eq!(ev.type_allows("Ssh::Cfg", &hash("Bogus", s("x"))), Some(false));
+        assert_eq!(
+            ev.type_allows("Ssh::Cfg", &hash("Bogus", s("x"))),
+            Some(false)
+        );
     }
 
     #[test]

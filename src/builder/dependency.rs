@@ -35,10 +35,7 @@ impl DependencyTree {
     }
 
     pub fn add_dependency(&mut self, parent: String, child: String) {
-        self.nodes
-            .entry(parent)
-            .or_default()
-            .push(child);
+        self.nodes.entry(parent).or_default().push(child);
     }
 
     pub fn has_cycles(&self) -> bool {
