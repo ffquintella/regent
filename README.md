@@ -32,6 +32,7 @@ All project documentation has been organized in the [`docs/`](docs/) folder. Sta
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Contribution guidelines |
 | [BUILD_PHASE_IMPLEMENTATION.md](docs/BUILD_PHASE_IMPLEMENTATION.md) | Build system detailed implementation |
 | [ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md) | Ruby/Rust integration details |
+| [PUBLISHING_MODULES.md](docs/PUBLISHING_MODULES.md) | Publishing modules to the Forge or another repository |
 
 ## 🚀 Quick Start
 
@@ -45,6 +46,24 @@ cargo test
 # Run the CLI
 ./target/debug/regent --help
 ```
+
+## 📤 Publishing a Module
+
+```bash
+# Build and upload to the Puppet Forge
+regent publish --token "$MY_FORGE_TOKEN"
+
+# See what would be uploaded, without uploading
+regent publish --dry-run
+
+# Upload to any other repository (Artifactory, Nexus, an internal mirror, …)
+regent publish --url 'https://repo.example.com/puppet/{name}/{version}/{filename}' --username ci-user
+```
+
+Credentials come from `--token`, `--token-file`, `$REGENT_FORGE_TOKEN`,
+`$REGENT_PUBLISH_TOKEN`, `$PDK_FORGE_TOKEN`, or `~/.regent/forge_token`.
+See [docs/PUBLISHING_MODULES.md](docs/PUBLISHING_MODULES.md) for the full flag
+reference.
 
 ## ✅ Current Status
 
@@ -63,7 +82,8 @@ regent/
 ├── src/
 │   ├── builder/          # Phase 1: Build functionality
 │   ├── tester/           # Phase 2: Test functionality
-│   └── validator/        # Phase 3: Validation (planned)
+│   ├── validator/        # Phase 3: Validation (planned)
+│   └── publisher/        # Forge / repository publishing
 ├── spec/                 # Ruby tests
 ├── docs/                 # 📁 Documentation (see above)
 ├── Cargo.toml            # Rust dependencies

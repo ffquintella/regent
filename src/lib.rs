@@ -3,6 +3,7 @@
 pub mod builder;
 pub mod config;
 pub mod generator;
+pub mod publisher;
 pub mod ruby_interop;
 pub mod tester;
 pub mod validator;
@@ -13,6 +14,9 @@ pub use builder::{
 };
 pub use config::Config;
 pub use generator::ModuleGenerator;
+pub use publisher::{
+    Credentials, PublishConfig, PublishOutcome, PublishTarget, Publisher, DEFAULT_FORGE_URL,
+};
 pub use tester::{ModuleTester, TestConfig, TestResults, TestType};
 pub use validator::ModuleValidator;
 

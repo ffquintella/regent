@@ -8,7 +8,8 @@ use colored::*;
 use std::path::PathBuf;
 
 use cli::{
-    BootstrapCommand, BuildCommand, GenerateCommand, NewCommand, TestCommand, ValidateCommand,
+    BootstrapCommand, BuildCommand, GenerateCommand, NewCommand, PublishCommand, PublishOptions,
+    TestCommand, ValidateCommand,
 };
 
 #[derive(Parser)]
@@ -63,6 +64,81 @@ enum Commands {
 
         #[arg(long, help = "Output directory")]
         output: Option<PathBuf>,
+    },
+
+    /// Publish a built module to the Puppet Forge or another repository
+    ///
+    /// Credentials are taken from --token, --token-file, $REGENT_FORGE_TOKEN,
+    /// $REGENT_PUBLISH_TOKEN, $PDK_FORGE_TOKEN, or ~/.regent/forge_token — in
+    /// that order. Use --url to publish to a non-Forge repository that accepts
+    /// the tarball as the raw request body.
+    Publish {
+        #[arg(help = "Path to module", default_value = ".")]
+        path: PathBuf,
+
+        #[arg(
+            long,
+            help = "Tarball to publish (default: pkg/<name>-<version>.tar.gz)"
+        )]
+        file: Option<PathBuf>,
+
+        #[arg(long, help = "Fail instead of building when the tarball is missing")]
+        no_build: bool,
+
+        #[arg(
+            long,
+            help = "Forge API base URL",
+            default_value = cli::publish::DEFAULT_FORGE_BASE_URL
+        )]
+        forge_url: String,
+
+        #[arg(
+            long,
+            help = "Publish to an arbitrary repository URL instead of a Forge API \
+                    (supports {name}, {version} and {filename} placeholders)",
+            conflicts_with = "forge_url"
+        )]
+        url: Option<String>,
+
+        #[arg(
+            long,
+            help = "HTTP method used with --url",
+            default_value = "put",
+            requires = "url"
+        )]
+        method: String,
+
+        #[arg(long, help = "API token (Bearer auth)")]
+        token: Option<String>,
+
+        #[arg(
+            long,
+            help = "Read the API token from this file",
+            conflicts_with = "token"
+        )]
+        token_file: Option<PathBuf>,
+
+        #[arg(long, help = "Username for HTTP Basic auth repositories")]
+        username: Option<String>,
+
+        #[arg(
+            long,
+            help = "Password for HTTP Basic auth (default: $REGENT_PUBLISH_PASSWORD)",
+            requires = "username"
+        )]
+        password: Option<String>,
+
+        #[arg(
+            long = "header",
+            help = "Extra request header, as `Name: value` (repeatable)"
+        )]
+        headers: Vec<String>,
+
+        #[arg(long, help = "Upload even if the version already exists on the forge")]
+        force: bool,
+
+        #[arg(long, help = "Show what would be uploaded without uploading it")]
+        dry_run: bool,
     },
 
     /// Run tests
@@ -216,6 +292,38 @@ fn main() -> anyhow::Result<()> {
         Commands::Build { path, output } => {
             println!("{}", format!("Building module at: {:?}", path).cyan());
             BuildCommand::execute(&path, output.as_deref())?;
+        }
+
+        Commands::Publish {
+            path,
+            file,
+            no_build,
+            forge_url,
+            url,
+            method,
+            token,
+            token_file,
+            username,
+            password,
+            headers,
+            force,
+            dry_run,
+        } => {
+            PublishCommand::execute(PublishOptions {
+                path: &path,
+                file: file.as_deref(),
+                no_build,
+                forge_url: &forge_url,
+                url: url.as_deref(),
+                method: &method,
+                token: token.as_deref(),
+                token_file: token_file.as_deref(),
+                username: username.as_deref(),
+                password: password.as_deref(),
+                headers: &headers,
+                force,
+                dry_run,
+            })?;
         }
 
         Commands::Test {
