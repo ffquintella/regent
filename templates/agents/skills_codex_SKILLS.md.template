@@ -40,12 +40,23 @@ In order. Move down only when the trigger for the next tier fires.
 | 3 | **Claude Sonnet** | **Reviewer** | Every non-trivial diff (rule R6) |
 | 4 | **Claude Opus** | **Escalation reviewer** | Risk ≥R2, architecture impact, or Sonnet rejects twice |
 
-GPT-family specialists, reached only through routing rules R3 and R4:
+**You are running in Codex, so you run on GPT models.** GPT-family specialists,
+reached only through routing rules R3 and R4:
 **GPT Terra** for >200-file comprehension (rule R4) and **GPT Sol** for rollout,
 capacity, and cost forecasting (rule R3).
 
 **Family discipline:** every acting agent in this seat runs on a GPT model.
-Claude models are reached only at the review handoff, never mid-task.
+Never call Claude Sonnet, Claude Opus, or Fable from inside Codex. The reviewer
+step is a handoff to the Claude Code runtime, not a model call from here. If no
+Claude Code runtime is available, escalate to GPT-6 as reviewer and say in your
+result that the cross-family check did not happen.
+
+| Capability | Your model | Claude Code equivalent |
+| --- | --- | --- |
+| Default worker | GPT-6 Mini | Claude Sonnet |
+| Deep architect | GPT-6 | Claude Opus |
+| Long-context reader | GPT Terra | Claude Sonnet |
+| Simulation | GPT Sol | Fable |
 
 ## 3. Routing (deterministic — first match wins)
 
@@ -54,7 +65,7 @@ and executes R5 implementation after Claude accepts the design.
 
 | # | Condition | Primary | Reviewer | Escalation |
 | --- | --- | --- | --- | --- |
-| R1 | Enterprise planning | *hand back to Claude* | Human | Human |
+| R1 | Enterprise planning | **GPT-6**, review and simulation legs handed to Claude Code | Human | Human |
 | R2 | Architecture review of a design doc, ADR, or parameter contract | *hand back to Claude* (Opus) | — | GPT-6 second opinion |
 | R3 | Simulation or forecasting | **GPT Sol** | Claude Sonnet | Claude Opus |
 | R4 | >200 files or >150 000 tokens after compression | GPT Terra → ≤4 000-token brief | Claude Sonnet | Re-enter at R1 |
@@ -139,7 +150,7 @@ risk       = blast_radius + reversibility + sensitivity      (0–2 each, total 
 | 4–5 | R2 | Claude Opus review, plus Security Engineer if secrets or network are involved |
 | 6 | R3 | Human approval before execution |
 
-**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human`.
+**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human`.
 Escalate on: two consecutive failures · confidence 0.40–0.59 · two rejections ·
 risk R2 without Opus review · contradictory agent conclusions · any invariant
 violation (straight to Human).

@@ -76,6 +76,63 @@ fn only_claude_and_gpt_family_models_appear() {
 }
 
 #[test]
+fn the_runtime_binds_the_model_family() {
+    // The runtime decides the family: Claude Code runs Claude models, Codex runs
+    // GPT models, and crossing over is a handoff rather than a model call.
+    let agents = read("AGENTS.md");
+    for needle in [
+        "Running in Claude Code → use Claude models only",
+        "Running in Codex → use GPT models only",
+        "Cross-family work is a handoff, not a model call",
+        "| Simulation & forecasting | **Fable** | **GPT Sol** |",
+    ] {
+        assert!(
+            agents.contains(needle),
+            "AGENTS.md must state the runtime binding rule {needle:?}"
+        );
+    }
+
+    let claude = read("CLAUDE.md");
+    assert!(claude.contains("you run on Claude models: Sonnet, Opus, and"));
+    assert!(claude.contains("Never call a GPT model from here"));
+
+    let claude_skills = read("skills/claude/SKILLS.md");
+    assert!(claude_skills.contains("You are running in Claude Code, so you run on Claude models"));
+    assert!(claude_skills.contains(
+        "never by
+calling them from here"
+    ));
+
+    let codex_skills = read("skills/codex/SKILLS.md");
+    assert!(codex_skills.contains("You are running in Codex, so you run on GPT models"));
+    assert!(
+        codex_skills.contains("Never call Claude Sonnet, Claude Opus, or Fable from inside Codex")
+    );
+}
+
+#[test]
+fn fable_is_claude_family_and_reached_only_by_rule() {
+    // Fable is the most expensive model in the registry; it must never be a
+    // default, and it must never appear as a Codex-seat model.
+    let agents = read("AGENTS.md");
+    assert!(
+        agents.contains("**Fable** | simulation & deepest reasoning"),
+        "Fable belongs to the Claude-family registry table"
+    );
+    let claude_skills = read("skills/claude/SKILLS.md");
+    assert!(claude_skills.contains("Rules R1 and R3, or a conflict Opus cannot settle"));
+
+    let codex_skills = read("skills/codex/SKILLS.md");
+    for line in codex_skills.lines() {
+        let is_registry_row = line.starts_with("| **GPT") || line.starts_with("| 1 |");
+        assert!(
+            !(is_registry_row && line.contains("Fable")),
+            "Codex must not list Fable as one of its own models: {line}"
+        );
+    }
+}
+
+#[test]
 fn each_seat_states_its_family_discipline() {
     // Claude interactions run on Claude models, Codex interactions on GPT
     // models; the families meet only at an orchestrator handoff.
@@ -91,7 +148,9 @@ fn each_seat_states_its_family_discipline() {
     ] {
         let body = read(rel);
         assert!(
-            body.contains("Family discipline") || body.contains("family discipline"),
+            body.contains("Runtime binding")
+                || body.contains("Family discipline")
+                || body.contains("family discipline"),
             "{rel} must state which model family the acting agent runs on"
         );
     }
@@ -105,13 +164,14 @@ fn each_seat_states_its_family_discipline() {
 #[test]
 fn every_document_lists_the_full_model_registry() {
     // A document that omits a model cannot route to it.
-    const MODELS: [&str; 6] = [
+    const MODELS: [&str; 7] = [
         "GPT-6 Mini",
         "GPT-6",
-        "Claude Sonnet",
-        "Claude Opus",
         "GPT Terra",
         "GPT Sol",
+        "Claude Sonnet",
+        "Claude Opus",
+        "Fable",
     ];
     for (rel, body) in all_docs() {
         for model in MODELS {
@@ -164,7 +224,7 @@ fn confidence_and_risk_scales_match_everywhere() {
 
 #[test]
 fn the_escalation_ladder_is_stated_identically_everywhere() {
-    const LADDER: &str = "GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human";
+    const LADDER: &str = "GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human";
     for (rel, body) in all_docs() {
         assert!(
             body.contains(LADDER),

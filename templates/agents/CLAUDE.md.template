@@ -58,14 +58,20 @@ orchestrator and applies the Codex workflow from
 
 ## Claude model preference
 
+**You are running in Claude Code, so you run on Claude models: Sonnet, Opus, and
+Fable. Never call a GPT model from here.**
+
 1. **Claude Sonnet — primary.** All routine Claude work: planning, review,
    synthesis, coordination, tradeoff write-ups.
 2. **Claude Opus — escalation only.** Architecture review (R2), risk tier R2+,
    conflict adjudication, enterprise planning (R1), or a Sonnet result landing in
    the `0.40 – 0.59` confidence band.
+3. **Fable — simulation and final adjudication.** Forecasting and scenario
+   modelling (rule R3), the simulation leg of enterprise planning (rule R1), and
+   conflicts Opus cannot settle on evidence. Nothing else.
 
-Opus is 4× Sonnet's planning cost. Reaching for it without a trigger from
-AGENTS.md §6 is a routing error. Record the trigger when escalating.
+Opus is 4× Sonnet's planning cost and Fable is 16×. Reaching for either without a
+trigger from AGENTS.md §6 is a routing error. Record the trigger when escalating.
 
 ## Confidence and risk (normative source: AGENTS.md §5, §5a)
 
@@ -98,19 +104,30 @@ and the Regent invariant above are R3 by definition.
 Claude routes, it does not absorb. These models are reached only through the
 routing table in AGENTS.md §4.
 
-| Model | Claude delegates to it for |
-| --- | --- |
-| **GPT-6 Mini** | All default implementation, specs, refactors (via Codex) |
-| **GPT-6** | Complex architecture drafts and hard debugging |
-| **GPT Terra** | Repositories above 200 files or 150 000 tokens of context |
-| **GPT Sol** | Simulation and forecasting: rollout, blast radius, cost, capacity |
+| Capability | Your model | Codex equivalent |
+| --- | --- | --- |
+| Default worker | Claude Sonnet | **GPT-6 Mini** |
+| Deep architect | Claude Opus | **GPT-6** |
+| Long-context reader | Claude Sonnet | **GPT Terra** |
+| Simulation | Fable | **GPT Sol** |
 
-**Family discipline.** Claude always runs on a Claude model. Reaching a GPT model
-means delegating to Codex, never switching family mid-task. The two families meet
-at exactly two boundaries: Claude hands Codex a Task Packet, and Codex hands
-Claude a diff to review.
+Calling a model in the right-hand column from inside Claude Code is a routing
+error. Hand the task to the Codex runtime instead and wait for its result.
 
-**Escalation ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human`
+**Family discipline.** The runtime decides the family. In Claude Code every agent
+runs on Claude Sonnet, Claude Opus, or Fable. In Codex every agent runs on a GPT
+model. Reaching the other family means handing the task to the other runtime,
+never switching family mid-task. The two families meet at exactly two boundaries:
+Claude hands Codex a Task Packet, and Codex hands Claude a diff to review. When
+the other runtime is absent, stay in your family and say so in your result.
+
+**Escalation ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human`
+
+The ladder crosses runtimes, but you never cross it by calling the other
+family's model. In **Codex** you climb `GPT-6 Mini → GPT-6`, then hand off to
+Claude Code. In **Claude Code** you climb `Claude Sonnet → Claude Opus → Fable`,
+then stop at the human. If the other runtime is unavailable, climb to the top of
+your own family and say the cross-family step was skipped.
 
 Claude escalates exactly one tier on: two consecutive failures · confidence
 0.40–0.59 · the same artifact rejected twice · risk R2 without an Opus review ·

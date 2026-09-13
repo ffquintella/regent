@@ -118,12 +118,20 @@ them.
 
 ---
 
-## 3. Model registry — two families only
+## 3. Model registry — two families, bound to the runtime
 
 Every model is either **Claude family** or **GPT family**. No third-party model
 is part of this architecture.
 
-**GPT family — the Codex Engineering Orchestrator's models**
+**Claude family — used when the runtime is Claude Code**
+
+| Model | Class | Use for | Relative cost |
+| --- | --- | --- | --- |
+| **Claude Sonnet** | primary planner/reviewer | Planning, code review, synthesis | 3× |
+| **Claude Opus** | escalation reviewer | Architecture review, conflict resolution, risk analysis | 12× |
+| **Fable** | simulation & deepest reasoning | Forecasting, scenario modelling, enterprise planning, adjudication Opus cannot settle | 16× |
+
+**GPT family — used when the runtime is Codex**
 
 | Model | Class | Use for | Relative cost |
 | --- | --- | --- | --- |
@@ -132,26 +140,44 @@ is part of this architecture.
 | **GPT Terra** | long-context reader | Large control repos, bulk comprehension, map phase of map/reduce | 2× |
 | **GPT Sol** | simulation | Rollout forecasting, blast-radius and cost modelling | 6× |
 
-**Claude family — the Strategic Orchestrator's models**
+### Runtime binding (normative — read this before choosing a model)
 
-| Model | Class | Use for | Relative cost |
-| --- | --- | --- | --- |
-| **Claude Sonnet** | primary reviewer/planner | Code review, planning, synthesis | 3× |
-| **Claude Opus** | escalation reviewer | Architecture review, conflict resolution, risk analysis | 12× |
+**The runtime you are executing in decides the family. Nothing else does.**
 
-### Family discipline (normative)
+1. **Running in Claude Code → use Claude models only.** Every agent you spawn
+   runs on Claude Sonnet, Claude Opus, or Fable. Never call GPT-6 Mini, GPT-6,
+   GPT Terra, or GPT Sol from inside Claude Code.
+2. **Running in Codex → use GPT models only.** Every agent you spawn runs on
+   GPT-6 Mini, GPT-6, GPT Terra, or GPT Sol. Never call Claude Sonnet, Claude
+   Opus, or Fable from inside Codex.
+3. **Cross-family work is a handoff, not a model call.** To get the other
+   family's judgement, hand the task to the other runtime with a Task Packet and
+   wait for its result. Codex hands a finished diff to Claude Code for review;
+   Claude Code hands implementation to Codex. Those two boundaries are the only
+   cross-family traffic.
+4. **The other runtime may be absent.** If it is, stay in your family, take the
+   equivalent role from the table below, and say in your result that the
+   cross-family check did not happen.
 
-1. **One family per interaction.** When Claude is the acting agent it runs on a
-   Claude model. When Codex is the acting agent it runs on a GPT model. An agent
-   never switches family mid-task.
-2. **Families meet only at an orchestrator handoff.** Codex hands a finished diff
-   to Claude for review; Claude hands a Task Packet to Codex for implementation.
-   Those two boundaries are the only cross-family traffic.
-3. **Claude Sonnet is the Claude-family default; Claude Opus is escalation only.**
-   Sonnet costs a quarter of Opus, so routing routine review to Sonnet is the
-   single largest token saving available on the Claude side.
-4. **GPT-6 Mini is the GPT-family default.** GPT-6, Terra, and Sol are reached
-   only by the routing rules in §4.
+### Capability equivalence
+
+Rules R1–R7 in §4 select a capability. This table resolves it to a model.
+
+| Capability | Claude Code runtime | Codex runtime |
+| --- | --- | --- |
+| Default worker | Claude Sonnet | GPT-6 Mini |
+| Deep architect / hard debugging | Claude Opus | GPT-6 |
+| Long-context reader | Claude Sonnet | GPT Terra |
+| Simulation & forecasting | **Fable** | **GPT Sol** |
+| Reviewer | Claude Sonnet, Claude Opus on escalation | hand off to Claude Code |
+| Final adjudicator | Fable | hand off to Claude Code |
+
+5. **Within the Claude family, Sonnet is the default and Opus is escalation
+   only.** Sonnet costs a quarter of Opus, so routing routine review to Sonnet is
+   the single largest token saving available on the Claude side. Fable is reached
+   only by rules R1 and R3, or when Opus cannot settle a conflict.
+6. **Within the GPT family, GPT-6 Mini is the default.** GPT-6, Terra, and Sol
+   are reached only by the routing rules in §4.
 
 Cost multipliers are planning weights, not billing figures. Use them to compare
 routes, not to predict invoices.
@@ -160,25 +186,31 @@ routes, not to predict invoices.
 
 ## 4. Model routing policy (deterministic)
 
-Evaluate in order. The first rule whose condition holds wins; stop evaluating.
+Evaluate the rules **in order**. The first rule whose condition holds wins; stop
+evaluating. A rule plus the runtime you are in yields exactly one model, so
+identical inputs always produce the identical route.
 
-| # | Condition | Primary | Reviewer | Escalation |
-| --- | --- | --- | --- | --- |
-| R1 | Enterprise planning: ≥3 teams **or** horizon ≥2 quarters **or** org-wide policy | **GPT-6 + Claude Opus + GPT Sol** (Opus synthesises) | Human | Human |
-| R2 | Architecture review: the artifact is a design doc, ADR, or parameter/API contract | **Claude Opus** | — | GPT-6 second opinion |
-| R3 | Simulation or forecasting (rollout, blast radius, cost, capacity) | **GPT Sol** | Claude Sonnet | Claude Opus |
-| R4 | Large repository: >200 files in scope **or** >150 000 tokens of context after compression | **GPT Terra** (map/reduce to a ≤4 000-token brief) | Claude Sonnet | Re-enter at R1 with the brief |
-| R5 | Complex architecture: new subsystem, ≥3 classes/modules touched, **or** a public parameter changes | **GPT-6** | Claude Opus | Human |
-| R6 | Coding: manifests, functions, specs, debugging, refactor within an existing pattern | **GPT-6 Mini** | **Claude Sonnet** | GPT-6 |
-| R7 | Simple task: single file, <50 LOC delta, no parameter change, no security surface | **GPT-6 Mini** | — | GPT-6 Mini + Claude Sonnet |
+| # | Condition (all signals measured before delegation) | In Claude Code | In Codex | Reviewer | Escalation |
+| --- | --- | --- | --- | --- | --- |
+| R1 | Enterprise planning: ≥3 teams **or** horizon ≥2 quarters **or** org-wide policy change | **Claude Opus + Fable**, architecture leg handed to Codex | **GPT-6**, review and simulation legs handed to Claude Code | Human | Human |
+| R2 | Architecture review: the artifact under judgement is a design doc, ADR, or parameter contract | **Claude Opus** | hand off to Claude Code | — | Fable, or a GPT-6 second opinion via Codex |
+| R3 | Simulation or forecasting requested (cost, capacity, rollout, failure modes) | **Fable** | **GPT Sol** | Claude Sonnet | Claude Opus |
+| R4 | Large repository: >200 files in scope **or** >150 000 tokens of required context after compression | **Claude Sonnet** (map/reduce to a ≤4 000-token brief) | **GPT Terra** (same map/reduce) | Claude Sonnet | Re-enter at R1 with the brief |
+| R5 | Complex architecture: new subsystem, ≥3 classes/modules touched, **or** a public parameter changes | **Claude Opus** designs, implementation handed to Codex | **GPT-6** | Claude Opus | Human |
+| R6 | Coding: implementation, debugging, tests, refactor within an existing pattern | hand off to Codex | **GPT-6 Mini** | **Claude Sonnet** | GPT-6 |
+| R7 | Simple task: single file, <50 LOC delta, no parameter change, no security surface | hand off to Codex | **GPT-6 Mini** | — | GPT-6 Mini + Claude Sonnet |
 
 **Notes**
 
-- R4 never produces the final answer; it produces a compressed brief which is
-  then routed from R1 again. It is the only rule that may re-enter the table.
+- The runtime column is not a preference. Calling a model from the other column
+  is a routing error, even when that model would be cheaper or better.
+- R4 never produces the final answer. It produces a compressed brief, which is
+  then routed from R1 again. This is the only rule that may re-enter the table.
 - A Security Engineer finding of severity High or Critical forces the task up one
   escalation tier regardless of which rule matched.
-- Claude is **never** the default code generator.
+- Claude is **never** the default code generator. Claude writes code only when
+  the human asks Claude directly, or when no Codex runtime is available and the
+  task is otherwise blocked.
 
 ---
 
@@ -224,7 +256,13 @@ paths, or credential handling is **R3 by definition**.
 
 ## 6. Escalation rules
 
-**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human`
+**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human`
+
+The ladder crosses runtimes, but you never cross it by calling the other
+family's model. In **Codex** you climb `GPT-6 Mini → GPT-6`, then hand off to
+Claude Code. In **Claude Code** you climb `Claude Sonnet → Claude Opus → Fable`,
+then stop at the human. If the other runtime is unavailable, climb to the top of
+your own family and say the cross-family step was skipped.
 
 Escalate exactly one tier when **any** of these fires:
 

@@ -31,17 +31,29 @@ deployment, or debugging. Those belong to Codex
 
 ## 2. Model registry
 
+**You are running in Claude Code, so you run on Claude models.** These three are
+the only models you may invoke.
+
 | Model | Role in this seat | Invoke when | Cost |
 | --- | --- | --- | --- |
 | **Claude Sonnet** | **Primary.** Default for every task in this seat | Always, unless an escalation trigger fires | 3× |
 | **Claude Opus** | **Escalation.** Architecture review, adjudication | R2 review, risk ≥R2, conflict, confidence 0.40–0.59 | 12× |
-| **GPT-6** | **Architecture partner.** Drafts designs Claude reviews | New subsystem, ≥3 modules, interface change | 8× |
-| **GPT-6 Mini** | Implementation, delegated via Codex | Any coding task | 1× |
-| **GPT Terra** | Long-context reading, delegated via Codex | Rule R4 | 2× |
-| **GPT Sol** | Simulation, delegated via Codex | Rule R3 | 6× |
+| **Fable** | **Simulation specialist** and final adjudicator | Rules R1 and R3, or a conflict Opus cannot settle | 16× |
 
-**Default architecture:** Sonnet primary · Opus escalation · GPT-6 architecture
-partner · GPT Sol simulation specialist.
+**Default architecture:** Claude Sonnet primary · Claude Opus escalation · Fable
+simulation and adjudication.
+
+### GPT-family equivalents — reached by handoff, never called from here
+
+Calling any of these from inside Claude Code is a routing error. To use one, hand
+the task to the Codex runtime with a Task Packet and wait for its result.
+
+| Capability | Your model | Codex equivalent |
+| --- | --- | --- |
+| Default worker | Claude Sonnet | GPT-6 Mini |
+| Deep architect | Claude Opus | GPT-6 |
+| Long-context reader | Claude Sonnet | GPT Terra |
+| Simulation | Fable | GPT Sol |
 
 ## 3. Routing (deterministic — first match wins)
 
@@ -50,19 +62,20 @@ first match.
 
 | # | Condition | Primary | Reviewer | Escalation |
 | --- | --- | --- | --- | --- |
-| R1 | Enterprise planning: ≥3 teams, ≥2 quarters, or org-wide policy | GPT-6 + Claude Opus + GPT Sol | Human | Human |
+| R1 | Enterprise planning: ≥3 teams, ≥2 quarters, or org-wide policy | Claude Opus + Fable, architecture leg to Codex | Human | Human |
 | R2 | Architecture review of a design doc, ADR, or interface contract | Claude Opus | — | GPT-6 second opinion |
-| R3 | Simulation or forecasting | GPT Sol *(delegate to Codex)* | Claude Sonnet | Claude Opus |
-| R4 | >200 files or >150 000 tokens of context after compression | GPT Terra *(delegate to Codex)* → ≤4 000-token brief | Claude Sonnet | Re-enter at R1 |
+| R3 | Simulation or forecasting | **Fable** | Claude Sonnet | Claude Opus |
+| R4 | >200 files or >150 000 tokens of context after compression | Claude Sonnet → ≤4 000-token brief | Claude Sonnet | Re-enter at R1 |
 | R5 | New subsystem, ≥3 modules, or public interface change | GPT-6 | Claude Opus | Human |
 | R6 | Coding, debugging, tests, refactor in an existing pattern | GPT-6 Mini *(delegate to Codex)* | Claude Sonnet | GPT-6 |
 | R7 | Single file, <50 LOC, no interface or security surface | GPT-6 Mini *(delegate to Codex)* | — | GPT-6 Mini + Sonnet |
 
-R3, R4, R6, and R7 are always **handed to Codex** — they run on GPT-family
-models. Claude keeps only the reviewer and synthesis seat on those.
+R6 and R7 are always **handed to Codex**; Claude keeps only the reviewer seat.
+R3 and R4 you run yourself, on Fable and Claude Sonnet respectively.
 
 **Family discipline:** every acting agent in this seat runs on a Claude model.
-GPT models are reached only by delegating to Codex, never mid-task.
+GPT models are reached only by handing the task to the Codex runtime, never by
+calling them from here, and never mid-task.
 
 ## 4. Confidence scoring
 
@@ -98,7 +111,13 @@ definition.
 
 ## 6. Escalation policy
 
-**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human`
+**Ladder:** `GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human`
+
+The ladder crosses runtimes, but you never cross it by calling the other
+family's model. In **Codex** you climb `GPT-6 Mini → GPT-6`, then hand off to
+Claude Code. In **Claude Code** you climb `Claude Sonnet → Claude Opus → Fable`,
+then stop at the human. If the other runtime is unavailable, climb to the top of
+your own family and say the cross-family step was skipped.
 
 Escalate one tier when: two consecutive failures · confidence 0.40–0.59 · the
 same artifact is rejected twice · risk R2 without an Opus review · two agents

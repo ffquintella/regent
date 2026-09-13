@@ -300,7 +300,7 @@ mod tests {
             "GPT Sol",
             "70–80 % context reduction",
             "Never pass entire chat history",
-            "GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human",
+            "GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Fable → Human",
         ];
         for (path, body) in NewCommand::generate_agent_docs("acme-mymod") {
             for needle in shared {

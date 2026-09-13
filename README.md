@@ -47,6 +47,12 @@ same four into every module it creates.
 | [skills/claude/SKILLS.md](skills/claude/SKILLS.md) | Claude strategic-orchestrator routing rules |
 | [skills/codex/SKILLS.md](skills/codex/SKILLS.md) | Codex engineering-orchestrator routing rules |
 
+The runtime decides the model family. In Claude Code every agent runs on a
+Claude model: Sonnet by default, Opus on escalation, Fable for simulation. In
+Codex every agent runs on a GPT model: GPT-6 Mini by default, then GPT-6, GPT
+Terra for long context, and GPT Sol for simulation. Crossing families is a
+handoff between runtimes, never a call to the other family's model.
+
 `AGENTS.md` is the single source of truth; the other three defer to it.
 `tests/orchestration_docs.rs` fails the build if they drift apart.
 
