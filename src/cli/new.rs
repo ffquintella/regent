@@ -49,6 +49,10 @@ impl NewCommand {
             "spec/fixtures",
             "spec/fixtures/modules",
             "pkg",
+            // Dual-orchestrator agent specification (see AGENTS.md).
+            "skills",
+            "skills/claude",
+            "skills/codex",
         ];
 
         for dir in &dirs {
@@ -75,16 +79,18 @@ impl NewCommand {
         fs::write(module_path.join("README.md"), readme)?;
         println!("{} {}/README.md", "✓".green(), name);
 
-        // Create AGENTS.md — agent-facing guidance for working on this module.
-        let agents_md = Self::generate_agents_md(name);
-        fs::write(module_path.join("AGENTS.md"), agents_md)?;
-        println!("{} {}/AGENTS.md", "✓".green(), name);
-
-        // Create CLAUDE.md as a thin pointer to AGENTS.md so both Claude Code
-        // and other agents read the same instructions.
-        let claude_md = Self::generate_claude_md();
-        fs::write(module_path.join("CLAUDE.md"), claude_md)?;
-        println!("{} {}/CLAUDE.md", "✓".green(), name);
+        // Create the dual-orchestrator agent specification:
+        //
+        //   AGENTS.md                 normative multi-agent contract
+        //   CLAUDE.md                 Claude as strategic orchestrator (CTO/reviewer)
+        //   skills/claude/SKILLS.md   Claude routing rules
+        //   skills/codex/SKILLS.md    Codex routing rules
+        //
+        // AGENTS.md is the single source of truth; the other three defer to it.
+        for (rel_path, contents) in Self::generate_agent_docs(name) {
+            fs::write(module_path.join(&rel_path), contents)?;
+            println!("{} {}/{}", "✓".green(), name, rel_path);
+        }
 
         // Create spec_helper.rb
         let spec_helper = include_str!("../../templates/spec_helper.rb");
@@ -146,89 +152,44 @@ impl NewCommand {
         .unwrap_or_default()
     }
 
-    fn generate_agents_md(name: &str) -> String {
-        format!(
-            r#"# Agent Instructions for `{name}`
+    /// Placeholder substituted with the module name in every agent template.
+    const MODULE_NAME_PLACEHOLDER: &'static str = "{{MODULE_NAME}}";
 
-These instructions apply to any AI agent (Claude Code, Copilot, Cursor, Aider, etc.)
-working on this Puppet module. Human contributors should follow them too.
+    /// The dual-orchestrator agent specification shipped with every new module,
+    /// as `(path relative to the module root, rendered contents)`.
+    ///
+    /// `AGENTS.md` is the normative contract; `CLAUDE.md` and the two
+    /// `SKILLS.md` files defer to it. The routing table, confidence and risk
+    /// scales, token caps, and agent limits are identical across all four —
+    /// `tests/orchestration_docs.rs` enforces that.
+    pub(crate) fn generate_agent_docs(name: &str) -> Vec<(String, String)> {
+        const DOCS: [(&str, &str); 4] = [
+            (
+                "AGENTS.md",
+                include_str!("../../templates/agents/AGENTS.md.template"),
+            ),
+            (
+                "CLAUDE.md",
+                include_str!("../../templates/agents/CLAUDE.md.template"),
+            ),
+            (
+                "skills/claude/SKILLS.md",
+                include_str!("../../templates/agents/skills_claude_SKILLS.md.template"),
+            ),
+            (
+                "skills/codex/SKILLS.md",
+                include_str!("../../templates/agents/skills_codex_SKILLS.md.template"),
+            ),
+        ];
 
-## What this module is
-
-`{name}` is a Puppet module. The canonical interface is the manifests in
-`manifests/`, with supporting Ruby code under `lib/`, templates in `templates/`,
-and tests in `spec/`.
-
-## How to work on it agentically
-
-1. **Read first.** Before editing, scan `metadata.json`, `manifests/init.pp`,
-   and any existing classes/defines you're about to touch. Match the existing
-   style — parameter ordering, data types, lookup patterns.
-2. **Small, focused changes.** One concern per change. Don't refactor unrelated
-   code while fixing a bug or adding a feature.
-3. **Update tests alongside code.** Every new class, defined type, function, or
-   fact must ship with an rspec-puppet spec under `spec/`. Update fixtures in
-   `spec/fixtures/` when dependencies change.
-4. **Keep `metadata.json` honest.** Update `dependencies`,
-   `operatingsystem_support`, and `requirements` whenever the module's surface
-   area changes. Bump `version` for releases.
-5. **Document parameters with puppet-strings tags** (`@param`, `@example`,
-   `@summary`) so the README and reference stay generatable.
-
-## Validate and test with Regent — the single source of truth
-
-**Use [Regent](https://github.com/felipe-quintella/regent) for all validation
-and testing of this module.** Do not reach for `puppet`, `bundle exec rspec`,
-`pdk`, or a host Ruby toolchain. Regent ships a self-contained binary with an
-embedded Ruby runner; it is the supported way to lint, parse, and run specs
-against this module.
-
-Typical loop:
-
-```sh
-regent validate     # parse manifests + metadata.json, lint
-regent test        # run rspec-puppet specs through the embedded runner
-regent build       # produce a Forge-ready tarball in pkg/
-```
-
-If `regent test` reports a missing gem, run `regent bootstrap` — never
-`gem install` or `bundle install`. Regent ships every gem it needs.
-
-When a test fails, fix the code or the spec; do not silence the test or skip it
-without an explicit reason captured in a comment.
-
-## Pull request checklist for agents
-
-- [ ] `regent validate` is clean.
-- [ ] `regent test` passes locally.
-- [ ] `metadata.json` reflects new dependencies / OS support.
-- [ ] README or reference docs updated for any new public parameter or class.
-- [ ] No new dependency on a host Ruby, `bundle`, or `pdk`.
-
-## Out of scope
-
-- Introducing tooling that requires a host Ruby/Bundler install.
-- Editing files under `pkg/` by hand — that directory is build output.
-- Committing `spec/fixtures/modules/<name>` symlinks or vendored dependencies
-  unless they are genuinely required for tests to run under Regent.
-"#,
-            name = name
-        )
-    }
-
-    fn generate_claude_md() -> String {
-        r#"# Claude Code Instructions
-
-This module's agent instructions live in [AGENTS.md](AGENTS.md). Read that file
-before making any changes — it covers conventions, the test/validate workflow,
-and the pull-request checklist.
-
-**TL;DR:** use [Regent](https://github.com/felipe-quintella/regent)
-(`regent validate`, `regent test`, `regent build`) as the single tool for
-validating and testing this module. Do not invoke host `puppet`, `rspec`,
-`bundle`, or `pdk`.
-"#
-        .to_string()
+        DOCS.iter()
+            .map(|(path, template)| {
+                (
+                    (*path).to_string(),
+                    template.replace(Self::MODULE_NAME_PLACEHOLDER, name),
+                )
+            })
+            .collect()
     }
 
     fn generate_readme(
@@ -294,6 +255,87 @@ mod tests {
         );
         let value = parse(&json);
         assert_eq!(value["summary"], "Manages the acme widget service");
+    }
+
+    #[test]
+    fn agent_docs_cover_the_dual_orchestrator_layout() {
+        let docs = NewCommand::generate_agent_docs("acme-mymod");
+        let paths: Vec<&str> = docs.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "AGENTS.md",
+                "CLAUDE.md",
+                "skills/claude/SKILLS.md",
+                "skills/codex/SKILLS.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_docs_substitute_the_module_name_everywhere() {
+        for (path, body) in NewCommand::generate_agent_docs("acme-mymod") {
+            assert!(
+                !body.contains(NewCommand::MODULE_NAME_PLACEHOLDER),
+                "{path} still contains an unsubstituted module-name placeholder"
+            );
+        }
+        let agents = NewCommand::generate_agent_docs("acme-mymod")
+            .into_iter()
+            .find(|(p, _)| p == "AGENTS.md")
+            .expect("AGENTS.md must be generated")
+            .1;
+        assert!(agents.contains("acme-mymod"));
+    }
+
+    #[test]
+    fn agent_docs_agree_on_the_shared_orchestration_constants() {
+        // Every document repeats the same routing table, thresholds, caps, and
+        // agent limits. Divergence here is what makes routing non-deterministic.
+        let shared = [
+            "GPT-6 Mini",
+            "Claude Sonnet",
+            "Claude Opus",
+            "GPT Terra",
+            "GPT Sol",
+            "70–80 % context reduction",
+            "Never pass entire chat history",
+            "GPT-6 Mini → GPT-6 → Claude Sonnet → Claude Opus → Human",
+        ];
+        for (path, body) in NewCommand::generate_agent_docs("acme-mymod") {
+            for needle in shared {
+                assert!(
+                    body.contains(needle),
+                    "{path} is missing the shared orchestration rule {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_docs_keep_the_no_host_ruby_invariant() {
+        for (path, body) in NewCommand::generate_agent_docs("acme-mymod") {
+            assert!(
+                body.contains("regent validate") && body.contains("regent test"),
+                "{path} must point agents at the Regent workflow"
+            );
+            assert!(
+                body.contains("pdk") || body.contains("bundle"),
+                "{path} must forbid the host Ruby / PDK toolchain"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_is_not_the_default_code_generator() {
+        let claude = NewCommand::generate_agent_docs("acme-mymod")
+            .into_iter()
+            .find(|(p, _)| p == "CLAUDE.md")
+            .expect("CLAUDE.md must be generated")
+            .1;
+        assert!(claude.contains("Claude is not the default code generator"));
+        assert!(claude.contains("Strategic Orchestrator"));
+        assert!(claude.contains("Codex"));
     }
 
     #[test]

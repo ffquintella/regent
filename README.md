@@ -34,6 +34,22 @@ All project documentation has been organized in the [`docs/`](docs/) folder. Sta
 | [ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md) | Ruby/Rust integration details |
 | [PUBLISHING_MODULES.md](docs/PUBLISHING_MODULES.md) | Publishing modules to the Forge or another repository |
 
+### Agent orchestration
+
+Regent uses a **dual-orchestrator** architecture: Claude plans and reviews,
+Codex/GPT implements. Four documents define it, and `regent new` scaffolds the
+same four into every module it creates.
+
+| Document | Purpose |
+|----------|---------|
+| [AGENTS.md](AGENTS.md) | Normative multi-agent contract: roles, routing, budgets |
+| [CLAUDE.md](CLAUDE.md) | Claude as CTO / architect / reviewer |
+| [skills/claude/SKILLS.md](skills/claude/SKILLS.md) | Claude strategic-orchestrator routing rules |
+| [skills/codex/SKILLS.md](skills/codex/SKILLS.md) | Codex engineering-orchestrator routing rules |
+
+`AGENTS.md` is the single source of truth; the other three defer to it.
+`tests/orchestration_docs.rs` fails the build if they drift apart.
+
 ## 🚀 Quick Start
 
 ```bash
@@ -84,8 +100,14 @@ regent/
 │   ├── tester/           # Phase 2: Test functionality
 │   ├── validator/        # Phase 3: Validation (planned)
 │   └── publisher/        # Forge / repository publishing
+├── skills/
+│   ├── claude/SKILLS.md  # Claude strategic-orchestrator routing
+│   └── codex/SKILLS.md   # Codex engineering-orchestrator routing
+├── templates/agents/     # Agent docs scaffolded by `regent new`
 ├── spec/                 # Ruby tests
 ├── docs/                 # 📁 Documentation (see above)
+├── AGENTS.md             # Multi-agent orchestration specification
+├── CLAUDE.md             # Claude-specific behaviour
 ├── Cargo.toml            # Rust dependencies
 └── README.md             # This file
 ```

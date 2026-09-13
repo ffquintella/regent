@@ -1,7 +1,7 @@
-# AGENTS.md — Multi-Agent Orchestration Specification
+# AGENTS.md — Multi-Agent Orchestration Specification for `{{MODULE_NAME}}`
 
-This is the **normative** specification for every AI agent that works in this
-repository (Claude Code, Codex/GPT, Copilot, Cursor, Aider, …). Human
+This is the **normative** specification for every AI agent that works on this
+Puppet module (Claude Code, Codex/GPT, Copilot, Cursor, Aider, …). Human
 contributors follow the same rules.
 
 Companion documents, all subordinate to this one:
@@ -12,33 +12,38 @@ Companion documents, all subordinate to this one:
 | [skills/claude/SKILLS.md](skills/claude/SKILLS.md) | Claude strategic-orchestrator routing rules |
 | [skills/codex/SKILLS.md](skills/codex/SKILLS.md) | Codex engineering-orchestrator routing rules |
 
-When two documents disagree, **this file wins**. Numbers in §5–§9 are the single
-source of truth and are reproduced verbatim in the skill files; they are checked
-mechanically by `tests/orchestration_docs.rs`.
+When two documents disagree, **this file wins**. The numbers in §5–§9 are the
+single source of truth and are repeated verbatim in the skill files.
 
 ---
 
 ## 0. Project invariants (non-negotiable, override all routing)
 
-Regent is a self-contained Rust binary with an **embedded Artichoke Ruby runtime
-written in Rust**. It must run on machines with no `ruby`, `gem`, or `bundle` on
-PATH.
+`{{MODULE_NAME}}` is a Puppet module. The canonical interface is the manifests in
+`manifests/`, with supporting Ruby under `lib/`, templates in `templates/`, and
+tests in `spec/`.
 
-- Never shell out to `ruby`, `gem`, `bundle`, `rspec`, `rake`, or `pdk`.
-- All Ruby executes through Artichoke via `RubyEnvironment` / `crate::ruby_interop`.
-- Gems ship in a pre-built cache and land in the per-user bundle; missing-gem
-  errors point at `regent bootstrap`, never at a host install.
+**[Regent](https://github.com/felipe-quintella/regent) is the single tool for
+validating and testing this module.** Regent ships a self-contained binary with
+an embedded Ruby runner, so no host Ruby toolchain is required — and none may be
+introduced.
 
-Full rationale and the complete rule list: [CLAUDE.md](CLAUDE.md) §Core
-Principle and [docs/ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md).
-Any plan that reintroduces a host Ruby dependency is rejected regardless of
-which agent produced it.
+- Never invoke `puppet`, `bundle exec`, `rspec`, `rake`, `gem`, or `pdk` directly.
+- A missing gem is fixed with `regent bootstrap`, never `gem install`.
+- Never edit `pkg/` by hand; it is build output.
+
+```sh
+regent validate    # parse manifests + metadata.json, lint
+regent test        # run rspec-puppet specs through the embedded runner
+regent build       # produce a Forge-ready tarball in pkg/
+```
+
+Any plan that reintroduces a host Ruby or PDK dependency is rejected regardless
+of which agent produced it.
 
 ---
 
 ## 1. Architecture: two orchestrators
-
-Work is split between two orchestrators with disjoint mandates.
 
 ```
                           ┌─────────────────────┐
@@ -75,28 +80,28 @@ the decision; the Engineering Orchestrator owns the change.
 ## 2. Agent roles and responsibility boundaries
 
 Each responsibility belongs to exactly one role. No role duplicates another's
-mandate; where work touches two roles it is split at the artifact boundary.
+mandate.
 
 | Role | Owns (sole responsibility) | Produces | Must not |
 | --- | --- | --- | --- |
-| **Strategic Orchestrator** | Intent → decomposition, model routing, budget allocation, conflict resolution, final accept/reject | Task Packets (§7), decision log, ADRs | Write production code |
-| **Engineering Orchestrator** | Turning a Task Packet into merged, tested code; sub-agent scheduling inside the packet | Diffs, tests, CI runs, status report | Redefine scope or accept its own work |
-| **Architect** | System structure, interface contracts, data flow, migration paths | Design doc, interface stubs, ADR draft | Implement beyond stubs |
-| **Backend Engineer** | Rust crate code, Artichoke interop, CLI commands, builder/tester/validator/publisher | Source + unit tests | Touch frontend or CI config |
-| **Frontend Engineer** | `vscode-extension/`, CLI UX strings, output formatting, docs rendering | TS/JS + extension tests | Touch Rust internals |
-| **DevOps Engineer** | Build, packaging, release scripts, CI workflows, bundled gem cache | `Makefile*`, `packaging/`, `scripts/`, workflows | Change product behaviour |
-| **Security Engineer** | Threat modelling, secret handling, dependency/supply-chain audit, sandbox boundaries | Findings with severity + fix | Ship functional features |
-| **Research Agent** | Fact-finding across code, docs, and the web; option comparison | ≤2 000-token brief with citations | Make the decision |
-| **Reviewer Agent** | Correctness, regression risk, and invariant (§0) compliance verdicts | Verdict + ranked findings | Edit the code it reviews |
-| **Simulation Agent** | Forecasting: cost, rollout, capacity, failure modes, migration blast radius | Scenario table + confidence | Assert facts it did not simulate |
+| **Strategic Orchestrator** | Intent → decomposition, model routing, budget allocation, conflict resolution, final accept/reject | Task Packets (§7), decision log | Write manifests |
+| **Engineering Orchestrator** | Turning a Task Packet into merged, tested code | Diffs, specs, `regent` runs, status report | Redefine scope or accept its own work |
+| **Architect** | Class/defined-type structure, parameter contracts, data layout, Hiera strategy | Design notes, parameter stubs | Implement beyond stubs |
+| **Backend Engineer** | `manifests/`, `lib/puppet/` functions, facts, types, providers | Puppet + Ruby source with specs | Touch CI or packaging |
+| **Frontend Engineer** | `templates/`, rendered config, README and reference docs, user-facing output | ERB/EPP + docs | Change resource logic |
+| **DevOps Engineer** | `metadata.json`, dependencies, OS support, CI workflows, release/publish | Metadata + pipeline changes | Change module behaviour |
+| **Security Engineer** | Secret handling, `Sensitive` usage, file modes, privilege boundaries, dependency audit | Findings with severity + fix | Ship functional features |
+| **Research Agent** | Fact-finding across this module, its dependencies, and upstream docs | ≤2 000-token brief with citations | Make the decision |
+| **Reviewer Agent** | Correctness, idempotence, regression risk, invariant (§0) compliance | Verdict + ranked findings | Edit the code it reviews |
+| **Simulation Agent** | Forecasting: rollout blast radius, node impact, convergence risk, cost | Scenario table + confidence | Assert facts it did not simulate |
 
 **Boundary rules**
 
-1. A role that needs work outside its column raises a *handoff*, it does not
+1. A role that needs work outside its column raises a *handoff*; it does not
    widen its own scope.
-2. The Reviewer Agent is never the same instance that produced the artifact.
-3. Only the Strategic Orchestrator talks to the human about scope; only the
-   Engineering Orchestrator reports build/test status.
+2. The Reviewer Agent is never the instance that produced the artifact.
+3. Only the Strategic Orchestrator discusses scope with the human; only the
+   Engineering Orchestrator reports test status.
 
 **Seat and family.** Each role reports to exactly one orchestrator, and that
 decides which model family it runs on.
@@ -122,17 +127,17 @@ is part of this architecture.
 
 | Model | Class | Use for | Relative cost |
 | --- | --- | --- | --- |
-| **GPT-6 Mini** | fast coder | Default implementation, edits, tests, refactors, trivial tasks | 1× |
-| **GPT-6** | deep coder/architect | Complex architecture, multi-module design, hard debugging | 8× |
-| **GPT Terra** | long-context reader | Large repositories, bulk comprehension, map phase of map/reduce | 2× |
-| **GPT Sol** | simulation | Forecasting, scenario modelling, capacity/cost projection | 6× |
+| **GPT-6 Mini** | fast coder | Default implementation, manifests, specs, refactors | 1× |
+| **GPT-6** | deep coder/architect | Complex architecture, multi-class design, hard debugging | 8× |
+| **GPT Terra** | long-context reader | Large control repos, bulk comprehension, map phase of map/reduce | 2× |
+| **GPT Sol** | simulation | Rollout forecasting, blast-radius and cost modelling | 6× |
 
 **Claude family — the Strategic Orchestrator's models**
 
 | Model | Class | Use for | Relative cost |
 | --- | --- | --- | --- |
-| **Claude Sonnet** | primary reviewer/planner | Code review, planning, synthesis, most Claude-side work | 3× |
-| **Claude Opus** | escalation reviewer | Architecture review, conflict resolution, risk & tradeoff analysis | 12× |
+| **Claude Sonnet** | primary reviewer/planner | Code review, planning, synthesis | 3× |
+| **Claude Opus** | escalation reviewer | Architecture review, conflict resolution, risk analysis | 12× |
 
 ### Family discipline (normative)
 
@@ -155,33 +160,29 @@ routes, not to predict invoices.
 
 ## 4. Model routing policy (deterministic)
 
-Evaluate the rules **in order**. The first rule whose condition holds wins; stop
-evaluating. Identical inputs therefore always yield the identical route.
+Evaluate in order. The first rule whose condition holds wins; stop evaluating.
 
-| # | Condition (all signals measured before delegation) | Primary | Reviewer | Escalation |
+| # | Condition | Primary | Reviewer | Escalation |
 | --- | --- | --- | --- | --- |
-| R1 | Enterprise planning: ≥3 teams **or** horizon ≥2 quarters **or** org-wide policy change | **GPT-6 + Claude Opus + GPT Sol** (parallel, Opus synthesises) | Human | Human |
-| R2 | Architecture review: the artifact under judgement is a design doc, ADR, or interface contract | **Claude Opus** | — | GPT-6 second opinion |
-| R3 | Simulation or forecasting requested (cost, capacity, rollout, failure modes) | **GPT Sol** | Claude Sonnet | Claude Opus |
-| R4 | Large repository: >200 files in scope **or** >150 000 tokens of required context after compression | **GPT Terra** (map/reduce to a ≤4 000-token brief) | Claude Sonnet | Re-enter at R1 with the brief |
-| R5 | Complex architecture: new subsystem, ≥3 modules touched, **or** a public interface changes | **GPT-6** | Claude Opus | Human |
-| R6 | Coding: implementation, debugging, tests, refactor within an existing pattern | **GPT-6 Mini** | **Claude Sonnet** | GPT-6 |
-| R7 | Simple task: single file, <50 LOC delta, no interface change, no security surface | **GPT-6 Mini** | — | GPT-6 Mini + Claude Sonnet |
+| R1 | Enterprise planning: ≥3 teams **or** horizon ≥2 quarters **or** org-wide policy | **GPT-6 + Claude Opus + GPT Sol** (Opus synthesises) | Human | Human |
+| R2 | Architecture review: the artifact is a design doc, ADR, or parameter/API contract | **Claude Opus** | — | GPT-6 second opinion |
+| R3 | Simulation or forecasting (rollout, blast radius, cost, capacity) | **GPT Sol** | Claude Sonnet | Claude Opus |
+| R4 | Large repository: >200 files in scope **or** >150 000 tokens of context after compression | **GPT Terra** (map/reduce to a ≤4 000-token brief) | Claude Sonnet | Re-enter at R1 with the brief |
+| R5 | Complex architecture: new subsystem, ≥3 classes/modules touched, **or** a public parameter changes | **GPT-6** | Claude Opus | Human |
+| R6 | Coding: manifests, functions, specs, debugging, refactor within an existing pattern | **GPT-6 Mini** | **Claude Sonnet** | GPT-6 |
+| R7 | Simple task: single file, <50 LOC delta, no parameter change, no security surface | **GPT-6 Mini** | — | GPT-6 Mini + Claude Sonnet |
 
 **Notes**
 
-- R4 never produces the final answer. It produces a compressed brief, which is
-  then routed from R1 again. This is the only rule that may re-enter the table.
+- R4 never produces the final answer; it produces a compressed brief which is
+  then routed from R1 again. It is the only rule that may re-enter the table.
 - A Security Engineer finding of severity High or Critical forces the task up one
   escalation tier regardless of which rule matched.
-- Claude is **never** the default code generator. Claude writes code only when a
-  rule routes it there (it does not) or when the human asks Claude directly.
+- Claude is **never** the default code generator.
 
 ---
 
 ## 5. Confidence scoring
-
-Every agent returns a confidence value in `[0.00, 1.00]` with its result.
 
 ```
 confidence = 0.40 × evidence + 0.30 × verification + 0.20 × precedent + 0.10 × scope_fit
@@ -190,8 +191,8 @@ confidence = 0.40 × evidence + 0.30 × verification + 0.20 × precedent + 0.10 
 | Term | 1.00 | 0.50 | 0.00 |
 | --- | --- | --- | --- |
 | `evidence` | Read every file it changed or cited | Read the primary file only | Inferred without reading |
-| `verification` | Tests written and passing | Compiles / lints clean | Not executed |
-| `precedent` | Same pattern exists in-repo | Analogous pattern elsewhere | Novel approach |
+| `verification` | `regent test` green | `regent validate` clean | Not executed |
+| `precedent` | Same pattern exists in this module | Analogous pattern elsewhere | Novel approach |
 | `scope_fit` | Fully inside the agent's column (§2) | One handoff needed | Outside its mandate |
 
 **Thresholds (normative)**
@@ -202,10 +203,6 @@ confidence = 0.40 × evidence + 0.30 × verification + 0.20 × precedent + 0.10 
 | Review | `0.60 – 0.84` | Reviewer Agent verdict required before accept |
 | Escalate | `0.40 – 0.59` | Escalate one tier up the ladder (§6) |
 | Stop | `< 0.40` | Halt, return the blocker to the human. Do not guess |
-
-Self-reported confidence above `0.85` on a task whose reviewer rejected it is
-recorded as a calibration miss and caps that agent at `0.84` for the remainder
-of the session.
 
 ## 5a. Risk scoring
 
@@ -220,8 +217,8 @@ risk = blast_radius + reversibility + sensitivity      (0–2 each, total 0–6)
 | 4–5 | R2 elevated | Claude Opus review + Security Engineer if secrets/network involved |
 | 6 | R3 critical | Human approval before execution |
 
-Anything touching §0 invariants, release/publish paths, or credential handling is
-**R3 by definition**.
+Anything touching §0 invariants, `metadata.json` version/dependencies, publish
+paths, or credential handling is **R3 by definition**.
 
 ---
 
@@ -236,22 +233,21 @@ Escalate exactly one tier when **any** of these fires:
 3. The Reviewer Agent rejects the same artifact twice.
 4. Risk tier R2 is reached without an Opus review on record.
 5. Two agents return contradictory conclusions on the same question.
-6. A §0 invariant would be violated by the proposed change (skip straight to Human).
+6. A §0 invariant would be violated (skip straight to Human).
 
-**De-escalation:** after a successful escalated pass, the follow-up work returns
-to the tier the routing table (§4) specifies. Escalation is per-task, never
-sticky for a session.
+**De-escalation:** after a successful escalated pass, follow-up work returns to
+the tier §4 specifies. Escalation is per-task, never sticky.
 
-**Conflict resolution** is owned by the Strategic Orchestrator and resolved in
-this order: (1) §0 invariants, (2) measured evidence such as a failing test,
-(3) the deterministic routing table, (4) Claude Opus adjudication, (5) human.
+**Conflict resolution** is owned by the Strategic Orchestrator, resolved in this
+order: (1) §0 invariants, (2) measured evidence such as a failing spec, (3) the
+routing table, (4) Claude Opus adjudication, (5) human.
 
 ---
 
 ## 7. Token budget policy
 
-Budgets are hard caps per message, not averages. An agent that cannot fit inside
-its cap must compress further or split the task — never raise the cap.
+Budgets are hard caps per message. An agent that cannot fit must compress further
+or split the task — never raise the cap.
 
 | Artifact | Cap (tokens) |
 | --- | --- |
@@ -300,10 +296,10 @@ constraints:       # limits, invariants, forbidden approaches
 decisions:         # already settled; do not relitigate
   - ...
 relevant_files:    # path:line-range + one-line reason each
-  - src/...:120-180  # why it matters
+  - manifests/init.pp:1-40  # why it matters
 acceptance:        # how the result is verified
   - regent validate is clean
-  - cargo test passes
+  - regent test passes
 budget: {tokens: <cap>, agents: <n>, tier: <model>}
 risk: {score: <0-6>, tier: R0|R1|R2|R3}
 ```
@@ -317,9 +313,9 @@ speculatively, never spawn "for coverage", never keep an idle agent alive.
 
 | Task size | Agents | Definition |
 | --- | --- | --- |
-| Simple | **1** | Single file, one concern, no interface change |
-| Medium | **2–3** | 2–5 files, one module, tests included |
-| Large | **3–5** | Multiple modules or a new subsystem |
+| Simple | **1** | Single file, one concern, no parameter change |
+| Medium | **2–3** | 2–5 files, one class tree, specs included |
+| Large | **3–5** | Multiple classes/defined types or a new subsystem |
 | Enterprise | **5–8** | Cross-cutting, multi-team, migration or release-shaped |
 | **Hard maximum** | **10** | Global ceiling across both orchestrators combined |
 
@@ -338,21 +334,26 @@ Rules:
 
 ## 10. Working agreement
 
-1. **Read before writing.** Inspect the files you are about to change.
+1. **Read first.** Scan `metadata.json`, `manifests/init.pp`, and the classes you
+   are about to touch. Match the existing style — parameter ordering, data types,
+   lookup patterns.
 2. **One concern per change.** No drive-by refactors.
-3. **Tests ship with code.** Rust changes carry `#[test]` coverage; Ruby-facing
-   changes carry a spec driven through the embedded runner.
-4. **Validate with Regent itself** — `regent validate`, `regent test`,
-   `regent build`. Never `bundle exec`, never host `rspec`.
-5. **Keep versions in sync** — `Cargo.toml` and `vscode-extension/package.json`.
-6. **Report honestly.** Failing tests are reported with their output, skipped
-   steps are named.
+3. **Tests ship with code.** Every new class, defined type, function, or fact
+   carries an rspec-puppet spec under `spec/`. Update `spec/fixtures/` when
+   dependencies change.
+4. **Keep `metadata.json` honest.** Update `dependencies`,
+   `operatingsystem_support`, and `requirements` when the surface area changes.
+5. **Document with puppet-strings tags** (`@summary`, `@param`, `@example`) so the
+   reference stays generatable.
+6. **Validate with Regent** — `regent validate`, `regent test`, `regent build`.
+7. **Report honestly.** Failing specs are reported with their output; skipped
+   steps are named. Never silence a test to make a run green.
 
 ## 11. Definition of done
 
-- [ ] `cargo test` passes.
-- [ ] `cargo fmt` clean.
-- [ ] `regent validate` / `regent test` clean for module-facing changes.
-- [ ] No new host Ruby, Bundler, or PDK dependency (§0).
-- [ ] Docs updated when a public flag, command, or interface changed.
+- [ ] `regent validate` is clean.
+- [ ] `regent test` passes locally.
+- [ ] `metadata.json` reflects new dependencies / OS support.
+- [ ] README or reference docs updated for any new public parameter or class.
+- [ ] No new dependency on a host Ruby, Bundler, or PDK (§0).
 - [ ] Reviewer verdict on record when confidence < 0.85 or risk ≥ R1.
