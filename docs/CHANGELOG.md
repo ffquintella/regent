@@ -1,5 +1,13 @@
 # Regent Changelog
 
+## [Unreleased]
+
+### Fixed
+- Apply resource-like class declaration parameters while evaluating child class bodies, without leaking the tested class's parameters into other classes.
+- Resolve Puppet `lookup()` values from Hiera and honor the four-argument form's default when a key is absent.
+- Support custom fact specs that require Facter, use `FACTERVERSION` and `Facter::Core::Execution`, and expect mocked method calls with specific arguments.
+- Preserve caller variables across child class evaluation, honor negative method expectations, and restore mocked methods between examples, including failed examples.
+
 ## [0.1.0] - 2026-01-14
 
 ### Added

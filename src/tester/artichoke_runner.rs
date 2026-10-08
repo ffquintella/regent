@@ -843,6 +843,7 @@ begin
     "puppet",
     "puppet/util",
     "rspec-puppet",
+    "facter",
     "puppetlabs_spec_helper",
     "puppetlabs_spec_helper/module_spec_helper"
   ]
@@ -909,6 +910,7 @@ begin
     @example_index = 0
     @current_example = nil
     @current_group_instance = nil
+    @current_receive_matchers = []
 
     class << self
       attr_reader :tests
@@ -961,6 +963,10 @@ begin
       @contexts.last.before_hooks << block if block && !@contexts.empty?
     end
 
+    def self.register_receive_matcher(matcher)
+      @current_receive_matchers << matcher
+    end
+
     # Record the outcome of an in-Ruby value assertion (`expect(x).to eq(y)`).
     def self.add_value_result(passed, message)
       @current_example.value_results << {{ "passed" => passed, "message" => message }} if @current_example
@@ -972,6 +978,7 @@ begin
       label = description || "example #{{@example_index}}"
       name = [prefix, label].reject(&:empty?).join(" ")
       @current_example = Example.new(name)
+      @current_receive_matchers = []
       leaf = @contexts.last
       @current_group_instance = leaf ? leaf.klass.new : nil
       # Run `before(:each)` hooks (outermost context first), then the example
@@ -983,6 +990,16 @@ begin
       rescue => e
         @current_example.value_results << {{ "passed" => false, "message" => "#{{e.class}}: #{{e.message}}" }}
       end
+      @current_receive_matchers.each do |matcher|
+        if matcher.expectation?
+          passed = matcher.satisfied?
+          @current_example.value_results << {{
+            "passed" => passed,
+            "message" => passed ? nil : matcher.failure_message,
+          }}
+        end
+      end
+      @current_receive_matchers.reverse_each {{ |matcher| matcher.restore }}
       @current_example.facts = normalize_value(resolve_let(:facts))
       # A parameter explicitly set to the `:undef` symbol is passed through as an
       # explicit Puppet `undef` (normalize_value maps `:undef` → nil → JSON null
@@ -1239,6 +1256,10 @@ begin
         ok = matcher.matches?(@actual)
         ok = !ok if negate
         RegentSpec.add_value_result(ok, ok ? nil : matcher.failure_message(@actual, negate))
+      elsif matcher.is_a?(RegentReceiveMatcher)
+        matcher.expect_call(negate)
+        matcher.install(@actual)
+        RegentSpec.register_receive_matcher(matcher)
       else
         matcher.instance_variable_set(:@negate, negate) if matcher
         RegentSpec.add_expectation(matcher)
@@ -1579,6 +1600,7 @@ begin
   # Minimal Facter runtime so custom-fact unit specs
   # (`Facter.add(:x) {{ setcode {{ … }} }}` + `Facter.fact(:x).value`) execute.
   module Facter
+    FACTERVERSION = "4.0.0"
     @regent_facts = {{}}
     def self.add(name, &block)
       fact = RegentFact.new(name.to_s)
@@ -1642,10 +1664,22 @@ begin
         end
       end
     end
+
+    module Core
+      module Execution
+        def self.which(cmd)
+          "/usr/bin/#{{cmd}}"
+        end
+        def self.exec(_cmd)
+          nil
+        end
+      end
+    end
   end
 
-  # Just-enough rspec-mocks: `allow(obj).to receive(:m).with(args).and_return(v)`
-  # installs a singleton method on `obj` returning `v`.
+  # Just-enough rspec-mocks for `allow(obj).to receive(...)` and
+  # `expect(obj).to receive(...)`. Installed singleton methods are restored at
+  # the end of each example so one fact spec cannot pollute the next.
   def allow(obj)
     RegentAllowTarget.new(obj)
   end
@@ -1654,7 +1688,10 @@ begin
       @obj = obj
     end
     def to(matcher)
-      matcher.install(@obj) if matcher.respond_to?(:install)
+      if matcher.is_a?(RegentReceiveMatcher)
+        matcher.install(@obj)
+        RegentSpec.register_receive_matcher(matcher)
+      end
       @obj
     end
     def not_to(_matcher)
@@ -1669,17 +1706,68 @@ begin
     def initialize(method_name)
       @method = method_name
       @return = nil
+      @expected_args = nil
+      @matched = false
+      @expectation = false
+      @negated = false
+      @obj = nil
+      @original_method = nil
+      @had_singleton_method = false
     end
-    def with(*_args)
+    def with(*args)
+      @expected_args = args
       self
     end
     def and_return(*values)
       @return = values.length == 1 ? values.first : values
       self
     end
+    def expect_call(negated)
+      @expectation = true
+      @negated = negated
+      self
+    end
     def install(obj)
+      @obj = obj
+      @had_singleton_method = obj.singleton_methods.include?(@method)
+      begin
+        @original_method = obj.method(@method)
+      rescue NameError
+        @original_method = nil
+      end
       rm = self
-      obj.define_singleton_method(@method) {{ |*_a| rm.return_value }}
+      obj.define_singleton_method(@method) do |*args|
+        rm.record_call(args)
+        rm.return_value
+      end
+    end
+    def record_call(args)
+      @matched = true if @expected_args.nil? || @expected_args == args
+    end
+    def satisfied?
+      @negated ? !@matched : @matched
+    end
+    def expectation?
+      @expectation
+    end
+    def failure_message
+      if @negated
+        "expected #{{@method}} not to be called#{{@expected_args ? " with #{{@expected_args.inspect}}" : ""}}"
+      else
+        "expected #{{@method}} to be called#{{@expected_args ? " with #{{@expected_args.inspect}}" : ""}}"
+      end
+    end
+    def restore
+      return unless @obj
+      if @had_singleton_method && @original_method
+        original = @original_method
+        @obj.define_singleton_method(@method) {{ |*args| original.call(*args) }}
+      else
+        begin
+          @obj.singleton_class.send(:remove_method, @method)
+        rescue NameError
+        end
+      end
     end
     def return_value
       @return

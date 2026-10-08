@@ -1087,12 +1087,21 @@ impl<'a> EvalContext<'a> {
     }
 
     fn evaluate_class(&mut self, name: &str) -> Result<()> {
+        self.evaluate_class_with_params(name, None)
+    }
+
+    fn evaluate_class_with_params(
+        &mut self,
+        name: &str,
+        declaration_params: Option<&IndexMap<String, PuppetValue>>,
+    ) -> Result<()> {
         if self.evaluated_classes.contains(name) {
             return Ok(());
         }
         if self.in_progress.contains(&name.to_string()) {
             return Ok(());
         }
+        let saved_vars = self.vars.clone();
         let class_def = self
             .module
             .classes
@@ -1111,13 +1120,20 @@ impl<'a> EvalContext<'a> {
             }
         }
         self.apply_param_defaults(&class_def.params, &mut local_vars)?;
+        let passed_params = if let Some(params) = declaration_params {
+            params.clone()
+        } else if self.subject_class.as_deref() == Some(name) {
+            match &self.params {
+                PuppetValue::Hash(params) => params.clone(),
+                _ => IndexMap::new(),
+            }
+        } else {
+            IndexMap::new()
+        };
         // Automatic class-parameter lookup from Hiera: for each parameter not
         // explicitly passed, a `<class>::<param>` data value overrides the
         // manifest default (Puppet precedence: passed > Hiera > default).
-        let passed_keys: HashSet<String> = match &self.params {
-            PuppetValue::Hash(h) => h.keys().cloned().collect(),
-            _ => HashSet::new(),
-        };
+        let passed_keys: HashSet<String> = passed_params.keys().cloned().collect();
         for param in class_def.params.keys() {
             if passed_keys.contains(param) {
                 continue;
@@ -1131,7 +1147,9 @@ impl<'a> EvalContext<'a> {
                 }
             }
         }
-        self.apply_param_overrides(&mut local_vars)?;
+        for (key, value) in &passed_params {
+            local_vars.insert(key.clone(), value.clone());
+        }
         self.vars.extend(local_vars);
 
         // Validate parameters only for the class actually under test, never for
@@ -1168,11 +1186,19 @@ impl<'a> EvalContext<'a> {
         });
 
         self.class_stack.push(name.to_string());
-        self.evaluate_statements(&class_def.body)?;
+        let result = self.evaluate_statements(&class_def.body);
         self.class_stack.pop();
+        let scoped_vars = self
+            .vars
+            .iter()
+            .filter(|(key, _)| key.contains("::"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        self.vars = saved_vars;
+        self.vars.extend(scoped_vars);
         self.evaluated_classes.insert(name.to_string());
         self.in_progress.retain(|item| item != name);
-        Ok(())
+        result
     }
 
     /// Expand a defined-type resource declared inside a class/define body.
@@ -1365,7 +1391,7 @@ impl<'a> EvalContext<'a> {
                             // the catalog slot. Otherwise the parameters passed
                             // at `class { 'x': p => v }` are lost and matchers
                             // can't introspect them.
-                            let _ = self.evaluate_class(&title);
+                            let _ = self.evaluate_class_with_params(&title, Some(&attributes));
                             self.catalog.add(PuppetResource {
                                 resource_type,
                                 title: title.clone(),
@@ -1727,6 +1753,11 @@ impl<'a> EvalContext<'a> {
                     .map(|arg| self.eval_expr(arg))
                     .collect::<Result<Vec<_>>>()?;
                 match name.as_str() {
+                    "lookup" => arg_values
+                        .first()
+                        .and_then(|key| self.module.hiera.lookup(&key.as_string(), &self.facts))
+                        .or_else(|| arg_values.get(3).cloned())
+                        .unwrap_or(PuppetValue::Undef),
                     "epp" => {
                         let template_ref = arg_values
                             .first()
@@ -6796,6 +6827,87 @@ class foo {
             resource.attributes.get("greeting"),
             Some(&PuppetValue::String("hi".to_string())),
             "declared class attribute must be introspectable"
+        );
+    }
+
+    #[test]
+    fn class_resource_declaration_passes_parameters_into_class_body() {
+        let manifest = r#"
+            class child(String $greeting) {
+              notify { $greeting: }
+            }
+            class parent {
+              class { 'child': greeting => 'hello' }
+            }
+        "#;
+        let dir = write_module("parent", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "parent",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .unwrap();
+
+        assert!(
+            catalog.contains("notify", "hello"),
+            "resource-like class parameters must be visible while evaluating the class body"
+        );
+        assert!(!catalog.contains("notify", "undef"));
+    }
+
+    #[test]
+    fn class_resource_declaration_restores_calling_scope() {
+        let manifest = r#"
+            class child(String $greeting) {
+              notify { "child-${greeting}": }
+            }
+            class parent {
+              $greeting = 'parent'
+              class { 'child': greeting => 'child' }
+              notify { "after-${greeting}": }
+            }
+        "#;
+        let dir = write_module("parent", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "parent",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .unwrap();
+
+        assert!(catalog.contains("notify", "child-child"));
+        assert!(
+            catalog.contains("notify", "after-parent"),
+            "the child class parameter must not overwrite the caller's local variable"
+        );
+        assert!(!catalog.contains("notify", "after-child"));
+    }
+
+    #[test]
+    fn lookup_returns_fourth_argument_when_hiera_key_is_absent() {
+        let manifest = r#"
+            class lookup_default {
+              $config_dir = lookup('lookup_default::config_dir', String, 'first', '/etc/default')
+              file { $config_dir: ensure => directory }
+            }
+        "#;
+        let dir = write_module("lookup_default", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "lookup_default",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .unwrap();
+
+        assert!(
+            catalog.contains("file", "/etc/default"),
+            "lookup must return its explicit default when Hiera has no value"
         );
     }
 
