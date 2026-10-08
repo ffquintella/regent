@@ -12,6 +12,13 @@ A high-performance, modern implementation of Puppet Development Kit (PDK) featur
 - Regent must never shell out to a host Bundler or Rubygems for normal operation.
 - If a required gem is missing at runtime, the user is told to run `regent bootstrap` — never to `gem install` or `bundle install` on the host.
 
+The prebuilt gem cache is embedded in the binary, so `cargo install --path . --locked`
+and standalone binary copies can bootstrap offline even after the build checkout
+is removed. `make install` and platform packages also stage a verified cache.
+Run `regent bootstrap` once, then `regent test` in your module directory.
+See [the cache maintenance guide](assets/bundled_gems/README.md) for pinned
+versions, checksum verification, and package preparation.
+
 See [docs/ARTICHOKE_INTEGRATION.md](docs/ARTICHOKE_INTEGRATION.md) for details.
 
 ## 📚 Documentation

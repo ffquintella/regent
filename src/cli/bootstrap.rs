@@ -4,23 +4,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use regent::tester::bundled_gems::{ensure_user_bundle, user_bundle_dir};
+use regent::tester::bundled_gems::{ensure_user_bundle, user_bundle_dir, verify_required_gems};
 
 pub struct BootstrapCommand;
-
-/// Gems Regent's embedded Artichoke Ruby runner needs in order to execute
-/// `regent test`. These are sourced from the Regent-shipped gem cache — we do
-/// not shell out to a host Ruby or Bundler.
-const REQUIRED_GEMS: &[&str] = &[
-    "rspec",
-    "rspec-core",
-    "rspec-expectations",
-    "rspec-support",
-    "rspec-puppet",
-    "rspec-puppet-facts",
-    "facterdb",
-    "deep_merge",
-];
 
 impl BootstrapCommand {
     pub fn execute(_path: &Path, _force: bool) -> anyhow::Result<()> {
@@ -41,6 +27,11 @@ impl BootstrapCommand {
         );
 
         match ensure_user_bundle() {
+            Ok(Some(src)) if src == bundle_dir => println!(
+                "{} Regent gem cache is ready at {}",
+                "✓".green().bold(),
+                bundle_dir.display()
+            ),
             Ok(Some(src)) => println!(
                 "{} Installed Regent-shipped gem cache from {}",
                 "✓".green().bold(),
@@ -87,44 +78,6 @@ impl BootstrapCommand {
         }
         Ok(())
     }
-}
-
-fn verify_required_gems(bundle_dir: &Path) -> anyhow::Result<()> {
-    let bundle_root = bundle_dir.join("ruby");
-    let mut missing = Vec::new();
-    for name in REQUIRED_GEMS {
-        if !gem_present(&bundle_root, name) {
-            missing.push(*name);
-        }
-    }
-    if !missing.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Regent's shipped gem cache is missing required gem(s): {}.\n\
-             Reinstall Regent from a package that bundles these gems, or point REGENT_BUNDLED_GEMS at a complete cache.",
-            missing.join(", ")
-        ));
-    }
-    Ok(())
-}
-
-fn gem_present(bundle_root: &Path, gem_name: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(bundle_root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let gems_dir = entry.path().join("gems");
-        let Ok(gems) = std::fs::read_dir(&gems_dir) else {
-            continue;
-        };
-        for gem in gems.flatten() {
-            if let Some(name) = gem.file_name().to_str() {
-                if name.starts_with(&format!("{gem_name}-")) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Persist REGENT_BUNDLED_GEMS for future shells.

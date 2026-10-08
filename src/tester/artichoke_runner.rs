@@ -834,7 +834,11 @@ end
 begin
   stderr = ''
   $LOAD_PATH = [{load_path_literal}]
+  # RegentSpec below provides the RSpec DSL used by the plan evaluator.
+  # Loading the full bundled RSpec implementation here would replace that DSL.
+  # The opt-in real-RSpec runner loads the actual gems independently.
   $regent_skip_requires = [
+    "rspec",
     "spec_helper",
     "puppet",
     "puppet/util",

@@ -26,6 +26,7 @@ class Regent < Formula
 
   def install
     bin.install "regent"
+    (share/"regent").install "bundled_gems"
     
     # Install man pages if available
     if (buildpath/"man").exist?

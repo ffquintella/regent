@@ -4,6 +4,71 @@ use fs_extra::file::{copy as copy_file, CopyOptions as FileCopyOptions};
 use std::path::{Path, PathBuf};
 
 const BUNDLED_GEMS_DIRNAME: &str = "bundled_gems";
+const EMBEDDED_GEM_CACHE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/bundled_gems/cache.tar.gz"
+));
+
+/// Gem names and Ruby entrypoints required by the embedded test runner.
+/// Keep bootstrap and test preflight checks tied to the same cache contract.
+pub const REQUIRED_GEMS: &[(&str, &str)] = &[
+    ("rspec", "lib/rspec.rb"),
+    ("rspec-core", "lib/rspec/core.rb"),
+    ("rspec-expectations", "lib/rspec/expectations.rb"),
+    ("rspec-support", "lib/rspec/support.rb"),
+    ("rspec-mocks", "lib/rspec/mocks.rb"),
+    ("diff-lcs", "lib/diff/lcs.rb"),
+    ("rspec-puppet", "lib/rspec-puppet.rb"),
+    ("rspec-puppet-facts", "lib/rspec-puppet-facts.rb"),
+    ("facterdb", "lib/facterdb.rb"),
+    ("deep_merge", "lib/deep_merge.rb"),
+];
+
+/// Required gems absent from a Bundler cache, including missing entrypoints.
+pub fn missing_required_gems(bundle: &Path) -> Vec<&'static str> {
+    REQUIRED_GEMS
+        .iter()
+        .filter_map(|&(name, entrypoint)| (!gem_present(bundle, name, entrypoint)).then_some(name))
+        .collect()
+}
+
+fn gem_present(bundle: &Path, gem_name: &str, entrypoint: &str) -> bool {
+    let Ok(ruby_versions) = std::fs::read_dir(bundle.join("ruby")) else {
+        return false;
+    };
+    for version in ruby_versions.flatten() {
+        let Ok(gems) = std::fs::read_dir(version.path().join("gems")) else {
+            continue;
+        };
+        for gem in gems.flatten() {
+            let filename = gem.file_name();
+            let Some(name) = filename.to_str() else {
+                continue;
+            };
+            // A version suffix starts with a digit; rspec-core is not rspec.
+            let matches = name
+                .strip_prefix(gem_name)
+                .and_then(|suffix| suffix.strip_prefix('-'))
+                .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()));
+            if matches && gem.path().join(entrypoint).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Verify a cache before bootstrap declares success.
+pub fn verify_required_gems(bundle: &Path) -> Result<()> {
+    let missing = missing_required_gems(bundle);
+    anyhow::ensure!(
+        missing.is_empty(),
+        "Regent's gem cache is missing required gem(s) or entrypoints: {}.\n\
+         Run `regent bootstrap` with a complete Regent-shipped cache, or reinstall Regent from a package that bundles these gems.",
+        missing.join(", ")
+    );
+    Ok(())
+}
 
 /// Per-user Regent bundle directory.
 ///
@@ -71,27 +136,56 @@ fn home_dir() -> Option<PathBuf> {
 
 /// Ensure the per-user bundle (`~/.regent/bundle`) is populated from the
 /// Regent-shipped gem cache. Returns the source path that was copied from,
-/// or `None` if no source cache could be located.
+/// or the installed target when the embedded cache is used. Returns `None`
+/// only when a per-user bundle location cannot be determined.
 pub fn ensure_user_bundle() -> Result<Option<PathBuf>> {
     let Some(target) = user_bundle_dir() else {
         return Ok(None);
     };
-    let Some(source) = find_bundled_gems_source()? else {
-        return Ok(None);
-    };
-    if same_path(&source, &target) {
-        return Ok(Some(source));
+    ensure_bundle_at(&target, find_bundled_gems_source)
+}
+
+fn ensure_bundle_at(
+    target: &Path,
+    source: impl FnOnce() -> Result<Option<PathBuf>>,
+) -> Result<Option<PathBuf>> {
+    // A valid installed cache must remain usable after its installer is removed.
+    if missing_required_gems(target).is_empty() {
+        return Ok(Some(target.to_path_buf()));
     }
-    std::fs::create_dir_all(&target)
+    let Some(source) = source()? else {
+        let staged = tempfile::tempdir().context("staging embedded Regent gem cache")?;
+        unpack_embedded_cache(staged.path())?;
+        install_bundle_from(staged.path(), target)?;
+        return Ok(Some(target.to_path_buf()));
+    };
+    install_bundle_from(&source, target)?;
+    Ok(Some(source))
+}
+
+fn install_bundle_from(source: &Path, target: &Path) -> Result<()> {
+    verify_required_gems(source)?;
+    if same_path(source, target) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(target)
         .with_context(|| format!("creating Regent user bundle dir {}", target.display()))?;
-    copy_contents_into(&source, &target).with_context(|| {
+    copy_contents_into(source, target).with_context(|| {
         format!(
             "copying gem cache {} -> {}",
             source.display(),
             target.display()
         )
     })?;
-    Ok(Some(source))
+    verify_required_gems(target)
+}
+
+fn unpack_embedded_cache(target: &Path) -> Result<()> {
+    let decoder = flate2::read::GzDecoder::new(EMBEDDED_GEM_CACHE);
+    tar::Archive::new(decoder)
+        .unpack(target)
+        .context("extracting embedded Regent gem cache")?;
+    verify_required_gems(target)
 }
 
 /// Copy each immediate child of `source` into `target`. fs_extra's
@@ -99,16 +193,23 @@ pub fn ensure_user_bundle() -> Result<Option<PathBuf>> {
 /// target. Doing it ourselves keeps the layout predictable.
 fn copy_contents_into(source: &Path, target: &Path) -> Result<()> {
     let mut dir_opts = CopyOptions::new();
-    dir_opts.overwrite = false;
-    dir_opts.skip_exist = true;
+    dir_opts.overwrite = true;
+    dir_opts.skip_exist = false;
     dir_opts.copy_inside = false;
 
     let mut file_opts = FileCopyOptions::new();
-    file_opts.overwrite = false;
-    file_opts.skip_exist = true;
+    file_opts.overwrite = true;
+    file_opts.skip_exist = false;
 
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        // These are repository build inputs, not installed runtime payload.
+        if matches!(
+            entry.file_name().to_str(),
+            Some("cache.tar.gz" | "cache.lock.json" | "README.md")
+        ) {
+            continue;
+        }
         let from = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
@@ -167,7 +268,7 @@ pub fn discover_bundle_roots() -> Vec<PathBuf> {
 fn find_bundled_gems_source() -> Result<Option<PathBuf>> {
     if let Ok(env_path) = std::env::var("REGENT_BUNDLED_GEMS") {
         let candidate = PathBuf::from(env_path);
-        if has_gem_layout(&candidate) {
+        if missing_required_gems(&candidate).is_empty() {
             return Ok(Some(candidate));
         }
     }
@@ -182,21 +283,14 @@ fn find_bundled_gems_source() -> Result<Option<PathBuf>> {
                     .join(BUNDLED_GEMS_DIRNAME),
                 exe_dir.join("..").join(BUNDLED_GEMS_DIRNAME),
             ] {
-                if has_gem_layout(&candidate) {
+                if missing_required_gems(&candidate).is_empty() {
                     return Ok(Some(candidate));
                 }
             }
         }
     }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
-        manifest_dir.join("assets").join(BUNDLED_GEMS_DIRNAME),
-        manifest_dir.join("vendor").join("bundle"),
-    ] {
-        if has_gem_layout(&candidate) {
-            return Ok(Some(candidate));
-        }
-    }
+    // The embedded archive is the portable fallback; installation must not
+    // depend on the checkout used to compile this binary.
     Ok(None)
 }
 
@@ -240,24 +334,14 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    /// Build a minimal but realistic Bundler-style gem cache under `root`:
-    ///
-    /// ```text
-    /// root/
-    ///   ruby/2.6.0/gems/rspec-3.13.2/lib/rspec.rb
-    ///   ruby/2.6.0/gems/rspec-core-3.13.6/lib/rspec/core.rb
-    ///   ruby/2.6.0/specifications/rspec-3.13.2.gemspec
-    /// ```
     fn populate_fake_gem_cache(root: &Path) {
-        let gems = root.join("ruby").join("2.6.0").join("gems");
-        for gem in ["rspec-3.13.2", "rspec-core-3.13.6"] {
-            let lib = gems.join(gem).join("lib");
-            fs::create_dir_all(&lib).unwrap();
-            fs::write(lib.join("placeholder.rb"), b"# placeholder").unwrap();
+        let gems = root.join("ruby/2.6.0/gems");
+        for &(name, entrypoint) in REQUIRED_GEMS {
+            let file = gems.join(format!("{name}-1.0.0")).join(entrypoint);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"# placeholder").unwrap();
         }
-        let specs = root.join("ruby").join("2.6.0").join("specifications");
-        fs::create_dir_all(&specs).unwrap();
-        fs::write(specs.join("rspec-3.13.2.gemspec"), b"# spec").unwrap();
+        fs::create_dir_all(root.join("ruby/2.6.0/specifications")).unwrap();
     }
 
     #[test]
@@ -277,7 +361,7 @@ mod tests {
             .join("ruby")
             .join("2.6.0")
             .join("gems")
-            .join("rspec-3.13.2")
+            .join("rspec-1.0.0")
             .is_dir());
         assert!(dst
             .path()
@@ -312,8 +396,23 @@ mod tests {
             .join("ruby")
             .join("2.6.0")
             .join("gems")
-            .join("rspec-core-3.13.6")
+            .join("rspec-core-1.0.0")
             .is_dir());
+    }
+
+    #[test]
+    fn copy_excludes_repository_cache_build_inputs() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        populate_fake_gem_cache(source.path());
+        for name in ["cache.tar.gz", "cache.lock.json", "README.md"] {
+            fs::write(source.path().join(name), b"build input").unwrap();
+        }
+        copy_contents_into(source.path(), target.path()).unwrap();
+        verify_required_gems(target.path()).unwrap();
+        for name in ["cache.tar.gz", "cache.lock.json", "README.md"] {
+            assert!(!target.path().join(name).exists());
+        }
     }
 
     #[test]
@@ -346,76 +445,80 @@ mod tests {
         assert!(!has_gem_layout(dir.path()));
     }
 
-    /// The Regent repo's own `vendor/bundle` is the canonical shipped cache.
-    /// If anything in REQUIRED_GEMS is missing from it, `regent bootstrap`
-    /// will fail for end users — fail the build instead so we notice first.
     #[test]
-    fn shipped_vendor_bundle_contains_all_required_gems() {
-        let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("vendor")
-            .join("bundle");
-        if !has_gem_layout(&bundle) {
-            // No shipped cache in the dev tree — skip rather than fail; CI
-            // environments may build without it.
-            return;
-        }
-        let ruby_root = bundle.join("ruby");
-        let required = [
-            "rspec",
-            "rspec-core",
-            "rspec-expectations",
-            "rspec-support",
-            "rspec-puppet",
-            "rspec-puppet-facts",
-            "facterdb",
-            "deep_merge",
-        ];
-        let mut found: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for entry in fs::read_dir(&ruby_root).unwrap().flatten() {
-            let Ok(gems) = fs::read_dir(entry.path().join("gems")) else {
-                continue;
-            };
-            for gem in gems.flatten() {
-                let Some(name) = gem.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                for req in &required {
-                    if name.starts_with(&format!("{req}-")) {
-                        found.insert(req);
-                    }
-                }
-            }
-        }
-        let missing: Vec<&&str> = required.iter().filter(|r| !found.contains(*r)).collect();
-        assert!(
-            missing.is_empty(),
-            "shipped vendor/bundle is missing required gem(s): {missing:?}"
+    fn embedded_cache_matches_pinned_archive_digest() {
+        use sha2::{Digest, Sha256};
+        let lock: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/bundled_gems/cache.lock.json"
+        )))
+        .unwrap();
+        let actual: String = Sha256::digest(EMBEDDED_GEM_CACHE)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            actual,
+            lock["cache_sha256"].as_str().unwrap(),
+            "embedded cache is stale: regenerate with `python3 scripts/prepare-gem-cache.py --rebuild`"
         );
     }
 
     #[test]
-    fn verify_required_gems_layout_matches_copy_output() {
-        // The verify step that runs during `regent bootstrap` reads
-        // `<bundle>/ruby/*/gems/<name>-<version>`. Ensure the layout produced
-        // by copy_contents_into is exactly what that check expects.
-        let src = tempdir().unwrap();
-        let dst = tempdir().unwrap();
-        populate_fake_gem_cache(src.path());
+    fn embedded_cache_contains_all_required_entrypoints() {
+        let staged = tempdir().unwrap();
+        unpack_embedded_cache(staged.path()).unwrap();
+        verify_required_gems(staged.path()).unwrap();
+    }
 
-        copy_contents_into(src.path(), dst.path()).unwrap();
-
-        let ruby_root = dst.path().join("ruby");
-        let mut found_rspec = false;
-        for entry in fs::read_dir(&ruby_root).unwrap().flatten() {
-            for gem in fs::read_dir(entry.path().join("gems")).unwrap().flatten() {
-                if gem.file_name().to_string_lossy().starts_with("rspec-") {
-                    found_rspec = true;
-                }
-            }
-        }
-        assert!(
-            found_rspec,
-            "verify_required_gems would have missed rspec in {ruby_root:?}"
+    #[test]
+    fn prefixes_and_missing_entrypoints_do_not_satisfy_required_gems() {
+        let cache = tempdir().unwrap();
+        populate_fake_gem_cache(cache.path());
+        let gems = cache.path().join("ruby/2.6.0/gems");
+        fs::remove_dir_all(gems.join("rspec-1.0.0")).unwrap();
+        fs::remove_dir_all(gems.join("rspec-puppet-1.0.0")).unwrap();
+        fs::remove_file(gems.join("deep_merge-1.0.0/lib/deep_merge.rb")).unwrap();
+        assert_eq!(
+            missing_required_gems(cache.path()),
+            vec!["rspec", "rspec-puppet", "deep_merge"]
         );
+    }
+
+    #[test]
+    fn valid_installed_cache_does_not_need_original_source() {
+        let target = tempdir().unwrap();
+        populate_fake_gem_cache(target.path());
+        let result = ensure_bundle_at(target.path(), || panic!("source lookup is unnecessary"));
+        assert_eq!(result.unwrap(), Some(target.path().to_path_buf()));
+    }
+
+    #[test]
+    fn incomplete_cache_is_repaired_from_complete_source() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        populate_fake_gem_cache(source.path());
+        populate_fake_gem_cache(target.path());
+        let entrypoint = "ruby/2.6.0/gems/rspec-1.0.0/lib/rspec.rb";
+        fs::remove_file(target.path().join(entrypoint)).unwrap();
+        let existing = "ruby/2.6.0/gems/rspec-core-1.0.0/lib/rspec/core.rb";
+        fs::write(target.path().join(existing), b"broken old copy").unwrap();
+        ensure_bundle_at(target.path(), || Ok(Some(source.path().to_path_buf()))).unwrap();
+        verify_required_gems(target.path()).unwrap();
+        assert_eq!(
+            fs::read(target.path().join(existing)).unwrap(),
+            b"# placeholder"
+        );
+    }
+
+    #[test]
+    fn incomplete_source_is_rejected_before_copying() {
+        let source = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        fs::create_dir_all(source.path().join("ruby/2.6.0/gems/rspec-core-1.0.0/lib")).unwrap();
+        let error =
+            ensure_bundle_at(target.path(), || Ok(Some(source.path().to_path_buf()))).unwrap_err();
+        assert!(error.to_string().contains("rspec"));
+        assert!(!target.path().join("ruby").exists());
     }
 }

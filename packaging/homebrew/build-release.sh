@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+python3 scripts/prepare-gem-cache.py
+
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
   echo "Usage: $0 <version>"
@@ -34,7 +38,9 @@ for target in "${TARGETS[@]}"; do
   
   # Create archive directory
   archive_dir="$BUILD_DIR/regent-$VERSION-$target"
+  rm -rf "$archive_dir"
   mkdir -p "$archive_dir"
+  python3 scripts/prepare-gem-cache.py --stage "$archive_dir/bundled_gems"
   
   # Copy binary
   if [[ "$target" == *"darwin"* ]] || [[ "$target" == *"linux"* ]]; then

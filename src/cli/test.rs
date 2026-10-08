@@ -1,7 +1,9 @@
 use colored::*;
 use std::path::Path;
 
-use regent::tester::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
+use regent::tester::bundled_gems::{
+    discover_bundle_roots, ensure_user_bundle, missing_required_gems, REQUIRED_GEMS,
+};
 use regent::tester::reporter::ReportFormat;
 use regent::tester::{FixtureManager, ModuleTester, TestConfig, TestReporter, TestType};
 
@@ -174,26 +176,20 @@ fn detect_missing_runtime_dependency(module_path: &Path) -> Option<String> {
     let mut roots = discover_bundle_roots();
     // Also accept legacy per-module bundle from older Regent versions.
     roots.push(module_path.join("vendor").join("bundle"));
-    for root in roots {
-        let ruby_root = root.join("ruby");
-        let Ok(entries) = std::fs::read_dir(&ruby_root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let gems_dir = entry.path().join("gems");
-            let Ok(gems) = std::fs::read_dir(&gems_dir) else {
-                continue;
-            };
-            for gem in gems.flatten() {
-                if let Some(name) = gem.file_name().to_str() {
-                    if name.starts_with("rspec-") || name == "rspec" || name.starts_with("rspec_") {
-                        return None;
-                    }
-                }
-            }
-        }
-    }
-    Some("rspec".to_string())
+    let missing_by_root: Vec<_> = roots
+        .iter()
+        .map(|root| missing_required_gems(root))
+        .collect();
+    REQUIRED_GEMS
+        .iter()
+        .filter_map(|&(name, _)| {
+            missing_by_root
+                .iter()
+                .all(|missing| missing.contains(&name))
+                .then_some(name)
+        })
+        .next()
+        .map(str::to_owned)
 }
 
 fn prep_fixtures_if_needed(module_path: &Path) {

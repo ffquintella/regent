@@ -39,13 +39,13 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
 
   # Runtime dependencies
-  spec.add_dependency 'thor', '~> 1.2'
-  spec.add_dependency 'tty-prompt', '~> 0.23'
-  spec.add_dependency 'colorize', '~> 0.8'
+  spec.add_dependency 'thor', '>= 1.5.0', '< 2.0'
+  spec.add_dependency 'tty-prompt', '>= 0.23.1', '< 1.0'
+  spec.add_dependency 'colorize', '>= 1.1.0', '< 2.0'
 
   # Development dependencies
-  spec.add_development_dependency 'rake', '~> 13.0'
-  spec.add_development_dependency 'rspec', '~> 3.0'
-  spec.add_development_dependency 'rubocop', '~> 1.21'
-  spec.add_development_dependency 'yard', '~> 0.9'
+  spec.add_development_dependency 'rake', '>= 13.4.2', '< 14.0'
+  spec.add_development_dependency 'rspec', '>= 3.13.2', '< 4.0'
+  spec.add_development_dependency 'rubocop', '>= 1.91.0', '< 2.0'
+  spec.add_development_dependency 'yard', '>= 0.9.45', '< 1.0'
 end

@@ -532,10 +532,13 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
 
     let metadata_url = format!("https://forgeapi.puppet.com/v3/modules/{normalized}");
     let metadata: serde_json::Value = ureq::get(&metadata_url)
-        .timeout(std::time::Duration::from_secs(30))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(30)))
+        .build()
         .call()
         .with_context(|| format!("GET {metadata_url}"))?
-        .into_json()
+        .body_mut()
+        .read_json()
         .with_context(|| format!("parse JSON from {metadata_url}"))?;
 
     let file_uri = forge_file_uri(&metadata, version_pin).ok_or_else(|| {
@@ -544,9 +547,12 @@ pub fn install_forge(fixture_path: &Path, slug: &str) -> Result<bool> {
 
     let download_url = format!("https://forgeapi.puppet.com{file_uri}");
     let mut reader = ureq::get(&download_url)
-        .timeout(std::time::Duration::from_secs(120))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .build()
         .call()
         .with_context(|| format!("GET {download_url}"))?
+        .into_body()
         .into_reader();
 
     // Buffer the tarball to a tempfile before extracting so a slow link can't

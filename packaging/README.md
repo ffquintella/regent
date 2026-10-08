@@ -1,5 +1,22 @@
 # Cross-Platform Packaging for Regent
 
+All packaging entrypoints verify the committed offline gem cache before building
+and stage its complete payload with the executable. Python 3 is required on the
+build machine; Ruby, RubyGems, and Bundler are not required. Installed Regent
+also embeds the same cache for binary-only installation.
+
+```sh
+python3 scripts/prepare-gem-cache.py --check
+make install                      # executable + adjacent cache
+make package-deb                  # /usr/share/regent/bundled_gems
+```
+
+Debian/RPM packages and Homebrew use `share/regent/bundled_gems`; archives and
+Windows packages use an adjacent `bundled_gems` directory. The user runs
+`regent bootstrap` to populate their per-user bundle. Packaging fails on a
+missing or checksum-invalid prebuilt archive instead of shipping an executable
+without gems. See [cache maintenance](../assets/bundled_gems/README.md).
+
 This directory contains packaging configurations for distributing Regent across multiple platforms.
 
 ## Supported Platforms

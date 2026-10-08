@@ -21,6 +21,13 @@ Rules contributors and AI agents must follow:
   - Windows: `%APPDATA%\Regent\bundle` (falls back to `%LOCALAPPDATA%\Regent\bundle`, then `%USERPROFILE%\.regent\bundle`)
 
   Required gems (rspec, rspec-core, rspec-expectations, rspec-support, …) come from a pre-built gem cache discovered via `REGENT_BUNDLED_GEMS`, the per-user bundle, the binary's neighboring `share/regent/bundled_gems`, or — in dev — `assets/bundled_gems`/`vendor/bundle` in the repo.
+- **The binary embeds a complete cache as its offline bootstrap fallback.**
+  `assets/bundled_gems/cache.tar.gz` is committed with a checksum/version lock.
+  A binary-only install can populate a fresh user bundle without its original
+  source checkout or a neighboring cache. Bootstrap first reuses a complete
+  installed bundle, then considers complete external caches, then extracts the
+  embedded archive. An incomplete cache cannot masquerade as a complete one:
+  exact gem names and required Ruby entrypoints are checked.
 - **`regent bootstrap` copies into the per-user bundle — never installs from rubygems.org.** It also persists `REGENT_BUNDLED_GEMS`:
   - Unix/macOS: appends a guarded `# >>> regent bundle <<<` block to `~/.zshrc`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`.
   - Windows: calls `setx REGENT_BUNDLED_GEMS …` to write the user-level environment variable (takes effect in new shells).
@@ -89,6 +96,20 @@ Any feature or gem that relies on native extensions must be rebuilt or replaced 
 ## Base Gems Bundling
 
 Regent should bundle the base gems required for all test runs to avoid re-downloading them. This includes the core RSpec stack and any pure-Ruby dependencies needed for Artichoke execution.
+
+The committed archive contains 22 pinned pure-Ruby gems and their runtime
+dependencies. Package preparation is offline:
+
+```sh
+python3 scripts/prepare-gem-cache.py --check
+python3 scripts/prepare-gem-cache.py --stage target/dist/bundled_gems
+```
+
+The preparer validates the archive, manifest, per-file hashes, and dependency
+closure before staging. Only the explicit maintainer `--rebuild` operation
+downloads the pinned upstream `.gem` archives. It uses Python's standard library
+and never runs host Ruby tooling. See
+[the cache guide](../assets/bundled_gems/README.md) for maintenance instructions.
 
 ## Building for Distribution
 

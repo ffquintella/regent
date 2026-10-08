@@ -1,0 +1,336 @@
+{
+  "schema": 1,
+  "ruby_api": "2.6.0",
+  "gems": [
+    {
+      "name": "concurrent-ruby",
+      "version": "1.1.10",
+      "sha256": "244cb1ca0d91ec2c15ca2209507c39fb163336994428e16fbd3f465c87bd8e68",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/concurrent-ruby/concurrent.rb",
+      "dependencies": []
+    },
+    {
+      "name": "deep_merge",
+      "version": "1.2.2",
+      "sha256": "83ced3a3d7f95f67de958d2ce41b1874e83c8d94fe2ddbff50c8b4b82323563a",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/deep_merge.rb",
+      "dependencies": []
+    },
+    {
+      "name": "diff-lcs",
+      "version": "1.6.2",
+      "sha256": "9ae0d2cba7d4df3075fe8cd8602a8604993efc0dfa934cff568969efb1909962",
+      "licenses": [
+        "MIT",
+        "Artistic-1.0-Perl",
+        "GPL-2.0-or-later"
+      ],
+      "entrypoint": "lib/diff/lcs.rb",
+      "dependencies": []
+    },
+    {
+      "name": "facter",
+      "version": "2.5.7",
+      "sha256": "f2b8acaa9c4f3c606496aca1b6b4a6c3f9fb623e530785aa93cac56a977713ab",
+      "licenses": [],
+      "entrypoint": "lib/facter.rb",
+      "dependencies": []
+    },
+    {
+      "name": "facterdb",
+      "version": "1.27.0",
+      "sha256": "47c5305baac9b78da8a8a6bc1bbaa298222fff62c9644031ca63ea527d5fe970",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/facterdb.rb",
+      "dependencies": [
+        {
+          "name": "facter",
+          "requirements": "< 5.0.0"
+        },
+        {
+          "name": "jgrep",
+          "requirements": "~> 1.5, >= 1.5.4"
+        }
+      ]
+    },
+    {
+      "name": "fast_gettext",
+      "version": "1.1.2",
+      "sha256": "e868f02c24af746a137f3aaf898ca3660e6611aa7f1f96ce60e9a425130f2732",
+      "licenses": [
+        "MIT",
+        "Ruby"
+      ],
+      "entrypoint": "lib/fast_gettext.rb",
+      "dependencies": []
+    },
+    {
+      "name": "hiera",
+      "version": "3.12.0",
+      "sha256": "7808800f6da3ec9bb3b5d63d113a8ccbc3fb4fe72f459d5b67a1ef23ab952b61",
+      "licenses": [],
+      "entrypoint": "lib/hiera.rb",
+      "dependencies": []
+    },
+    {
+      "name": "hocon",
+      "version": "1.3.1",
+      "sha256": "b65aba4db51987a0d1d504696f3ebd0a484d86f18f33d0e66deedeed36d92e56",
+      "licenses": [
+        "Apache License, v2"
+      ],
+      "entrypoint": "lib/hocon.rb",
+      "dependencies": []
+    },
+    {
+      "name": "httpclient",
+      "version": "2.8.3",
+      "sha256": "2951e4991214464c3e92107e46438527d23048e634f3aee91c719e0bdfaebda6",
+      "licenses": [
+        "ruby"
+      ],
+      "entrypoint": "lib/httpclient.rb",
+      "dependencies": []
+    },
+    {
+      "name": "jgrep",
+      "version": "1.5.4",
+      "sha256": "521585588687103b4d65951c17d29e2ea64edc45babe97f34bce7cfebafe44db",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/jgrep.rb",
+      "dependencies": []
+    },
+    {
+      "name": "locale",
+      "version": "2.1.3",
+      "sha256": "b6ddee011e157817cb98e521b3ce7cb626424d5882f1e844aafdee3e8b212725",
+      "licenses": [
+        "Ruby",
+        "LGPLv3+"
+      ],
+      "entrypoint": "lib/locale.rb",
+      "dependencies": []
+    },
+    {
+      "name": "multi_json",
+      "version": "1.15.0",
+      "sha256": "1fd04138b6e4a90017e8d1b804c039031399866ff3fbabb7822aea367c78615d",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/multi_json.rb",
+      "dependencies": []
+    },
+    {
+      "name": "puppet",
+      "version": "6.28.0",
+      "sha256": "b2d89e62278175ebd8ab08552f85e62ae0c368d7c5798f895d2297eecdeca36d",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/puppet.rb",
+      "dependencies": [
+        {
+          "name": "concurrent-ruby",
+          "requirements": "~> 1.0"
+        },
+        {
+          "name": "deep_merge",
+          "requirements": "~> 1.0"
+        },
+        {
+          "name": "facter",
+          "requirements": "> 2.0.1, < 5"
+        },
+        {
+          "name": "fast_gettext",
+          "requirements": "~> 1.1"
+        },
+        {
+          "name": "hiera",
+          "requirements": ">= 3.2.1, < 4"
+        },
+        {
+          "name": "httpclient",
+          "requirements": "~> 2.8"
+        },
+        {
+          "name": "locale",
+          "requirements": "~> 2.1"
+        },
+        {
+          "name": "multi_json",
+          "requirements": "~> 1.10"
+        },
+        {
+          "name": "puppet-resource_api",
+          "requirements": "~> 1.5"
+        },
+        {
+          "name": "semantic_puppet",
+          "requirements": "~> 1.0"
+        }
+      ]
+    },
+    {
+      "name": "puppet-resource_api",
+      "version": "1.5.0",
+      "sha256": "fe353066f8be0a2aca99a88bb2a8e16e1e48f83abf39cde28b29b0fca49860a9",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/puppet/resource_api.rb",
+      "dependencies": [
+        {
+          "name": "hocon",
+          "requirements": ">= 1.0"
+        }
+      ]
+    },
+    {
+      "name": "rspec",
+      "version": "3.13.2",
+      "sha256": "206284a08ad798e61f86d7ca3e376718d52c0bc944626b2349266f239f820587",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec.rb",
+      "dependencies": [
+        {
+          "name": "rspec-core",
+          "requirements": "~> 3.13.0"
+        },
+        {
+          "name": "rspec-expectations",
+          "requirements": "~> 3.13.0"
+        },
+        {
+          "name": "rspec-mocks",
+          "requirements": "~> 3.13.0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-core",
+      "version": "3.13.6",
+      "sha256": "a8823c6411667b60a8bca135364351dda34cd55e44ff94c4be4633b37d828b2d",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec/core.rb",
+      "dependencies": [
+        {
+          "name": "rspec-support",
+          "requirements": "~> 3.13.0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-expectations",
+      "version": "3.13.5",
+      "sha256": "33a4d3a1d95060aea4c94e9f237030a8f9eae5615e9bd85718fe3a09e4b58836",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec/expectations.rb",
+      "dependencies": [
+        {
+          "name": "diff-lcs",
+          "requirements": ">= 1.2.0, < 2.0"
+        },
+        {
+          "name": "rspec-support",
+          "requirements": "~> 3.13.0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-mocks",
+      "version": "3.13.7",
+      "sha256": "0979034e64b1d7a838aaaddf12bf065ea4dc40ef3d4c39f01f93ae2c66c62b1c",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec/mocks.rb",
+      "dependencies": [
+        {
+          "name": "diff-lcs",
+          "requirements": ">= 1.2.0, < 2.0"
+        },
+        {
+          "name": "rspec-support",
+          "requirements": "~> 3.13.0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-puppet",
+      "version": "2.12.0",
+      "sha256": "8a8549976605d5ea634490f9e414cdfac93731d10b7bf84ff837dc4afc66f978",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec-puppet.rb",
+      "dependencies": [
+        {
+          "name": "rspec",
+          "requirements": ">= 0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-puppet-facts",
+      "version": "2.0.0",
+      "sha256": "4a9a7c69649530194ad0542997dfdd7051590345bed95713328c7924157d7990",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/rspec-puppet-facts.rb",
+      "dependencies": [
+        {
+          "name": "facter",
+          "requirements": ">= 0"
+        },
+        {
+          "name": "facterdb",
+          "requirements": ">= 0.5.0"
+        },
+        {
+          "name": "puppet",
+          "requirements": ">= 0"
+        }
+      ]
+    },
+    {
+      "name": "rspec-support",
+      "version": "3.13.7",
+      "sha256": "0640e5570872aafefd79867901deeeeb40b0c9875a36b983d85f54fb7381c47c",
+      "licenses": [
+        "MIT"
+      ],
+      "entrypoint": "lib/rspec/support.rb",
+      "dependencies": []
+    },
+    {
+      "name": "semantic_puppet",
+      "version": "1.0.4",
+      "sha256": "5d8380bf733c1552ef77e06a7c44a6d5b48def7d390ecf3bd71cad477f5ce13d",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "entrypoint": "lib/semantic_puppet.rb",
+      "dependencies": []
+    }
+  ],
+  "cache_sha256": "5f603aaba246738c95f83f206b4f492a59fe18c108f359a594af0c3387f9859b"
+}

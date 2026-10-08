@@ -21,10 +21,14 @@ pub fn forge_release_exists(base_url: &str, slug: &str, version: &str) -> Result
         slug,
         version
     );
-    match ureq::get(&url).timeout(QUERY_TIMEOUT).call() {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(QUERY_TIMEOUT))
+        .build()
+        .new_agent();
+    match agent.get(&url).call() {
         Ok(_) => Ok(true),
-        Err(ureq::Error::Status(404, _)) => Ok(false),
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(404)) => Ok(false),
+        Err(ureq::Error::StatusCode(code)) => {
             log::debug!("release lookup {url} returned HTTP {code}; continuing");
             Ok(false)
         }
@@ -49,21 +53,26 @@ pub fn upload_multipart(
     let boundary = multipart_boundary();
     let body = build_multipart_body(&boundary, filename, &bytes)?;
 
-    let mut request = ureq::post(url)
-        .timeout(UPLOAD_TIMEOUT)
-        .set(
+    let agent = upload_agent();
+    let mut request = agent
+        .post(url)
+        .header(
             "Content-Type",
             &format!("multipart/form-data; boundary={boundary}"),
         )
-        .set("Accept", "application/json");
+        .header("Accept", "application/json");
     if let Some(auth) = credentials.authorization_header() {
-        request = request.set("Authorization", &auth);
+        request = request.header("Authorization", &auth);
     }
     for (name, value) in headers {
-        request = request.set(name, value);
+        // ureq 2's set() replaced earlier values; ureq 3's header() appends.
+        if let Some(request_headers) = request.headers_mut() {
+            request_headers.remove(name.as_str());
+        }
+        request = request.header(name.as_str(), value.as_str());
     }
 
-    send(request.send_bytes(&body), url)
+    send(request.send(&body), url)
 }
 
 /// Send the tarball as the raw request body (generic repositories).
@@ -77,39 +86,55 @@ pub fn upload_raw(
     let bytes =
         std::fs::read(tarball).with_context(|| format!("Failed to read {}", tarball.display()))?;
 
+    let agent = upload_agent();
     let mut request = match method {
-        HttpMethod::Put => ureq::put(url),
-        HttpMethod::Post => ureq::post(url),
+        HttpMethod::Put => agent.put(url),
+        HttpMethod::Post => agent.post(url),
     }
-    .timeout(UPLOAD_TIMEOUT)
-    .set("Content-Type", "application/gzip");
+    .header("Content-Type", "application/gzip");
     if let Some(auth) = credentials.authorization_header() {
-        request = request.set("Authorization", &auth);
+        request = request.header("Authorization", &auth);
     }
     for (name, value) in headers {
-        request = request.set(name, value);
+        if let Some(request_headers) = request.headers_mut() {
+            request_headers.remove(name.as_str());
+        }
+        request = request.header(name.as_str(), value.as_str());
     }
 
-    send(request.send_bytes(&bytes), url)
+    send(request.send(&bytes), url)
+}
+
+fn upload_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(UPLOAD_TIMEOUT))
+        // ureq 3's StatusCode error drops the response body. Keep the response
+        // so Forge's validation message can still be reported to the caller.
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
 }
 
 /// Turn a ureq result into a body string, surfacing the server's own error
 /// message (which is where Forge validation failures live).
-fn send(result: Result<ureq::Response, ureq::Error>, url: &str) -> Result<Option<String>> {
+fn send(
+    result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    url: &str,
+) -> Result<Option<String>> {
     match result {
-        Ok(response) => {
-            let body = response.into_string().unwrap_or_default();
+        Ok(mut response) => {
+            let status = response.status();
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            if status.is_client_error() || status.is_server_error() {
+                return Err(anyhow!(
+                    "{} rejected the upload: HTTP {}{}",
+                    url,
+                    status.as_u16(),
+                    describe_error_body(&body)
+                ));
+            }
             let body = body.trim().to_string();
             Ok(if body.is_empty() { None } else { Some(body) })
-        }
-        Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            Err(anyhow!(
-                "{} rejected the upload: HTTP {}{}",
-                url,
-                code,
-                describe_error_body(&body)
-            ))
         }
         Err(err) => Err(anyhow!("Failed to upload to {}: {}", url, err)),
     }
@@ -184,6 +209,132 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Instant;
+
+    /// One loopback exchange exercises ureq itself without a Forge account.
+    fn serve_once(status: u16, body: &'static str) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no HTTP request received");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("accept HTTP request: {err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request = Vec::new();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                request.extend_from_slice(line.as_bytes());
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut payload = vec![0; length];
+            reader.read_exact(&mut payload).unwrap();
+            request.extend_from_slice(&payload);
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            request
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn raw_upload_preserves_payload_headers_and_response() {
+        for method in [HttpMethod::Put, HttpMethod::Post] {
+            let (url, server) = serve_once(201, "  uploaded  ");
+            let tarball = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tarball.path(), b"\x1f\x8btarball").unwrap();
+            let result = upload_raw(
+                &url,
+                method,
+                tarball.path(),
+                &Credentials::Bearer("test-token".into()),
+                &[
+                    ("X-Test".into(), "old-value".into()),
+                    ("x-test".into(), "extra-header".into()),
+                    ("Content-Type".into(), "application/octet-stream".into()),
+                ],
+            );
+            let request = server.join().unwrap();
+            assert_eq!(result.unwrap().as_deref(), Some("uploaded"));
+            let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            assert!(headers.starts_with(&format!(
+                "{} / http/1.1",
+                method.as_str().to_ascii_lowercase()
+            )));
+            assert!(headers.contains("authorization: bearer test-token\r\n"));
+            assert!(headers.contains("content-type: application/octet-stream\r\n"));
+            assert_eq!(headers.matches("content-type:").count(), 1);
+            assert!(headers.contains("x-test: extra-header\r\n"));
+            assert_eq!(headers.matches("x-test:").count(), 1);
+            assert!(request.ends_with(b"\x1f\x8btarball"));
+        }
+    }
+
+    #[test]
+    fn multipart_upload_keeps_server_validation_errors() {
+        for status in [422, 500] {
+            let (url, server) = serve_once(status, r#"{"message":"Rejected module"}"#);
+            let tarball = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tarball.path(), b"payload").unwrap();
+            let result = upload_multipart(
+                &url,
+                tarball.path(),
+                "acme-web-1.0.0.tar.gz",
+                &Credentials::None,
+                &[],
+            );
+            let request = server.join().unwrap();
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            assert!(error.contains("Rejected module"), "{error}");
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST / HTTP/1.1\r\n"));
+            assert!(request.contains("multipart/form-data; boundary="));
+            assert!(request.contains("filename=\"acme-web-1.0.0.tar.gz\""));
+            assert!(request.contains("\r\n\r\npayload\r\n"));
+        }
+    }
+
+    #[test]
+    fn forge_release_lookup_handles_http_statuses() {
+        for (status, expected) in [(200, true), (404, false), (503, false)] {
+            let (url, server) = serve_once(status, "");
+            let result = forge_release_exists(&url, "acme-web", "1.0.0");
+            let request = server.join().unwrap();
+            assert_eq!(result.unwrap(), expected);
+            assert!(request.starts_with(b"GET /v3/releases/acme-web-1.0.0 HTTP/1.1\r\n"));
+        }
+    }
 
     #[test]
     fn multipart_body_wraps_the_payload() {

@@ -1,10 +1,11 @@
 import * as path from 'path';
-import Mocha from 'mocha';
 import { glob } from 'glob';
 
-export function run(): Promise<void> {
+export async function run(): Promise<void> {
+    // Mocha 12 is ESM; load it without requiring the module from CommonJS.
+    const { default: mochaConstructor } = await import('mocha');
     // Create the mocha test
-    const mocha = new Mocha({
+    const mocha = new mochaConstructor({
         ui: 'tdd',
         color: true
     });

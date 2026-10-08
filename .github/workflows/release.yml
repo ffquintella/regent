@@ -33,6 +33,13 @@ jobs:
           VERSION=${VERSION#v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
       
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare bundled gem cache
+        run: python scripts/prepare-gem-cache.py
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
       
@@ -40,6 +47,7 @@ jobs:
         run: |
           mkdir -p dist/regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
           cp target/${{ matrix.target }}/release/regent dist/regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}/
+          python3 scripts/prepare-gem-cache.py --stage dist/regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}/bundled_gems
           cd dist
           tar -czf regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}
           shasum -a 256 regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz > regent-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}.tar.gz.sha256
@@ -92,6 +100,13 @@ jobs:
           VERSION=${VERSION#v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
       
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare bundled gem cache
+        run: python scripts/prepare-gem-cache.py
+
       - name: Build release binary
         run: cross build --release --target ${{ matrix.target }}
       
@@ -126,7 +141,9 @@ jobs:
       - name: Install WiX
         run: |
           choco install wixtoolset -y
-          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" >> $env:GITHUB_PATH
+          $wix = Get-ChildItem "${env:ProgramFiles(x86)}" -Directory -Filter "WiX Toolset v3*" | Select-Object -First 1
+          if (-not $wix) { throw "WiX Toolset v3 installation not found" }
+          Join-Path $wix.FullName "bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       
       - name: Get version
         id: version
@@ -137,6 +154,13 @@ jobs:
           VERSION=${VERSION#v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
       
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare bundled gem cache
+        run: python scripts/prepare-gem-cache.py
+
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc
       
@@ -144,13 +168,13 @@ jobs:
         shell: cmd
         run: |
           cd packaging\windows
-          call build-msi.bat
+          call build-msi.bat x64 ${{ steps.version.outputs.VERSION }}
       
       - name: Build portable ZIP
         shell: cmd
         run: |
           cd packaging\windows
-          call build-portable.bat
+          call build-portable.bat ${{ steps.version.outputs.VERSION }}
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

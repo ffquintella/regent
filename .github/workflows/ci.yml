@@ -43,8 +43,18 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
       
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare bundled gem cache
+        run: python scripts/prepare-gem-cache.py
+
+      - name: Test offline cache preparer
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+
       - name: Run tests
-        run: cargo test --verbose --lib
+        run: cargo test --verbose --locked
       
       - name: Run doctests
         run: cargo test --doc
@@ -78,15 +88,26 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare bundled gem cache
+        run: python scripts/prepare-gem-cache.py
+
       - name: Build release
         run: cargo build --release --verbose
       
+      - name: Stage bundled gem cache
+        run: python scripts/prepare-gem-cache.py --stage target/release/bundled_gems
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: regent-${{ matrix.os }}
           path: |
             target/release/regent${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+            target/release/bundled_gems/
 
   vscode-extension-version:
     name: VS Code Extension Version Check

@@ -4,9 +4,10 @@
 CARGO ?= cargo
 PYTHON ?= python3
 NPM ?= npm
+INSTALL_ROOT ?= $(if $(CARGO_INSTALL_ROOT),$(CARGO_INSTALL_ROOT),$(if $(CARGO_HOME),$(CARGO_HOME),$(HOME)/.cargo))
 
 .PHONY: help version-show sync-vscode-version sync-vscode-version-check bump-major bump-minor bump-patch build install vscode-extension clean \
-	package-homebrew package-deb package-rpm package-windows package-all
+	prepare-gem-cache check-gem-cache package-homebrew package-deb package-rpm package-windows package-all
 
 help:
 	@echo "Available targets:"
@@ -49,7 +50,13 @@ bump-patch:
 	@$(PYTHON) -c 'import pathlib, re, sys; path = pathlib.Path("Cargo.toml"); text = path.read_text(); m = re.search(r"^version = \"([0-9]+)\.([0-9]+)\.([0-9]+)\"", text, re.M); sys.exit("version not found in Cargo.toml") if not m else None; maj, minor, patch = map(int, m.groups()); new_version = f"{maj}.{minor}.{patch + 1}"; old_version = f"{maj}.{minor}.{patch}"; updated = text.replace(f"version = \"{old_version}\"", f"version = \"{new_version}\"", 1); path.write_text(updated); print(f"Bumped PATCH: {old_version} -> {new_version}")'
 	@$(MAKE) sync-vscode-version
 
-build:
+prepare-gem-cache:
+	$(PYTHON) scripts/prepare-gem-cache.py
+
+check-gem-cache:
+	$(PYTHON) scripts/prepare-gem-cache.py --check
+
+build: prepare-gem-cache
 	$(CARGO) build --release
 
 
@@ -62,8 +69,9 @@ vscode-extension:
 	cd vscode-extension && $(NPM) run package
 	@echo "VSIX package created in vscode-extension/"
 	@ls -lh vscode-extension/*.vsix
-install:
-	$(CARGO) install --path . --locked
+install: prepare-gem-cache
+	$(CARGO) install --path . --locked --root "$(INSTALL_ROOT)"
+	$(PYTHON) scripts/prepare-gem-cache.py --stage "$(INSTALL_ROOT)/bin/bundled_gems"
 
 clean:
 	$(CARGO) clean

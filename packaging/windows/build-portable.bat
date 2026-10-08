@@ -2,16 +2,21 @@
 REM Create portable ZIP distribution for Regent
 
 setlocal
+cd /d "%~dp0\..\.." || exit /b 1
 
-set VERSION=0.1.1
+set "VERSION=%~1"
+if "%VERSION%"=="" set "VERSION=0.1.1"
 
 echo Creating portable ZIP for Regent v%VERSION%...
 
 REM Build the release binary
 echo Building release binary...
+python scripts\prepare-gem-cache.py
+if errorlevel 1 exit /b 1
 cargo build --release --target x86_64-pc-windows-msvc
+if errorlevel 1 exit /b 1
 
-if not exist target\release\regent.exe (
+if not exist target\x86_64-pc-windows-msvc\release\regent.exe (
     echo ERROR: regent.exe not found
     exit /b 1
 )
@@ -23,9 +28,14 @@ mkdir %DIST_DIR%
 
 REM Copy files
 echo Copying files...
-copy target\release\regent.exe %DIST_DIR%\
+copy target\x86_64-pc-windows-msvc\release\regent.exe %DIST_DIR%\
+if errorlevel 1 exit /b 1
+python scripts\prepare-gem-cache.py --stage "%DIST_DIR%\bundled_gems"
+if errorlevel 1 exit /b 1
 copy LICENSE %DIST_DIR%\LICENSE.txt
+if errorlevel 1 exit /b 1
 copy README.md %DIST_DIR%\README.txt
+if errorlevel 1 exit /b 1
 
 REM Create README for portable version
 echo Creating portable README...
@@ -54,7 +64,8 @@ echo For more information, visit: https://github.com/seu-usuario/regent
 
 REM Create ZIP
 echo Creating ZIP archive...
-powershell Compress-Archive -Path %DIST_DIR%\* -DestinationPath regent-%VERSION%-windows-x64-portable.zip -Force
+powershell -NoProfile -Command "Compress-Archive -Path '%DIST_DIR%\*' -DestinationPath 'regent-%VERSION%-windows-x64-portable.zip' -Force -ErrorAction Stop"
+if errorlevel 1 exit /b 1
 
 if exist regent-%VERSION%-windows-x64-portable.zip (
     echo.

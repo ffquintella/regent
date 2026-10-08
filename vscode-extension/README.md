@@ -87,12 +87,26 @@ Pre-configured tasks available via `Tasks: Run Task`:
 
 ## Development
 
+Use Node.js 22.13 or newer (or Node.js 24) for the development tools.
+The extension continues to support VS Code 1.85; its API types are pinned to
+that version so compilation checks the minimum supported API.
+TypeScript stays on the latest 6.0 patch because typescript-eslint currently
+supports TypeScript below 6.1; TypeScript 7 is not yet compatible.
+Integration tests run the same five shared checks on the current stable VS Code
+release (`npm test`) and VS Code 1.85.2 (`npm run test:minimum`). The minimum-host
+runner uses Node.js assertions without loading Mocha 12, which requires a newer
+Node.js runtime than VS Code 1.85 provides. Both hosts are validated.
+Set `VSCODE_TEST_VERSION` to select a different release for either runner.
+
 ### Building the Extension
 
 ```bash
 cd vscode-extension
-npm install
+npm ci
 npm run compile
+npm run lint
+npm test
+npm run test:minimum
 ```
 
 ### Running in Development

@@ -61,6 +61,15 @@ Gemfile.lock
 # Rust build outputs
 target/
 
+# Generated extraction of the committed, checksum-pinned gem cache
+/assets/bundled_gems/ruby/
+/assets/bundled_gems/manifest.json
+/scripts/__pycache__/
+/regent_*.deb
+/regent-*.rpm
+/regent-*.msi
+/regent-*-portable.zip
+
 # VS Code extension build artifacts
 *.vsix
 vscode-extension/node_modules/

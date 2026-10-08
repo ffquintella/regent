@@ -3,7 +3,7 @@
   <Product Id="*" 
            Name="Regent" 
            Language="1033" 
-           Version="0.1.1" 
+           Version="$(var.RegentVersion)"
            Manufacturer="Felipe Quintella" 
            UpgradeCode="12345678-1234-1234-1234-123456789012">
     
@@ -11,7 +11,7 @@
              Compressed="yes" 
              InstallScope="perMachine" 
              Description="Regent - High-performance Puppet Development Kit"
-             Comments="Regent PDK v0.1.1" />
+             Comments="Regent PDK v$(var.RegentVersion)" />
     
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     
@@ -22,16 +22,13 @@
              Level="1"
              Description="Regent PDK executable and documentation">
       <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="BundledGemComponents" />
       <ComponentRef Id="PathEnvironmentVariable" />
     </Feature>
     
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <UIRef Id="WixUI_InstallDir" />
-    <WixVariable Id="WixUILicenseRtf" Value="packaging\windows\License.rtf" />
-    
-    <!-- Custom icons -->
-    <Icon Id="regent.ico" SourceFile="packaging\windows\regent.ico" />
-    <Property Id="ARPPRODUCTICON" Value="regent.ico" />
+    <WixVariable Id="WixUILicenseRtf" Value="target\License.rtf" />
     
     <!-- Add to system PATH -->
     <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
@@ -41,7 +38,9 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Regent">
-          <Directory Id="BinFolder" Name="bin" />
+          <Directory Id="BinFolder" Name="bin">
+            <Directory Id="BundledGemsFolder" Name="bundled_gems" />
+          </Directory>
         </Directory>
       </Directory>
       
@@ -56,14 +55,13 @@
       <Component Id="RegentExecutable" Guid="23456789-2345-2345-2345-234567890123">
         <File Id="regent.exe" 
               Name="regent.exe" 
-              Source="target\release\regent.exe" 
+              Source="$(var.RegentBinary)"
               KeyPath="yes">
           <Shortcut Id="StartMenuShortcut"
                     Directory="ApplicationProgramsFolder"
                     Name="Regent"
                     Description="Regent Puppet Development Kit"
                     WorkingDirectory="INSTALLFOLDER"
-                    Icon="regent.ico"
                     Advertise="yes" />
         </File>
       </Component>

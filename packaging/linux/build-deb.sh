@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+python3 scripts/prepare-gem-cache.py
+
 VERSION="${1:-0.1.1}"
 ARCH="${2:-amd64}"  # amd64 or arm64
 BUILD_DIR="target/debian-$ARCH"
@@ -41,7 +45,8 @@ fi
 
 # Copy binary
 cp "target/$RUST_TARGET/release/regent" "$BUILD_DIR/usr/bin/"
-strip "$BUILD_DIR/usr/bin/regent"
+
+python3 scripts/prepare-gem-cache.py --stage "$BUILD_DIR/usr/share/regent/bundled_gems"
 
 # Create control file
 cat > "$BUILD_DIR/DEBIAN/control" <<EOF
