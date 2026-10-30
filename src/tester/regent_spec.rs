@@ -40,6 +40,10 @@ pub struct RegentTest {
     pub node: Option<String>,
     pub facts: Option<HashMap<String, JsonValue>>,
     pub params: Option<HashMap<String, JsonValue>>,
+    /// rspec-puppet `let(:pre_condition)`: Puppet code compiled before the
+    /// subject. It may be a string or an array of strings.
+    #[serde(default)]
+    pub pre_condition: Option<JsonValue>,
     pub expectations: Vec<Expectation>,
 }
 
@@ -141,6 +145,20 @@ pub struct Relationship {
 /// A `Type[title]` reference, normalized for catalog lookups (type lowercased
 /// with `__` → `::`, surrounding quotes/whitespace stripped from the title).
 type ResourceRef = (String, String);
+
+fn pre_condition_source(value: Option<&JsonValue>) -> Option<String> {
+    match value? {
+        JsonValue::String(source) => Some(source.clone()),
+        JsonValue::Array(parts) => Some(
+            parts
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
+    }
+}
 
 /// The catalog's relationship edges, derived from the four relationship
 /// metaparameters. Puppet treats them as two ordering pairs plus refresh:
@@ -552,15 +570,27 @@ impl RegentSpecRunner {
     ) -> Result<(PuppetCatalog, EvaluationTrace)> {
         let subject = test.subject.trim();
         let title = test.title.as_deref();
+        let pre_condition = pre_condition_source(test.pre_condition.as_ref());
         if title.is_some() || self.evaluator.is_define(subject) {
             let title = title.unwrap_or(subject);
             self.evaluator
-                .evaluate_define_traced(subject, title, facts, params)
+                .evaluate_define_traced_with_precondition(
+                    subject,
+                    title,
+                    facts,
+                    params,
+                    pre_condition.as_deref(),
+                )
                 .with_context(|| format!("define {subject}"))
         } else if self.evaluator.is_class(subject) {
             // The class exists: surface its real compile error verbatim rather
             // than wrapping it in a misleading "not found" context.
-            self.evaluator.evaluate_class_traced(subject, facts, params)
+            self.evaluator.evaluate_class_traced_with_precondition(
+                subject,
+                facts,
+                params,
+                pre_condition.as_deref(),
+            )
         } else {
             let known = self.evaluator.class_names();
             let detail = if known.is_empty() {
@@ -952,6 +982,7 @@ mod coverage_tests {
                 node: None,
                 facts: None,
                 params: None,
+                pre_condition: None,
                 expectations: vec![Expectation::Compile {
                     negate: false,
                     check_all_deps: false,
@@ -987,6 +1018,7 @@ mod coverage_tests {
                 node: None,
                 facts: None,
                 params: None,
+                pre_condition: None,
                 expectations: vec![Expectation::RaiseError { message, negate }],
             }],
             load_errors: Vec::new(),
@@ -1044,6 +1076,7 @@ mod coverage_tests {
                 node: None,
                 facts: None,
                 params: None,
+                pre_condition: None,
                 expectations: vec![Expectation::Contain {
                     resource_type: "file".to_string(),
                     title: "/etc/vault.container".to_string(),
@@ -1201,6 +1234,7 @@ mod coverage_tests {
                 node: Some("web01.example.com".to_string()),
                 facts: None,
                 params: None,
+                pre_condition: None,
                 expectations: vec![Expectation::Contain {
                     resource_type: "notify".to_string(),
                     title: "server-web01.example.com-web01-example.com".to_string(),

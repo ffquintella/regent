@@ -189,7 +189,9 @@ impl PuppetEvaluator {
     }
 
     pub fn is_class(&self, name: &str) -> bool {
-        self.module.classes.contains_key(name)
+        self.module
+            .classes
+            .contains_key(normalize_absolute_name(name))
     }
 
     /// Whether `type_name` (a `types/` alias such as `Ssh::Yes_no` or a built-in
@@ -226,7 +228,7 @@ impl PuppetEvaluator {
     pub fn class_origin_file(&self, name: &str) -> Option<&Path> {
         self.module
             .classes
-            .get(name)
+            .get(normalize_absolute_name(name))
             .and_then(|def| def.origin_file.as_deref())
     }
 
@@ -264,8 +266,22 @@ impl PuppetEvaluator {
         facts: &PuppetValue,
         params: &PuppetValue,
     ) -> Result<(PuppetCatalog, EvaluationTrace)> {
+        self.evaluate_class_traced_with_precondition(name, facts, params, None)
+    }
+
+    pub fn evaluate_class_traced_with_precondition(
+        &self,
+        name: &str,
+        facts: &PuppetValue,
+        params: &PuppetValue,
+        pre_condition: Option<&str>,
+    ) -> Result<(PuppetCatalog, EvaluationTrace)> {
+        let name = normalize_absolute_name(name);
         let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
         ctx.subject_class = Some(name.to_string());
+        if let Some(source) = pre_condition {
+            ctx.evaluate_precondition(source)?;
+        }
         ctx.evaluate_class(name)?;
         let catalog = std::mem::take(&mut ctx.catalog);
         Ok((catalog, ctx.into_trace()))
@@ -278,14 +294,28 @@ impl PuppetEvaluator {
         facts: &PuppetValue,
         params: &PuppetValue,
     ) -> Result<(PuppetCatalog, EvaluationTrace)> {
+        self.evaluate_define_traced_with_precondition(name, title, facts, params, None)
+    }
+
+    pub fn evaluate_define_traced_with_precondition(
+        &self,
+        name: &str,
+        title: &str,
+        facts: &PuppetValue,
+        params: &PuppetValue,
+        pre_condition: Option<&str>,
+    ) -> Result<(PuppetCatalog, EvaluationTrace)> {
         let mut ctx = EvalContext::new(facts.clone(), params.clone(), &self.module);
+        if let Some(source) = pre_condition {
+            ctx.evaluate_precondition(source)?;
+        }
         ctx.evaluate_define(name, title)?;
         let catalog = std::mem::take(&mut ctx.catalog);
         Ok((catalog, ctx.into_trace()))
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct PuppetModule {
     classes: HashMap<String, ClassDef>,
     defines: HashMap<String, DefineDef>,
@@ -323,18 +353,36 @@ impl Hiera {
     fn load(module_path: &Path) -> Hiera {
         let mut paths = Vec::new();
         let mut datadir = "data".to_string();
-        if let Ok(content) = std::fs::read_to_string(module_path.join("hiera.yaml")) {
+        let config_path = [
+            module_path.join("hiera.yaml"),
+            module_path.join("spec/fixtures/hiera.yaml"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file());
+        if let Some(config_path) = config_path {
+            let content = std::fs::read_to_string(config_path).unwrap_or_default();
             if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
                 if let Some(d) = yaml
                     .get("defaults")
                     .and_then(|d| d.get("datadir"))
                     .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        yaml.get(":yaml")
+                            .and_then(|v| v.get(":datadir"))
+                            .and_then(|v| v.as_str())
+                    })
                 {
                     datadir = d.to_string();
                 }
-                if let Some(h) = yaml.get("hierarchy").and_then(|v| v.as_sequence()) {
+                if let Some(h) = yaml
+                    .get("hierarchy")
+                    .or_else(|| yaml.get(":hierarchy"))
+                    .and_then(|v| v.as_sequence())
+                {
                     for entry in h {
-                        if let Some(ps) = entry.get("paths").and_then(|v| v.as_sequence()) {
+                        if let Some(path) = entry.as_str() {
+                            paths.push(path.to_string());
+                        } else if let Some(ps) = entry.get("paths").and_then(|v| v.as_sequence()) {
                             for p in ps {
                                 if let Some(s) = p.as_str() {
                                     paths.push(s.to_string());
@@ -349,7 +397,12 @@ impl Hiera {
         }
 
         let mut data = HashMap::new();
-        let datadir_path = module_path.join(&datadir);
+        let configured_datadir = PathBuf::from(datadir.trim_start_matches("./"));
+        let datadir_path = if configured_datadir.is_absolute() {
+            configured_datadir
+        } else {
+            module_path.join(configured_datadir)
+        };
         let mut stack = vec![datadir_path.clone()];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -395,8 +448,10 @@ impl Hiera {
             let Some(rel) = hiera_interpolate(template, facts) else {
                 continue;
             };
-            if let Some(value) = self.data.get(&rel).and_then(|m| m.get(key)) {
-                return Some(value.clone());
+            for candidate in [rel.clone(), format!("{rel}.yaml")] {
+                if let Some(value) = self.data.get(&candidate).and_then(|m| m.get(key)) {
+                    return Some(value.clone());
+                }
             }
         }
         None
@@ -826,7 +881,7 @@ enum Cond {
     Or(Box<Cond>, Box<Cond>),
     Defined {
         rtype: String,
-        title: String,
+        title: Expr,
     },
     Compare {
         left: Expr,
@@ -1014,6 +1069,10 @@ struct EvalContext<'a> {
     class_stack: Vec<String>,
     evaluated_classes: HashSet<String>,
     evaluated_defines: HashSet<String>,
+    /// Explicit resource declarations seen during this compilation. The
+    /// catalog is a lookup map and therefore overwrites equal keys, so duplicate
+    /// detection must happen before insertion to preserve Puppet's error.
+    declared_resources: HashSet<(String, String)>,
     /// Resource defaults (`File { owner => 'root' }`), keyed by normalized
     /// type. Merged into each subsequently-declared resource of that type for
     /// any attribute the declaration does not set itself.
@@ -1036,6 +1095,7 @@ impl<'a> EvalContext<'a> {
             class_stack: Vec::new(),
             evaluated_classes: HashSet::new(),
             evaluated_defines: HashSet::new(),
+            declared_resources: HashSet::new(),
             resource_defaults: HashMap::new(),
             subject_class: None,
         }
@@ -1046,6 +1106,49 @@ impl<'a> EvalContext<'a> {
             classes: self.evaluated_classes,
             defines: self.evaluated_defines,
         }
+    }
+
+    fn record_resource_declaration(&mut self, resource_type: &str, title: &str) -> Result<()> {
+        let key = (resource_type.to_string(), title.to_string());
+        if !self.declared_resources.insert(key) {
+            return Err(anyhow::anyhow!(
+                "Duplicate declaration: {}[{}] is already declared",
+                puppet_type_display(resource_type),
+                title
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fixture modules can intentionally expose only the resources needed by
+    /// specs (for example an empty `stdlib` fixture). Keep unknown dependency
+    /// classes lenient, while propagating evaluation errors from classes that
+    /// were loaded so catalog failures such as duplicate resources are visible.
+    fn evaluate_class_reference(&mut self, name: &str) -> Result<()> {
+        let name = normalize_absolute_name(name);
+        if self.module.classes.contains_key(name) {
+            self.evaluate_class(name)?;
+        }
+        Ok(())
+    }
+
+    fn evaluate_precondition(&mut self, source: &str) -> Result<()> {
+        let wrapped = format!("class __regent_precondition {{\n{source}\n}}");
+        let mut parser = PuppetParser::new(&wrapped);
+        let definitions = parser
+            .parse_definitions()
+            .context("parse rspec-puppet pre_condition")?;
+        let body = definitions
+            .into_iter()
+            .find_map(|definition| match definition {
+                PuppetDef::Class(class) if class.name == "__regent_precondition" => {
+                    Some(class.body)
+                }
+                _ => None,
+            })
+            .context("pre_condition did not produce Puppet statements")?;
+        self.evaluate_statements(&body)
+            .context("evaluate rspec-puppet pre_condition")
     }
 
     /// Validate the parameters of the class/define under test against their
@@ -1095,6 +1198,7 @@ impl<'a> EvalContext<'a> {
         name: &str,
         declaration_params: Option<&IndexMap<String, PuppetValue>>,
     ) -> Result<()> {
+        let name = normalize_absolute_name(name);
         if self.evaluated_classes.contains(name) {
             return Ok(());
         }
@@ -1385,13 +1489,17 @@ impl<'a> EvalContext<'a> {
                     for title in title_values {
                         let resource_type = normalize_rtype(rtype);
                         if resource_type == "class" {
+                            let title = normalize_absolute_name(&title).to_string();
+                            self.record_resource_declaration(&resource_type, &title)?;
                             // Expand the class body first — `evaluate_class` adds
                             // a bare (attribute-less) class resource — then add
                             // the declaration's resolved attributes so it wins
                             // the catalog slot. Otherwise the parameters passed
                             // at `class { 'x': p => v }` are lost and matchers
                             // can't introspect them.
-                            let _ = self.evaluate_class_with_params(&title, Some(&attributes));
+                            if self.module.classes.contains_key(title.as_str()) {
+                                self.evaluate_class_with_params(&title, Some(&attributes))?;
+                            }
                             self.catalog.add(PuppetResource {
                                 resource_type,
                                 title: title.clone(),
@@ -1399,19 +1507,20 @@ impl<'a> EvalContext<'a> {
                             });
                             continue;
                         }
+                        self.record_resource_declaration(&resource_type, &title)?;
                         self.catalog.add(PuppetResource {
                             resource_type: resource_type.clone(),
                             title: title.clone(),
                             attributes: attributes.clone(),
                         });
                         if self.module.defines.contains_key(&resource_type) {
-                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
+                            self.instantiate_define(&resource_type, &title, &attributes)?;
                         }
                     }
                 }
                 Stmt::Include(names) => {
                     for name in names {
-                        let _ = self.evaluate_class(name);
+                        self.evaluate_class_reference(name)?;
                     }
                 }
                 Stmt::If {
@@ -1519,15 +1628,16 @@ impl<'a> EvalContext<'a> {
                                 attributes.insert(key, value);
                             }
                         }
+                        self.record_resource_declaration(&resource_type, &title)?;
                         self.catalog.add(PuppetResource {
                             resource_type: resource_type.clone(),
                             title: title.clone(),
                             attributes: attributes.clone(),
                         });
                         if resource_type == "class" {
-                            let _ = self.evaluate_class(&title);
+                            self.evaluate_class_reference(&title)?;
                         } else if self.module.defines.contains_key(&resource_type) {
-                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
+                            self.instantiate_define(&resource_type, &title, &attributes)?;
                         }
                     }
                 }
@@ -1551,13 +1661,28 @@ impl<'a> EvalContext<'a> {
                         None => IndexMap::new(),
                     };
                     for title in titles {
+                        if let Some(existing) = self.catalog.find(&resource_type, &title) {
+                            let requested_attributes_match = attributes
+                                .iter()
+                                .all(|(key, value)| existing.attributes.get(key) == Some(value));
+                            if requested_attributes_match {
+                                continue;
+                            }
+                            return Err(anyhow::anyhow!(
+                                "Duplicate declaration: {}[{}] is already declared",
+                                puppet_type_display(&resource_type),
+                                title
+                            ));
+                        }
+
+                        self.record_resource_declaration(&resource_type, &title)?;
                         self.catalog.add(PuppetResource {
                             resource_type: resource_type.clone(),
                             title: title.clone(),
                             attributes: attributes.clone(),
                         });
                         if self.module.defines.contains_key(&resource_type) {
-                            let _ = self.instantiate_define(&resource_type, &title, &attributes);
+                            self.instantiate_define(&resource_type, &title, &attributes)?;
                         }
                     }
                 }
@@ -1671,7 +1796,8 @@ impl<'a> EvalContext<'a> {
             Cond::Or(left, right) => self.eval_cond(left)? || self.eval_cond(right)?,
             Cond::Defined { rtype, title } => {
                 let rtype = normalize_rtype(rtype);
-                self.catalog.contains(&rtype, title)
+                let title = self.eval_expr(title)?.as_string();
+                self.catalog.contains(&rtype, &title)
             }
             Cond::Compare { left, op, right } => match op {
                 CompareOp::Eq => self.eval_expr(left)? == self.eval_expr(right)?,
@@ -1753,11 +1879,6 @@ impl<'a> EvalContext<'a> {
                     .map(|arg| self.eval_expr(arg))
                     .collect::<Result<Vec<_>>>()?;
                 match name.as_str() {
-                    "lookup" => arg_values
-                        .first()
-                        .and_then(|key| self.module.hiera.lookup(&key.as_string(), &self.facts))
-                        .or_else(|| arg_values.get(3).cloned())
-                        .unwrap_or(PuppetValue::Undef),
                     "epp" => {
                         let template_ref = arg_values
                             .first()
@@ -1917,6 +2038,41 @@ impl<'a> EvalContext<'a> {
                         .or_else(|| arg_values.last())
                         .cloned()
                         .unwrap_or(PuppetValue::Undef),
+                    // Legacy `hiera(key[, default])` remains common in Puppet 4
+                    // modules and their rspec fixtures. Resolve it through the
+                    // same loaded hierarchy used for automatic class params.
+                    "hiera" => arg_values
+                        .first()
+                        .and_then(|key| self.module.hiera.lookup(&key.as_string(), &self.facts))
+                        .or_else(|| arg_values.get(1).cloned())
+                        .unwrap_or(PuppetValue::Undef),
+                    // Puppet's typed four-argument lookup:
+                    // `lookup(name, Type, merge, default)`. Hiera always wins;
+                    // the fourth argument is evaluated only as the fallback.
+                    // Validate the selected value against the original type AST
+                    // rather than its rendered value from `arg_values`.
+                    "lookup" => {
+                        let key = arg_values
+                            .first()
+                            .map(PuppetValue::as_string)
+                            .unwrap_or_default();
+                        let value = self
+                            .module
+                            .hiera
+                            .lookup(&key, &self.facts)
+                            .or_else(|| arg_values.get(3).cloned())
+                            .unwrap_or(PuppetValue::Undef);
+
+                        if let Some(Expr::Type(spec)) = args.get(1) {
+                            if !eval_type_match(&value, spec, &self.module.type_aliases) {
+                                anyhow::bail!(
+                                    "lookup value for '{key}' does not match {}",
+                                    spec.render()
+                                );
+                            }
+                        }
+                        value
+                    }
                     // stdlib `shell_escape(string)` (`shellescape`) — escape a
                     // value so it's safe to splice into a shell command, mirroring
                     // Ruby's `Shellwords.escape`. Returning the escaped string
@@ -2159,6 +2315,26 @@ impl<'a> EvalContext<'a> {
 
 pub(crate) fn normalize_rtype(rtype: &str) -> String {
     rtype.to_lowercase().replace("__", "::")
+}
+
+/// Puppet's legacy leading `::` marks an absolute, top-scope name. It does
+/// not form part of the class name used for autoloading or catalog identity.
+fn normalize_absolute_name(name: &str) -> &str {
+    name.trim_start_matches("::")
+}
+
+fn puppet_type_display(resource_type: &str) -> String {
+    resource_type
+        .split("::")
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 /// Whether a bareword is a Puppet *type reference* (e.g. `File`,
@@ -2974,7 +3150,14 @@ impl<'a> PuppetParser<'a> {
                 default,
             }));
         }
-        if self.consume_keyword("fail") && self.consume(TokenKind::LParen) {
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.peek_token().is_some_and(|token| token.text == "fail")
+            && self
+                .tokens
+                .get(self.index + 1)
+                .is_some_and(|token| token.kind == TokenKind::LParen)
+        {
+            self.index += 2; // consume `fail` and `(`
             let message = if let Expr::String(msg) = self.parse_expr()? {
                 msg
             } else {
@@ -3239,10 +3422,7 @@ impl<'a> PuppetParser<'a> {
             }
             let rtype = self.expect_ident()?;
             self.consume(TokenKind::LBracket);
-            let title = match self.parse_expr()? {
-                Expr::String(value) => value,
-                expr => expr.as_string(),
-            };
+            let title = self.parse_expr()?;
             self.consume(TokenKind::RBracket);
             self.consume(TokenKind::RParen);
             return Ok(Cond::Defined { rtype, title });
@@ -3357,6 +3537,28 @@ impl<'a> PuppetParser<'a> {
                     };
                     continue;
                 }
+                // `.name(args)` is Puppet's chained call form: the receiver is
+                // the function's first argument (`$xs.join(',')` ==
+                // `join($xs, ',')`). A bare `.name()` stays a method call.
+                if self.peek_kind() == Some(TokenKind::LParen) {
+                    self.index += 1;
+                    let mut args = vec![expr];
+                    while !self.consume(TokenKind::RParen) && !self.is_eof() {
+                        if self.consume(TokenKind::Comma) {
+                            continue;
+                        }
+                        args.push(self.parse_value_expr()?);
+                    }
+                    expr = if args.len() == 1 {
+                        Expr::MethodCall {
+                            target: Box::new(args.remove(0)),
+                            name,
+                        }
+                    } else {
+                        Expr::FunctionCall { name, args }
+                    };
+                    continue;
+                }
                 expr = Expr::MethodCall {
                     target: Box::new(expr),
                     name,
@@ -3390,7 +3592,7 @@ impl<'a> PuppetParser<'a> {
                     }
                     let key = self.parse_expr()?;
                     self.consume(TokenKind::FatArrow);
-                    let value = self.parse_expr()?;
+                    let value = self.parse_value_expr()?;
                     cases.push((key, value));
                 }
                 expr = Expr::Selector {
@@ -3479,7 +3681,7 @@ impl<'a> PuppetParser<'a> {
                     self.index += 1;
                     continue;
                 }
-                values.push(self.parse_expr()?);
+                values.push(self.parse_value_expr()?);
             }
             return Ok(Expr::Array(values));
         }
@@ -3492,7 +3694,7 @@ impl<'a> PuppetParser<'a> {
                 }
                 let key = self.parse_expr()?;
                 self.consume(TokenKind::FatArrow);
-                let value = self.parse_expr()?;
+                let value = self.parse_value_expr()?;
                 entries.push((key, value));
             }
             return Ok(Expr::Hash(entries));
@@ -3638,6 +3840,7 @@ impl<'a> PuppetParser<'a> {
     fn parse_inline_expr(source: &str) -> Result<Expr> {
         let mut parser = PuppetParser::new(source);
         parser.allow_bare_vars = true;
+        parser.consume_leading_namespace_prefix();
         parser.parse_expr()
     }
 
@@ -5147,6 +5350,14 @@ fn tokenize_epp(template: &str) -> Vec<EppToken> {
 /// always evaluated falsy, silently dropping the whole branch.
 fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue {
     let s = source.trim();
+    // Lambdas (`$xs.map |$x| { ... }`) are beyond the string-level mini
+    // evaluator below — hand them to the real Puppet parser/evaluator, with the
+    // template scope as variables.
+    if epp_has_lambda(s) {
+        if let Some(value) = epp_eval_full(s, params) {
+            return value;
+        }
+    }
     // Lowest precedence first: `or`, then `and`.
     if let Some((l, _, r)) = epp_split_binary(s, &["or"], true) {
         return PuppetValue::Bool(
@@ -5178,6 +5389,47 @@ fn epp_eval(source: &str, params: &HashMap<String, PuppetValue>) -> PuppetValue 
         return epp_eval(&s[1..s.len() - 1], params);
     }
     epp_eval_primary(s, params)
+}
+
+/// True when `s` has a lambda pipe (`|`) outside string literals.
+fn epp_has_lambda(s: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut prev = '\0';
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                if c == q && prev != '\\' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '|' => return true,
+                _ => {}
+            },
+        }
+        prev = c;
+    }
+    false
+}
+
+/// Evaluate `source` with the full Puppet expression parser/evaluator, binding
+/// the template scope as variables. Returns `None` when it doesn't parse
+/// cleanly or evaluation fails, so callers can fall back.
+fn epp_eval_full(source: &str, params: &HashMap<String, PuppetValue>) -> Option<PuppetValue> {
+    let mut parser = PuppetParser::new(source);
+    let expr = parser.parse_value_expr().ok()?;
+    if !parser.is_eof() {
+        return None;
+    }
+    let module = PuppetModule::default();
+    let mut ctx = EvalContext::new(
+        PuppetValue::Hash(IndexMap::new()),
+        PuppetValue::Hash(IndexMap::new()),
+        &module,
+    );
+    ctx.vars = params.clone();
+    ctx.eval_expr(&expr).ok()
 }
 
 /// Evaluate a primitive EPP expression: a `$var` reference, string/integer
@@ -6474,6 +6726,55 @@ class foo {
         );
     }
 
+    fn eval_value_source(source: &str, vars: &[(&str, PuppetValue)]) -> PuppetValue {
+        let mut parser = PuppetParser::new(source);
+        let expr = parser.parse_value_expr().expect("parse");
+        let module = PuppetModule::default();
+        let mut ctx = EvalContext::new(
+            PuppetValue::Hash(IndexMap::new()),
+            PuppetValue::Hash(IndexMap::new()),
+            &module,
+        );
+        for (name, value) in vars {
+            ctx.vars.insert((*name).to_string(), value.clone());
+        }
+        ctx.eval_expr(&expr).expect("eval")
+    }
+
+    #[test]
+    fn comparison_parses_inside_hash_and_array_values() {
+        // `!=` (and friends) used to be accepted only in conditions, so a hash
+        // value or array element like `$x != ''` failed to parse.
+        let x = ("x", PuppetValue::String("a".to_string()));
+        let hash = eval_value_source("{ 'on' => $x != '', 'off' => $x == '' }", &[x.clone()]);
+        assert_eq!(
+            hash,
+            PuppetValue::Hash(IndexMap::from([
+                ("on".to_string(), PuppetValue::Bool(true)),
+                ("off".to_string(), PuppetValue::Bool(false)),
+            ]))
+        );
+        let arr = eval_value_source("[$x != 'a', $x == 'a']", &[x]);
+        assert_eq!(
+            arr,
+            PuppetValue::Array(vec![PuppetValue::Bool(false), PuppetValue::Bool(true)])
+        );
+    }
+
+    #[test]
+    fn epp_map_lambda_renders_mapped_values() {
+        // `map` lambdas in `<%= %>` used to render as undef (empty).
+        let template = "[<%= $items.map |$i| { \"\\\"${i}\\\"\" }.join(', ') %>]\n";
+        let params = PuppetValue::Hash(IndexMap::from([(
+            "items".to_string(),
+            PuppetValue::Array(vec![
+                PuppetValue::String("a".to_string()),
+                PuppetValue::String("b".to_string()),
+            ]),
+        )]));
+        assert_eq!(render_epp(template, &params), "[\"a\", \"b\"]\n");
+    }
+
     #[test]
     fn epp_unwrap_renders_underlying_value() {
         // `Sensitive(...).unwrap` and a bare `$x.unwrap` both reveal the value
@@ -6746,6 +7047,311 @@ class foo {
             catalog.contains("file", "/home/svc"),
             "cross-class class parameter must resolve"
         );
+    }
+
+    #[test]
+    fn absolute_class_resource_title_loads_class_and_scoped_variables() {
+        let manifest = r#"
+            class entrypoint {
+              class { '::fgv_apps': }
+              file { $::fgv_apps::config_dir: ensure => directory }
+            }
+            class fgv_apps {
+              $config_dir = '/srv/application-config'
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("absolute class resource title must evaluate");
+
+        assert!(catalog.contains("class", "fgv_apps"));
+        assert!(!catalog.contains("class", "::fgv_apps"));
+        assert!(catalog.contains("file", "/srv/application-config"));
+    }
+
+    #[test]
+    fn interpolation_resolves_absolute_scoped_variable() {
+        let manifest = r#"
+            class fgv_apps::rundeck {
+              $conf_configdir = '/srv/rundeck/config'
+              file { "${::fgv_apps::rundeck::conf_configdir}/realm.properties":
+                ensure => file,
+              }
+            }
+        "#;
+        let dir = write_module("fgv_apps", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "fgv_apps::rundeck",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("absolute scoped interpolation must evaluate");
+
+        assert!(catalog.contains("file", "/srv/rundeck/config/realm.properties"));
+    }
+
+    #[test]
+    fn duplicate_native_resource_declarations_fail_compilation() {
+        let manifest = r#"
+            class entrypoint {
+              include fgv_apps::one
+              include fgv_apps::two
+            }
+            class fgv_apps::one {
+              file { '/srv/application-config': ensure => directory }
+            }
+            class fgv_apps::two {
+              file { '/srv/application-config': ensure => directory }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let error = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect_err("duplicate resources must fail catalog compilation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate declaration: File[/srv/application-config]"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn fail_resource_syntax_does_not_truncate_enclosing_body() {
+        let manifest = r#"
+            class entrypoint {
+              if false {
+                fail { 'invalid Puppet resource type': }
+              }
+              notify { 'after invalid fail resource': }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("unselected branch must not affect compilation");
+
+        assert!(catalog.contains("notify", "after invalid fail resource"));
+        assert!(!catalog.contains("fail", "invalid Puppet resource type"));
+    }
+
+    #[test]
+    fn absolute_defined_type_declaration_expands_nested_resources() {
+        let manifest = r#"
+            class entrypoint {
+              ::fgv_apps::spiped { 'gcc-spiped-master':
+                image => 'spiped:1.5',
+              }
+            }
+            define fgv_apps::spiped($image) {
+              docker::run { $title:
+                image => $image,
+              }
+            }
+            define docker::run($image) {}
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("absolute defined type must evaluate");
+
+        assert!(catalog.contains("fgv_apps::spiped", "gcc-spiped-master"));
+        let docker = catalog
+            .find("docker::run", "gcc-spiped-master")
+            .expect("defined type body must expand docker::run");
+        assert_eq!(
+            docker.attributes.get("image"),
+            Some(&PuppetValue::String("spiped:1.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn hiera_function_reads_legacy_spec_fixture_config() {
+        let manifest = r#"
+            class entrypoint {
+              $token = hiera('entrypoint::token')
+              notify { $token: }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let fixtures = dir.path().join("spec/fixtures");
+        std::fs::create_dir_all(fixtures.join("hieradata")).unwrap();
+        std::fs::write(
+            fixtures.join("hiera.yaml"),
+            r#"---
+:backends:
+  - yaml
+:yaml:
+  :datadir: './spec/fixtures/hieradata'
+:hierarchy:
+  - '%{::clientcert}'
+  - 'default'
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fixtures.join("hieradata/default.yaml"),
+            "entrypoint::token: from-legacy-hiera\n",
+        )
+        .unwrap();
+
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let facts = PuppetValue::Hash(IndexMap::from([(
+            "clientcert".to_string(),
+            PuppetValue::String("node.example.test".to_string()),
+        )]));
+        let catalog = evaluator
+            .evaluate_class("entrypoint", &facts, &PuppetValue::Hash(IndexMap::new()))
+            .expect("legacy fixture Hiera must evaluate");
+
+        assert!(catalog.contains("notify", "from-legacy-hiera"));
+    }
+
+    #[test]
+    fn lookup_four_args_uses_default_when_hiera_key_is_missing() {
+        let manifest = r#"
+            class entrypoint {
+              $base = lookup(
+                'baseapp::config_dir',
+                Pattern[/\A\/[A-Za-z0-9_\/-]+\z/],
+                'first',
+                '/srv/application-config',
+              )
+              file { "${base}/ram": ensure => directory }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("typed lookup must use its default when Hiera has no value");
+
+        assert!(catalog.contains("file", "/srv/application-config/ram"));
+    }
+
+    #[test]
+    fn lookup_four_args_prefers_hiera_value_over_default() {
+        let manifest = r#"
+            class entrypoint {
+              $base = lookup(
+                'baseapp::config_dir',
+                Pattern[/\A\/[A-Za-z0-9_\/-]+\z/],
+                'first',
+                '/srv/application-config',
+              )
+              file { "${base}/ram": ensure => directory }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(
+            dir.path().join("hiera.yaml"),
+            r#"---
+version: 5
+defaults:
+  datadir: data
+hierarchy:
+  - name: Common
+    path: common.yaml
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("data/common.yaml"),
+            "baseapp::config_dir: /custom/config\n",
+        )
+        .unwrap();
+
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("typed lookup must prefer a Hiera value over its default");
+
+        assert!(catalog.contains("file", "/custom/config/ram"));
+        assert!(!catalog.contains("file", "/srv/application-config/ram"));
+    }
+
+    #[test]
+    fn lookup_four_args_validates_the_selected_value_type() {
+        let manifest = r#"
+            class entrypoint {
+              $base = lookup(
+                'baseapp::config_dir',
+                Pattern[/\A\/[A-Za-z0-9_\/-]+\z/],
+                'first',
+                'relative/path',
+              )
+              notify { $base: }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let error = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect_err("typed lookup must reject a default that does not match its type");
+
+        assert!(error.to_string().contains("baseapp::config_dir"));
+        assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn defined_resource_guard_resolves_variable_title() {
+        let manifest = r#"
+            class entrypoint {
+              $path = '/srv/application-config'
+              file { $path: ensure => directory }
+              if !defined(File[$path]) {
+                file { $path: ensure => directory }
+              }
+            }
+        "#;
+        let dir = write_module("entrypoint", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "entrypoint",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("defined guard must suppress duplicate declaration");
+
+        assert!(catalog.contains("file", "/srv/application-config"));
     }
 
     #[test]
@@ -7238,6 +7844,121 @@ class foo {
             htop.attributes.get("ensure"),
             Some(&PuppetValue::String("installed".to_string())),
             "ensure_resource params apply to the declared resource"
+        );
+    }
+
+    #[test]
+    fn ensure_resource_rejects_mismatched_existing_attributes() {
+        let manifest = r#"
+            class foo {
+              package { 'podman': ensure => 'present' }
+              ensure_resource('Package', 'podman', { 'ensure' => 'installed' })
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let error = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect_err("ensure_resource must reject an existing resource with other attributes");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate declaration: Package[podman] is already declared"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn ensure_resource_matching_subset_is_a_noop_and_preserves_extra_attributes() {
+        let manifest = r#"
+            class foo {
+              package { 'podman':
+                ensure   => 'installed',
+                provider => 'dnf',
+              }
+              ensure_resource('Package', 'podman', { 'ensure' => 'installed' })
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let catalog = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect("matching ensure_resource must leave the existing resource intact");
+        let podman = catalog
+            .find("package", "podman")
+            .expect("package[podman] must remain in the catalog");
+
+        assert_eq!(
+            podman.attributes.get("ensure"),
+            Some(&PuppetValue::String("installed".to_string()))
+        );
+        assert_eq!(
+            podman.attributes.get("provider"),
+            Some(&PuppetValue::String("dnf".to_string()))
+        );
+    }
+
+    #[test]
+    fn ensure_resource_then_explicit_declaration_is_a_duplicate() {
+        let manifest = r#"
+            class foo {
+              ensure_resource('Package', 'podman', { 'ensure' => 'installed' })
+              package { 'podman': ensure => 'present' }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let error = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect_err("an explicit declaration after ensure_resource must be a duplicate");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate declaration: Package[podman] is already declared"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn ensure_resource_propagates_errors_from_an_absent_defined_type() {
+        let manifest = r#"
+            class foo {
+              ensure_resource('demo', 'example', {})
+            }
+            define demo() {
+              file { '/same': ensure => directory }
+              file { '/same': ensure => directory }
+            }
+        "#;
+        let dir = write_module("foo", manifest);
+        let evaluator = PuppetEvaluator::new(dir.path()).unwrap();
+        let error = evaluator
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .expect_err("ensure_resource must propagate errors from a new defined type");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate declaration: File[/same] is already declared"),
+            "unexpected error: {error:#}"
         );
     }
 

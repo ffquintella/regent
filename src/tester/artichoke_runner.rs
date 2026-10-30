@@ -75,6 +75,37 @@ fn allowed_spec_dirs(pattern: &str) -> Option<Vec<String>> {
     )
 }
 
+fn simple_spec_glob_matches(pattern: &str, path: &str) -> Option<bool> {
+    if pattern
+        .chars()
+        .any(|ch| matches!(ch, '[' | ']' | '{' | '}'))
+    {
+        return None;
+    }
+    let mut regex_src = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    regex_src.push_str("(?:.*/)?");
+                } else {
+                    regex_src.push_str(".*");
+                }
+            }
+            '*' => regex_src.push_str("[^/]*"),
+            '?' => regex_src.push_str("[^/]"),
+            other => regex_src.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    regex_src.push('$');
+    regex::Regex::new(&regex_src)
+        .ok()
+        .map(|regex| regex.is_match(path))
+}
+
 /// Decide whether a discovered `*_spec.rb` under `spec_dir` should run in the
 /// embedded unit engine.
 ///
@@ -97,15 +128,27 @@ fn spec_is_runnable(spec_dir: &std::path::Path, path: &std::path::Path, pattern:
         }
     }
 
-    // Honor the pattern's top-level directory whitelist when it has one. A
-    // custom non-brace pattern (e.g. an explicit single file) carries no
-    // whitelist, so we defer to the hard exclusions above.
+    // Honor the pattern's top-level directory whitelist when it has one.
+    // An explicit single-file pattern must select only that file; previously
+    // it fell through and every runnable spec in the module was executed.
     match allowed_spec_dirs(pattern) {
         Some(allowed) => match rel.components().next() {
             Some(first) => allowed.iter().any(|dir| first.as_os_str() == dir.as_str()),
             None => false,
         },
-        None => true,
+        None => pattern.strip_prefix("spec/").map_or(true, |candidate| {
+            let rel = rel.to_string_lossy();
+            if candidate
+                .chars()
+                .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+            {
+                simple_spec_glob_matches(candidate, &rel).unwrap_or(true)
+            } else if candidate.ends_with("_spec.rb") {
+                rel == candidate
+            } else {
+                true
+            }
+        }),
     }
 }
 
@@ -889,12 +932,13 @@ begin
     end
 
     class Example
-      attr_accessor :name, :expectations, :facts, :params, :title, :subject, :node, :value_results
+      attr_accessor :name, :expectations, :facts, :params, :pre_condition, :title, :subject, :node, :value_results
       def initialize(name)
         @name = name
         @expectations = []
         @facts = nil
         @params = nil
+        @pre_condition = nil
         @title = nil
         @subject = nil
         @node = nil
@@ -1010,6 +1054,7 @@ begin
       # way real Puppet does. Do NOT drop these keys — dropping them would let the
       # default render and silently mask a negative test.
       @current_example.params = normalize_value(resolve_let(:params))
+      @current_example.pre_condition = normalize_value(resolve_let(:pre_condition))
       @current_example.title = normalize_value(resolve_let(:title))
       # `let(:node) {{ 'foo.example.com' }}` — the node name from which real
       # Puppet/PDK derives the $fqdn/$hostname/$domain facts. Captured here so
@@ -1088,6 +1133,7 @@ begin
           "node" => example.node,
           "facts" => example.facts,
           "params" => example.params,
+          "pre_condition" => example.pre_condition,
           "expectations" => value_exps + matcher_exps
         }}
       end
@@ -3137,10 +3183,36 @@ mod discovery_tests {
             &spec.join("classes/ssh_spec.rb"),
             pattern
         ));
+        assert!(!spec_is_runnable(
+            spec,
+            &spec.join("classes/other_spec.rb"),
+            pattern
+        ));
         // Hard exclusions still apply even with a custom pattern.
         assert!(!spec_is_runnable(
             spec,
             &spec.join("acceptance/x_spec.rb"),
+            pattern
+        ));
+    }
+
+    #[test]
+    fn custom_glob_pattern_selects_matching_specs_only() {
+        let spec = Path::new("/mod/spec");
+        let pattern = "spec/classes/*_spec.rb";
+        assert!(spec_is_runnable(
+            spec,
+            &spec.join("classes/ssh_spec.rb"),
+            pattern
+        ));
+        assert!(spec_is_runnable(
+            spec,
+            &spec.join("classes/other_spec.rb"),
+            pattern
+        ));
+        assert!(!spec_is_runnable(
+            spec,
+            &spec.join("defines/ssh_spec.rb"),
             pattern
         ));
     }
