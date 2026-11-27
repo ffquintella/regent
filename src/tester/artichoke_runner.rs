@@ -6,6 +6,10 @@ use super::bundled_gems::{discover_bundle_roots, ensure_user_bundle};
 use super::{RegentPlan, RegentSpecRunner, TestCase, TestConfig, TestResults, TestStatus};
 use crate::ruby_interop::RubyEnvironment;
 
+// Artichoke's virtual filesystem roots itself at `c:/` on Windows.
+#[cfg(windows)]
+const VIRTUAL_ROOT: &str = "c:/artichoke/virtual_root/src/lib";
+#[cfg(not(windows))]
 const VIRTUAL_ROOT: &str = "/artichoke/virtual_root/src/lib";
 
 /// Workaround for Artichoke treating a regex `^` as string-start rather than
