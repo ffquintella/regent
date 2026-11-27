@@ -141,7 +141,9 @@ fn spec_is_runnable(spec_dir: &std::path::Path, path: &std::path::Path, pattern:
             None => false,
         },
         None => pattern.strip_prefix("spec/").is_none_or(|candidate| {
-            let rel = rel.to_string_lossy();
+            let rel = rel
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             if candidate
                 .chars()
                 .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
@@ -2055,7 +2057,9 @@ end
                 Ok(relative) => relative,
                 Err(_) => continue,
             };
-            virtual_paths.push(PathBuf::from(VIRTUAL_ROOT).join(relative));
+            let joined = PathBuf::from(VIRTUAL_ROOT).join(relative);
+            // Artichoke's virtual FS uses forward slashes on every platform.
+            virtual_paths.push(PathBuf::from(joined.to_string_lossy().replace('\\', "/")));
         }
         virtual_paths
     }
