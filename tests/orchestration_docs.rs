@@ -37,7 +37,10 @@ const TEMPLATE_DOCS: [&str; 4] = [
 
 fn read(rel: &str) -> String {
     let path: PathBuf = repo_root().join(rel);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    // Windows checkouts may use CRLF; the assertions match on LF.
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 /// Every document that participates in orchestration: the four at the repo root

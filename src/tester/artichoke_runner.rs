@@ -140,7 +140,7 @@ fn spec_is_runnable(spec_dir: &std::path::Path, path: &std::path::Path, pattern:
             Some(first) => allowed.iter().any(|dir| first.as_os_str() == dir.as_str()),
             None => false,
         },
-        None => pattern.strip_prefix("spec/").map_or(true, |candidate| {
+        None => pattern.strip_prefix("spec/").is_none_or(|candidate| {
             let rel = rel.to_string_lossy();
             if candidate
                 .chars()
