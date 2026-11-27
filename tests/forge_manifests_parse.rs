@@ -22,7 +22,11 @@ fn forge_modules_parse_without_errors() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/forge");
     let mut files = Vec::new();
     pp_files(&root, &mut files);
-    assert!(files.len() >= 40, "expected the fixture copies, got {}", files.len());
+    assert!(
+        files.len() >= 40,
+        "expected the fixture copies, got {}",
+        files.len()
+    );
     let failures: Vec<String> = files
         .iter()
         .filter_map(|f| {
@@ -32,7 +36,11 @@ fn forge_modules_parse_without_errors() {
                 .map(|e| format!("{}:{e}", f.display()))
         })
         .collect();
-    assert!(failures.is_empty(), "parse failures:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "parse failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]

@@ -94,7 +94,10 @@ end
     );
     let msg = cases[0].2.clone().unwrap_or_default();
     assert_eq!(cases[0].1, TestStatus::Failed);
-    assert!(msg.contains("unsupported spec construct: 'frobnicate_the_catalog'"), "{msg}");
+    assert!(
+        msg.contains("unsupported spec construct: 'frobnicate_the_catalog'"),
+        "{msg}"
+    );
 
     let undefined = run(
         MANIFEST,
@@ -106,7 +109,10 @@ end
 "#,
     );
     let all = format!("{undefined:?}");
-    assert!(all.contains("shared examples/context 'never declared' is not defined"), "{all}");
+    assert!(
+        all.contains("shared examples/context 'never declared' is not defined"),
+        "{all}"
+    );
 }
 
 #[test]

@@ -664,9 +664,7 @@ impl RegentSpecRunner {
                     let regex = regex_marker(item).and_then(|src| compile_spec_regex(src).ok());
                     let hit = |candidate: &PuppetValue| match &regex {
                         Some(re) => re.is_match(&candidate.as_string()).unwrap_or(false),
-                        None => {
-                            *candidate == wanted || candidate.as_string() == wanted.as_string()
-                        }
+                        None => *candidate == wanted || candidate.as_string() == wanted.as_string(),
                     };
                     match &actual {
                         PuppetValue::Array(elems) => elems.iter().any(hit),

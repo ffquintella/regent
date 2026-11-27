@@ -24,7 +24,10 @@ pub(super) fn versioncmp(a: &str, b: &str) -> i64 {
                 out.push(chars[st..i].iter().collect());
             } else {
                 let st = i;
-                while i < chars.len() && !matches!(chars[i], '-' | '.') && !chars[i].is_ascii_digit() {
+                while i < chars.len()
+                    && !matches!(chars[i], '-' | '.')
+                    && !chars[i].is_ascii_digit()
+                {
                     i += 1;
                 }
                 out.push(chars[st..i].iter().collect());
@@ -61,7 +64,10 @@ pub(super) fn versioncmp(a: &str, b: &str) -> i64 {
             if x.starts_with('0') || y.starts_with('0') {
                 return ord(x.to_uppercase().cmp(&y.to_uppercase()));
             }
-            let (xi, yi) = (x.parse::<u128>().unwrap_or(0), y.parse::<u128>().unwrap_or(0));
+            let (xi, yi) = (
+                x.parse::<u128>().unwrap_or(0),
+                y.parse::<u128>().unwrap_or(0),
+            );
             return ord(xi.cmp(&yi));
         }
         return ord(x.to_uppercase().cmp(&y.to_uppercase()));
@@ -117,7 +123,8 @@ pub(super) fn call(name: &str, args: &[PuppetValue]) -> Option<PuppetValue> {
                         last = m.end();
                     }
                     out.push(V::String(subject[last..].to_string()));
-                    while out.len() > 1 && matches!(out.last(), Some(V::String(s)) if s.is_empty()) {
+                    while out.len() > 1 && matches!(out.last(), Some(V::String(s)) if s.is_empty())
+                    {
                         out.pop();
                     }
                     V::Array(out)
@@ -225,7 +232,9 @@ pub(super) fn call(name: &str, args: &[PuppetValue]) -> Option<PuppetValue> {
             _ => V::Undef,
         },
         "regsubst" if matches!(first, Some(V::Array(_))) => {
-            let Some(V::Array(items)) = first else { unreachable!() };
+            let Some(V::Array(items)) = first else {
+                unreachable!()
+            };
             V::Array(
                 items
                     .iter()

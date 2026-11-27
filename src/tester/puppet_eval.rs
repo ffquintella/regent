@@ -1471,8 +1471,7 @@ impl<'a> EvalContext<'a> {
             .iter()
             .filter(|(k, _)| {
                 k.rsplit_once("::").is_some_and(|(prefix, _)| {
-                    self.evaluated_classes.contains(prefix)
-                        && !classes_before.contains(prefix)
+                    self.evaluated_classes.contains(prefix) && !classes_before.contains(prefix)
                 })
             })
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -1995,9 +1994,7 @@ impl<'a> EvalContext<'a> {
         let pattern = self.eval_expr(right)?;
         // A successful regex match publishes `$0`, `$1`, … (Puppet numeric
         // match variables); a failed match leaves them untouched.
-        if let Some(caps) =
-            builtins::regex_captures(&subject.as_string(), &pattern.as_string())
-        {
+        if let Some(caps) = builtins::regex_captures(&subject.as_string(), &pattern.as_string()) {
             for (i, value) in caps.into_iter().enumerate() {
                 self.vars.insert(i.to_string(), value);
             }
@@ -3493,7 +3490,9 @@ impl<'a> PuppetParser<'a> {
             }));
         }
         if self.peek_kind() == Some(TokenKind::Ident)
-            && self.peek_token().is_some_and(|token| token.text == "assert_type")
+            && self
+                .peek_token()
+                .is_some_and(|token| token.text == "assert_type")
             && self.tokens.get(self.index + 1).map(|t| t.kind) == Some(TokenKind::LParen)
         {
             self.index += 2; // `assert_type` `(`
@@ -3590,14 +3589,13 @@ impl<'a> PuppetParser<'a> {
             let rtype_expr = self.parse_expr()?;
             self.consume(TokenKind::Comma);
             let hash_expr = self.parse_expr()?;
-            let defaults_expr = if self.consume(TokenKind::Comma)
-                && self.peek_kind() != Some(TokenKind::RParen)
-            {
-                // (a trailing comma before `)` is allowed and carries no defaults)
-                Some(self.parse_expr()?)
-            } else {
-                None
-            };
+            let defaults_expr =
+                if self.consume(TokenKind::Comma) && self.peek_kind() != Some(TokenKind::RParen) {
+                    // (a trailing comma before `)` is allowed and carries no defaults)
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
             self.consume(TokenKind::RParen);
             return Ok(Some(Stmt::CreateResources {
                 rtype_expr,
@@ -3996,7 +3994,11 @@ impl<'a> PuppetParser<'a> {
     /// `if`/`unless` keyword is already consumed) used in value position.
     fn parse_if_value(&mut self, negate: bool) -> Result<Expr> {
         let cond = self.parse_cond()?;
-        let cond = if negate { Cond::Not(Box::new(cond)) } else { cond };
+        let cond = if negate {
+            Cond::Not(Box::new(cond))
+        } else {
+            cond
+        };
         let then = self.parse_value_block()?;
         let otherwise = if self.consume_keyword("elsif") {
             self.parse_if_value(false)?
