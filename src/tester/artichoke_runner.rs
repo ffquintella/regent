@@ -871,6 +871,7 @@ end
             .collect::<Vec<String>>()
             .join(", ");
         let supported_os_literal = render_supported_os_ruby(supported_os);
+        let codenames_literal = render_codenames_ruby();
         let facter_sources_literal = format!("{:?}", read_facter_sources(&self.config.module_path));
         format!(
             r##"
@@ -979,9 +980,19 @@ begin
       @shared_examples[name] = block
     end
 
-    def self.include_shared(name)
+    def self.current_group_instance
+      @current_group_instance
+    end
+
+    # Run a `shared_examples` body, passing the `include_examples 'x', arg…`
+    # arguments to its block parameters. An undefined name is a spec error, not a
+    # silent no-op: the examples would otherwise vanish and the spec "pass".
+    def self.include_shared(name, args = [])
       block = @shared_examples[name]
-      instance_eval(&block) if block
+      unless block
+        raise ArgumentError, "unsupported spec construct: shared examples/context '#{{name}}' is not defined (shared_examples must be declared before include_examples/it_behaves_like in the same run)"
+      end
+      block.call(*args)
     end
 
     def self.register_let(name, block)
@@ -1154,6 +1165,8 @@ begin
         value == :undef ? nil : value.to_s
       when Regexp
         {{ "__regex__" => value.source }}
+      when RegentIncludeMatcher
+        {{ "__include__" => value.items.map {{ |item| normalize_value(item) }} }}
       when RegentSensitive
         # Tag Sensitive-wrapped values so the Rust layer can recognize and
         # transparently unwrap them (see PuppetValue::from_json).
@@ -1513,15 +1526,35 @@ begin
   def shared_examples(name, &block)
     RegentSpec.register_shared(name.to_s, block)
   end
-  def include_examples(name)
-    RegentSpec.include_shared(name.to_s)
+  def shared_context(name, &block)
+    RegentSpec.register_shared(name.to_s, block)
+  end
+  def include_examples(name, *args)
+    RegentSpec.include_shared(name.to_s, args)
+  end
+  def include_context(name, *args)
+    RegentSpec.include_shared(name.to_s, args)
+  end
+  # `it_behaves_like` runs the shared examples inside a nested group, so its
+  # `let`s do not leak into the enclosing context.
+  def it_behaves_like(name, *args)
+    RegentSpec.push_context(name.to_s, nil) do
+      RegentSpec.include_shared(name.to_s, args)
+    end
+  end
+  def it_should_behave_like(name, *args)
+    it_behaves_like(name, *args)
   end
   def let(name, &block)
     RegentSpec.register_let(name.to_sym, block)
   end
   def it(description = nil, &block)
     RegentSpec.start_example(description.to_s.empty? ? nil : description.to_s) do
-      instance_eval(&block)
+      # Run the body on the example-group instance so `let(:x)` values are
+      # callable by name (`.with(message: expected_msg)`), as in RSpec. The DSL
+      # helpers are top-level methods, so they stay available on that object.
+      group = RegentSpec.current_group_instance
+      group ? group.instance_eval(&block) : instance_eval(&block)
     end
   end
   def specify(description = nil, &block)
@@ -1603,7 +1636,7 @@ begin
       resource_type = m[1].gsub("__", "::")
       return ResourceCountMatcher.new(resource_type, args.first)
     end
-    super
+    raise NoMethodError, "unsupported spec construct: '#{{str}}' is not implemented by Regent's spec runner (undefined method '#{{str}}'). Supported: let, shared_examples/include_examples/it_behaves_like, contain_*/have_*_resource_count, compile, raise_error, include(...), sensitive."
   end
   def respond_to_missing?(name, include_private = false)
     str = name.to_s
@@ -1633,6 +1666,21 @@ begin
   # Puppet Sensitive. Used both in `let(:params)` and in `.with_*` matchers.
   def sensitive(value)
     RegentSensitive.new(value)
+  end
+  # `with_environments(include('A=1'))` — the attribute must contain every item.
+  # A Module argument is the ordinary top-level `include SomeModule`.
+  class RegentIncludeMatcher
+    attr_reader :items
+    def initialize(items)
+      @items = items
+    end
+  end
+  def include(*args)
+    if !args.empty? && args.all? {{ |a| a.is_a?(Module) }}
+      Object.send(:include, *args)
+    else
+      RegentIncludeMatcher.new(args)
+    end
   end
   def raise_error(*args)
     message = nil
@@ -1825,6 +1873,7 @@ begin
   # context per supported OS/release. Falls back to a single "default" entry
   # if metadata.json is missing, malformed, or empty.
   REGENT_SUPPORTED_OS = {supported_os_literal}
+  REGENT_CODENAMES = {codenames_literal}
   def regent_os_family(os)
     case os.to_s.downcase
     when "redhat", "centos", "rocky", "almalinux", "oraclelinux", "fedora", "scientific" then "RedHat"
@@ -1843,8 +1892,13 @@ begin
   def regent_os_facts(os, release)
     family = regent_os_family(os)
     name = os.to_s
+    os_hash = {{ "family" => family, "name" => name, "release" => {{ "full" => release, "major" => release }} }}
+    codename = REGENT_CODENAMES["#{{name.downcase}}-#{{release}}"] || REGENT_CODENAMES["#{{name.downcase}}-#{{release.split('.').first}}"]
+    if codename
+      os_hash["distro"] = {{ "codename" => codename, "description" => "#{{name}} #{{release}}", "id" => name, "release" => {{ "full" => release, "major" => release }} }}
+    end
     {{
-      :os => {{ "family" => family, "name" => name, "release" => {{ "full" => release, "major" => release }} }},
+      :os => os_hash,
       :osfamily => family, :operatingsystem => name,
       :operatingsystemrelease => release, :operatingsystemmajrelease => release,
       :architecture => "x86_64", :kernel => family
@@ -3102,12 +3156,55 @@ fn render_supported_os_ruby(entries: &[SupportedOs]) -> String {
         // `os_facts[:os]['family']`, so the top level must be symbols. The DSL's
         // `normalize_value` later stringifies every key, so the Rust evaluator
         // still receives the string-keyed fact hash Puppet expects.
+        let distro = match os_codename(&entry.os, &entry.release) {
+            Some(codename) => format!(
+                ", \"distro\" => {{ \"codename\" => {}, \"description\" => {}, \"id\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }} }}",
+                ruby_string_literal(codename),
+                ruby_string_literal(&format!("{} {}", entry.os, entry.release)),
+            ),
+            None => String::new(),
+        };
         buf.push_str(&format!(
-            "{key} => {{ :os => {{ \"family\" => {family}, \"name\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }} }}, :osfamily => {family}, :operatingsystem => {os}, :operatingsystemrelease => {release}, :operatingsystemmajrelease => {release}, :architecture => \"x86_64\", :kernel => {family} }}"
+            "{key} => {{ :os => {{ \"family\" => {family}, \"name\" => {os}, \"release\" => {{ \"full\" => {release}, \"major\" => {release} }}{distro} }}, :osfamily => {family}, :operatingsystem => {os}, :operatingsystemrelease => {release}, :operatingsystemmajrelease => {release}, :architecture => \"x86_64\", :kernel => {family} }}"
         ));
     }
     buf.push_str(" }");
     buf
+}
+
+/// Release codenames facter reports as `os.distro.codename` for the Debian
+/// family, keyed by `<lowercase os>-<release>`. rspec-puppet-facts (facterdb)
+/// provides them; manifests such as `apt` read `$facts['os']['distro']['codename']`.
+const OS_CODENAMES: &[(&str, &str)] = &[
+    ("debian-8", "jessie"),
+    ("debian-9", "stretch"),
+    ("debian-10", "buster"),
+    ("debian-11", "bullseye"),
+    ("debian-12", "bookworm"),
+    ("debian-13", "trixie"),
+    ("ubuntu-16.04", "xenial"),
+    ("ubuntu-18.04", "bionic"),
+    ("ubuntu-20.04", "focal"),
+    ("ubuntu-22.04", "jammy"),
+    ("ubuntu-24.04", "noble"),
+];
+
+fn os_codename(os: &str, release: &str) -> Option<&'static str> {
+    let os = os.to_lowercase();
+    let full = format!("{os}-{release}");
+    let major = format!("{os}-{}", release.split('.').next().unwrap_or(""));
+    OS_CODENAMES
+        .iter()
+        .find(|(k, _)| *k == full || *k == major)
+        .map(|(_, v)| *v)
+}
+
+fn render_codenames_ruby() -> String {
+    let items: Vec<String> = OS_CODENAMES
+        .iter()
+        .map(|(k, v)| format!("{} => {}", ruby_string_literal(k), ruby_string_literal(v)))
+        .collect();
+    format!("{{ {} }}", items.join(", "))
 }
 
 fn ruby_string_literal(value: &str) -> String {

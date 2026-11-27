@@ -658,6 +658,40 @@ impl RegentSpecRunner {
                 }
                 continue;
             }
+            if let Some(items) = include_marker(value) {
+                let matches_item = |item: &JsonValue| -> bool {
+                    let wanted = PuppetValue::from_json(item);
+                    let regex = regex_marker(item).and_then(|src| compile_spec_regex(src).ok());
+                    let hit = |candidate: &PuppetValue| match &regex {
+                        Some(re) => re.is_match(&candidate.as_string()).unwrap_or(false),
+                        None => {
+                            *candidate == wanted || candidate.as_string() == wanted.as_string()
+                        }
+                    };
+                    match &actual {
+                        PuppetValue::Array(elems) => elems.iter().any(hit),
+                        PuppetValue::Hash(map) => {
+                            map.keys().any(|k| hit(&PuppetValue::String(k.clone())))
+                        }
+                        PuppetValue::String(text) => match &regex {
+                            Some(re) => re.is_match(text).unwrap_or(false),
+                            None => text.contains(&wanted.as_string()),
+                        },
+                        _ => false,
+                    }
+                };
+                if let Some(missing) = items.iter().find(|item| !matches_item(item)) {
+                    return Err(anyhow::anyhow!(
+                        "resource {}[{}] attribute {} expected to include {:?} but got {:?}",
+                        resource_type,
+                        title,
+                        key,
+                        PuppetValue::from_json(missing),
+                        actual
+                    ));
+                }
+                continue;
+            }
             let expected = PuppetValue::from_json(value);
             // rspec-puppet compares parameter values loosely across the
             // string/number boundary (a spec asserting `order => '10'` matches a
@@ -846,6 +880,16 @@ impl RegentSpecRunner {
             ))
         }
     }
+}
+
+/// `{"__include__": [items…]}` — produced by the spec DSL's `include(...)`
+/// matcher used as an attribute expectation.
+fn include_marker(value: &JsonValue) -> Option<&Vec<JsonValue>> {
+    let obj = value.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+    obj.get("__include__").and_then(|v| v.as_array())
 }
 
 fn regex_marker(value: &JsonValue) -> Option<&str> {

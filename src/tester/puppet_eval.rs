@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+mod builtins;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PuppetValue {
     String(String),
@@ -319,6 +321,9 @@ impl PuppetEvaluator {
 struct PuppetModule {
     classes: HashMap<String, ClassDef>,
     defines: HashMap<String, DefineDef>,
+    /// Puppet-language functions from every loaded module's `functions/` dir,
+    /// keyed by fully-qualified name (`docker::sanitised_name`).
+    functions: HashMap<String, FunctionDef>,
     /// Maps a Puppet module name (the basename of a loaded module dir) to its
     /// filesystem path, so `epp('foo/bar.epp')` can resolve to
     /// `<paths["foo"]>/templates/bar.epp`.
@@ -530,6 +535,7 @@ impl PuppetModule {
     ) -> Result<Self> {
         let mut classes = HashMap::new();
         let mut defines = HashMap::new();
+        let mut functions: HashMap<String, FunctionDef> = HashMap::new();
         let mut module_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
         let mut type_aliases: HashMap<String, TypeSpec> = HashMap::new();
 
@@ -537,13 +543,14 @@ impl PuppetModule {
         for fixture_path in fixture_module_paths {
             register_module_path(&mut module_paths, fixture_path);
             load_type_aliases_into(fixture_path, &mut type_aliases);
+            load_functions_into(fixture_path, &mut functions);
             // Be tolerant: a single broken fixture should not block the run.
             let mut sink = Vec::new();
             if let Err(err) =
                 load_manifests_into(fixture_path, &mut classes, &mut defines, &mut sink)
             {
                 eprintln!(
-                    "warning: skipping fixture module {}: {}",
+                    "warning: skipping fixture module {}: {:#}",
                     fixture_path.display(),
                     err
                 );
@@ -562,11 +569,13 @@ impl PuppetModule {
         primary_manifest_files.sort();
         // Primary module's aliases overwrite any same-named fixture alias.
         load_type_aliases_into(module_path, &mut type_aliases);
+        load_functions_into(module_path, &mut functions);
         let hiera = Hiera::load(module_path);
 
         Ok(Self {
             classes,
             defines,
+            functions,
             module_paths,
             primary_manifest_files,
             type_aliases,
@@ -641,7 +650,15 @@ fn load_manifests_into(
                 .with_context(|| format!("read manifest {}", path.display()))?;
             let mut parser = PuppetParser::new(&content);
             let defs = parser.parse_definitions().with_context(|| {
-                format!("parse manifest {}:{}", path.display(), parser.position())
+                let (line, col) = source_line_col(&content, parser.position());
+                let snippet = content.lines().nth(line - 1).unwrap_or("").trim();
+                format!(
+                    "parse manifest {}:{}:{}: near `{}`",
+                    path.display(),
+                    line,
+                    col,
+                    snippet
+                )
             })?;
             for warning in &parser.warnings {
                 let (line, col) = source_line_col(&content, warning.offset);
@@ -663,11 +680,57 @@ fn load_manifests_into(
                         def.origin_file = Some(path.clone());
                         defines.insert(def.name.clone(), def);
                     }
+                    // Functions live under `functions/`; ignore stray ones here.
+                    PuppetDef::Function(_) => {}
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Load every Puppet-language function under `<module_path>/functions/`
+/// (recursively). Best-effort: an unreadable or unparseable file is skipped.
+fn load_functions_into(module_path: &Path, functions: &mut HashMap<String, FunctionDef>) {
+    let mut stack = vec![module_path.join("functions")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("pp") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut parser = PuppetParser::new(&content);
+            match parser.parse_definitions() {
+                Ok(defs) => {
+                    for def in defs {
+                        if let PuppetDef::Function(f) = def {
+                            functions.insert(normalize_absolute_name(&f.name).to_string(), f);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let (line, col) = source_line_col(&content, parser.position());
+                    eprintln!(
+                        "warning: skipping function file {}:{}:{}: {:#}",
+                        path.display(),
+                        line,
+                        col,
+                        err
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Load every `type Foo::Bar = <type>` alias under `<module_path>/types/`
@@ -754,6 +817,8 @@ fn discover_fixture_module_paths(module_path: &Path) -> Vec<std::path::PathBuf> 
 #[derive(Debug, Clone)]
 struct ClassDef {
     name: String,
+    /// Parameter names in declaration order; defaults may refer to earlier ones.
+    order: Vec<String>,
     params: HashMap<String, Expr>,
     /// Declared data type per parameter (`Enum['a','b'] $x`), when annotated.
     /// Used to validate passed/defaulted values during compilation.
@@ -768,6 +833,8 @@ struct ClassDef {
 #[derive(Debug, Clone)]
 struct DefineDef {
     name: String,
+    /// Parameter names in declaration order; defaults may refer to earlier ones.
+    order: Vec<String>,
     params: HashMap<String, Expr>,
     param_types: HashMap<String, TypeSpec>,
     required_params: HashSet<String>,
@@ -779,13 +846,28 @@ struct DefineDef {
 /// and (where annotated) declared data types, keyed by parameter name, plus
 /// the set of parameters declared without a default (required).
 struct ParsedParams {
+    /// Parameter names in declaration order (for positional binding).
+    order: Vec<String>,
     params: HashMap<String, Expr>,
     types: HashMap<String, TypeSpec>,
     required: HashSet<String>,
 }
 
+/// A Puppet-language function (`function ns::name($a, $b = 1) { … }`), as found
+/// under a module's `functions/` directory. The call's value is the last
+/// expression in the body (or the operand of `return`).
+#[derive(Debug, Clone)]
+struct FunctionDef {
+    name: String,
+    order: Vec<String>,
+    params: HashMap<String, Expr>,
+    body: Vec<Stmt>,
+    result: Option<Expr>,
+}
+
 #[derive(Debug, Clone)]
 enum PuppetDef {
+    Function(FunctionDef),
     Class(ClassDef),
     Define(DefineDef),
 }
@@ -825,7 +907,16 @@ enum Stmt {
         branches: Vec<(Expr, Vec<Stmt>)>,
         default: Vec<Stmt>,
     },
-    Fail(String),
+    Fail(Expr),
+    /// `assert_type(Type, $value) |$expected, $actual| { body }` — when `$value`
+    /// does not match `Type` the lambda body runs (typically `fail(...)`); with
+    /// no lambda a mismatch raises Puppet's own type-mismatch error.
+    AssertType {
+        ty: Expr,
+        value: Expr,
+        params: Vec<String>,
+        body: Option<Vec<Stmt>>,
+    },
     /// `$iterable.each |$a[, $b]| { body }` — iterates an array or hash,
     /// binding the lambda parameters to each element (or key/value pair) and
     /// running the body. Modeled as a first-class statement so that resource
@@ -954,6 +1045,20 @@ enum Expr {
     /// Boolean/comparison expression used in value position (e.g. RHS of
     /// `$x = $a and $b == 'foo'`). Evaluates to a `Bool`.
     Condition(Box<Cond>),
+    /// `if`/`elsif`/`else` (or `unless`) used as a value:
+    /// `$x = if $c { 'a' } else { 'b' }`. Each branch body is a single value
+    /// expression; `otherwise` is `undef` when there is no `else`.
+    IfValue {
+        cond: Box<Cond>,
+        then: Box<Expr>,
+        otherwise: Box<Expr>,
+    },
+    /// A lambda body with several statements: run `stmts` in a throw-away
+    /// scope, then yield `result` (the last expression).
+    Block {
+        stmts: Vec<Stmt>,
+        result: Box<Expr>,
+    },
     /// Binary arithmetic (`+ - * /`). For integer operands the result is
     /// computed; otherwise we fall back to the left-hand value so the parse
     /// succeeds and the evaluator stays usable for downstream code paths.
@@ -1223,7 +1328,6 @@ impl<'a> EvalContext<'a> {
                 }
             }
         }
-        self.apply_param_defaults(&class_def.params, &mut local_vars)?;
         let passed_params = if let Some(params) = declaration_params {
             params.clone()
         } else if self.subject_class.as_deref() == Some(name) {
@@ -1237,20 +1341,16 @@ impl<'a> EvalContext<'a> {
         // Automatic class-parameter lookup from Hiera: for each parameter not
         // explicitly passed, a `<class>::<param>` data value overrides the
         // manifest default (Puppet precedence: passed > Hiera > default).
-        let passed_keys: HashSet<String> = passed_params.keys().cloned().collect();
-        for param in class_def.params.keys() {
-            if passed_keys.contains(param) {
-                continue;
-            }
-            let key = format!("{name}::{param}");
-            if let Some(value) = self.module.hiera.lookup(&key, &self.facts) {
-                // A null data value is treated as "not set" so the manifest
-                // default stands (avoids clobbering e.g. `Array $x = []`).
-                if !matches!(value, PuppetValue::Undef) {
-                    local_vars.insert(param.clone(), value);
-                }
-            }
-        }
+        // Bind in declaration order, publishing each value to the scope as we
+        // go: a default may refer to an earlier parameter (`$b = "${a}/x"`),
+        // including one the caller passed explicitly.
+        self.bind_params_in_order(
+            &class_def.order,
+            &class_def.params,
+            &passed_params,
+            Some(name),
+            &mut local_vars,
+        )?;
         for (key, value) in &passed_params {
             local_vars.insert(key.clone(), value.clone());
         }
@@ -1330,7 +1430,13 @@ impl<'a> EvalContext<'a> {
         self.vars
             .insert("name".to_string(), PuppetValue::String(title.to_string()));
         let mut local_vars = HashMap::new();
-        self.apply_param_defaults(&define_def.params, &mut local_vars)?;
+        self.bind_params_in_order(
+            &define_def.order,
+            &define_def.params,
+            attrs,
+            None,
+            &mut local_vars,
+        )?;
         for (key, value) in attrs {
             local_vars.insert(key.clone(), value.clone());
         }
@@ -1354,8 +1460,25 @@ impl<'a> EvalContext<'a> {
             title: title.to_string(),
             attributes: resolved_attrs,
         });
+        let classes_before = self.evaluated_classes.clone();
         let result = self.evaluate_statements(&define_def.body);
+        // A class first evaluated from inside this define body (`include apt`)
+        // stays evaluated for the rest of the run, so its `class::var` scope
+        // must outlive the define's own scope — otherwise the next reference
+        // to `$apt::config_files` would read undef.
+        let new_class_scopes: Vec<(String, PuppetValue)> = self
+            .vars
+            .iter()
+            .filter(|(k, _)| {
+                k.rsplit_once("::").is_some_and(|(prefix, _)| {
+                    self.evaluated_classes.contains(prefix)
+                        && !classes_before.contains(prefix)
+                })
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         self.vars = saved_vars;
+        self.vars.extend(new_class_scopes);
         self.in_progress.retain(|item| item != &key);
         self.evaluated_defines.insert(name.to_string());
         result
@@ -1377,7 +1500,17 @@ impl<'a> EvalContext<'a> {
         self.vars
             .insert("name".to_string(), PuppetValue::String(title.to_string()));
         let mut local_vars = HashMap::new();
-        self.apply_param_defaults(&define_def.params, &mut local_vars)?;
+        let passed_params = match &self.params {
+            PuppetValue::Hash(h) => h.clone(),
+            _ => IndexMap::new(),
+        };
+        self.bind_params_in_order(
+            &define_def.order,
+            &define_def.params,
+            &passed_params,
+            None,
+            &mut local_vars,
+        )?;
         self.apply_param_overrides(&mut local_vars)?;
         self.vars.extend(local_vars);
 
@@ -1421,14 +1554,38 @@ impl<'a> EvalContext<'a> {
         Ok(())
     }
 
-    fn apply_param_defaults(
+    /// Resolve parameters in declaration order: passed value, else (classes
+    /// only) a Hiera `<class>::<param>` value, else the default expression.
+    /// Each resolved value is made visible to later defaults.
+    fn bind_params_in_order(
         &mut self,
+        order: &[String],
         defaults: &HashMap<String, Expr>,
-        vars: &mut HashMap<String, PuppetValue>,
+        passed: &IndexMap<String, PuppetValue>,
+        hiera_class: Option<&str>,
+        out: &mut HashMap<String, PuppetValue>,
     ) -> Result<()> {
-        for (name, expr) in defaults {
-            let value = self.eval_expr(expr)?;
-            vars.insert(name.clone(), value);
+        for param in order {
+            let value = if let Some(v) = passed.get(param) {
+                v.clone()
+            } else {
+                let hiera = hiera_class.and_then(|class| {
+                    self.module
+                        .hiera
+                        .lookup(&format!("{class}::{param}"), &self.facts)
+                        // A null data value is "not set": the default stands.
+                        .filter(|v| !matches!(v, PuppetValue::Undef))
+                });
+                match hiera {
+                    Some(v) => v,
+                    None => match defaults.get(param) {
+                        Some(expr) => self.eval_expr(expr)?,
+                        None => PuppetValue::Undef,
+                    },
+                }
+            };
+            self.vars.insert(param.clone(), value.clone());
+            out.insert(param.clone(), value);
         }
         Ok(())
     }
@@ -1553,7 +1710,52 @@ impl<'a> EvalContext<'a> {
                     }
                 }
                 Stmt::Fail(message) => {
-                    return Err(anyhow::anyhow!(message.clone()));
+                    // The message is an expression: `"... ${var} ..."` must be
+                    // interpolated, `fail($msg)` must use the variable's value.
+                    let text = self.eval_expr(message)?.as_string();
+                    return Err(anyhow::anyhow!(text));
+                }
+                Stmt::AssertType {
+                    ty,
+                    value,
+                    params,
+                    body,
+                } => {
+                    let actual = self.eval_expr(value)?;
+                    let ok = match ty {
+                        Expr::Type(spec) => {
+                            eval_type_match(&actual, spec, &self.module.type_aliases)
+                        }
+                        _ => true,
+                    };
+                    if !ok {
+                        let expected = match ty {
+                            Expr::Type(spec) => spec.render(),
+                            _ => String::new(),
+                        };
+                        match body {
+                            Some(body) => {
+                                if let Some(name) = params.first() {
+                                    self.vars
+                                        .insert(name.clone(), PuppetValue::String(expected));
+                                }
+                                if let Some(name) = params.get(1) {
+                                    self.vars.insert(
+                                        name.clone(),
+                                        PuppetValue::String(actual.as_string()),
+                                    );
+                                }
+                                self.evaluate_statements(body)?;
+                            }
+                            None => {
+                                return Err(anyhow::anyhow!(
+                                    "assert_type(): expected a value of type {}, got '{}'",
+                                    expected,
+                                    actual.as_string()
+                                ));
+                            }
+                        }
+                    }
                 }
                 Stmt::EachLoop {
                     iterable,
@@ -1756,12 +1958,52 @@ impl<'a> EvalContext<'a> {
     /// reference (`String[1,10]`, `Enum[...]`, …) this performs structural type
     /// matching with bounds enforcement; otherwise it falls back to compiling
     /// the right-hand value as a regex.
+    /// Invoke a Puppet-language function in its own scope (callers' variables
+    /// are not visible), binding positional arguments to its parameters.
+    fn call_user_function(
+        &mut self,
+        def: &FunctionDef,
+        args: Vec<PuppetValue>,
+    ) -> Result<PuppetValue> {
+        let saved = std::mem::take(&mut self.vars);
+        let outcome = (|| -> Result<PuppetValue> {
+            for (i, pname) in def.order.iter().enumerate() {
+                let value = match args.get(i) {
+                    Some(v) => v.clone(),
+                    None => match def.params.get(pname) {
+                        Some(default) => self.eval_expr(default)?,
+                        None => PuppetValue::Undef,
+                    },
+                };
+                self.vars.insert(pname.clone(), value);
+            }
+            self.evaluate_statements(&def.body)?;
+            match &def.result {
+                Some(expr) => self.eval_expr(expr),
+                None => Ok(PuppetValue::Undef),
+            }
+        })();
+        self.vars = saved;
+        outcome
+    }
+
     fn eval_match(&mut self, left: &Expr, right: &Expr) -> Result<bool> {
         let subject = self.eval_expr(left)?;
         if let Expr::Type(spec) = right {
             return Ok(eval_type_match(&subject, spec, &self.module.type_aliases));
         }
-        eval_regex_match(&subject, &self.eval_expr(right)?)
+        let pattern = self.eval_expr(right)?;
+        // A successful regex match publishes `$0`, `$1`, … (Puppet numeric
+        // match variables); a failed match leaves them untouched.
+        if let Some(caps) =
+            builtins::regex_captures(&subject.as_string(), &pattern.as_string())
+        {
+            for (i, value) in caps.into_iter().enumerate() {
+                self.vars.insert(i.to_string(), value);
+            }
+            return Ok(true);
+        }
+        eval_regex_match(&subject, &pattern)
     }
 
     /// Match a `case` branch pattern against the subject value.
@@ -1839,6 +2081,26 @@ impl<'a> EvalContext<'a> {
             }
             Expr::Var(var) => self.resolve_var(var),
             Expr::Condition(cond) => PuppetValue::Bool(self.eval_cond(cond)?),
+            Expr::Block { stmts, result } => {
+                // Variables assigned in a lambda body are local to one call.
+                let saved = self.vars.clone();
+                let outcome = self
+                    .evaluate_statements(stmts)
+                    .and_then(|_| self.eval_expr(result));
+                self.vars = saved;
+                outcome?
+            }
+            Expr::IfValue {
+                cond,
+                then,
+                otherwise,
+            } => {
+                if self.eval_cond(cond)? {
+                    self.eval_expr(then)?
+                } else {
+                    self.eval_expr(otherwise)?
+                }
+            }
             Expr::Arith { op, left, right } => {
                 let l = self.eval_expr(left)?;
                 let r = self.eval_expr(right)?;
@@ -1850,7 +2112,7 @@ impl<'a> EvalContext<'a> {
                     "downcase" => value.downcase(),
                     "length" | "size" => PuppetValue::Integer(value_length(&value)),
                     "empty" => PuppetValue::Bool(value_empty(&value)),
-                    _ => value,
+                    other => builtins::call(other, std::slice::from_ref(&value)).unwrap_or(value),
                 }
             }
             Expr::Lambda {
@@ -1878,6 +2140,14 @@ impl<'a> EvalContext<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg))
                     .collect::<Result<Vec<_>>>()?;
+                if let Some(def) = self
+                    .module
+                    .functions
+                    .get(normalize_absolute_name(name))
+                    .cloned()
+                {
+                    return self.call_user_function(&def, arg_values);
+                }
                 match name.as_str() {
                     "epp" => {
                         let template_ref = arg_values
@@ -1968,33 +2238,19 @@ impl<'a> EvalContext<'a> {
                         let sep = arg_values.get(1).map(|v| v.as_string()).unwrap_or_default();
                         match arg_values.first() {
                             Some(PuppetValue::Array(items)) => PuppetValue::String(
+                                // `undef` elements join as the empty string.
                                 items
                                     .iter()
-                                    .map(|v| v.as_string())
+                                    .map(|v| match v {
+                                        PuppetValue::Undef => String::new(),
+                                        other => other.as_string(),
+                                    })
                                     .collect::<Vec<_>>()
                                     .join(&sep),
                             ),
                             Some(other) => PuppetValue::String(other.as_string()),
                             None => PuppetValue::Undef,
                         }
-                    }
-                    // `flatten(array)` — recursively flatten nested arrays.
-                    "flatten" => {
-                        fn flatten_into(value: &PuppetValue, out: &mut Vec<PuppetValue>) {
-                            match value {
-                                PuppetValue::Array(items) => {
-                                    for item in items {
-                                        flatten_into(item, out);
-                                    }
-                                }
-                                other => out.push(other.clone()),
-                            }
-                        }
-                        let mut out = Vec::new();
-                        for value in &arg_values {
-                            flatten_into(value, &mut out);
-                        }
-                        PuppetValue::Array(out)
                     }
                     // Puppet's numeric type-conversion functions. `Integer('7')`
                     // must yield the integer `7`, not `Undef` — otherwise a
@@ -2083,7 +2339,7 @@ impl<'a> EvalContext<'a> {
                         .first()
                         .map(|value| PuppetValue::String(shell_escape(&value.as_string())))
                         .unwrap_or(PuppetValue::Undef),
-                    _ => PuppetValue::Undef,
+                    other => builtins::call(other, &arg_values).unwrap_or(PuppetValue::Undef),
                 }
             }
             // Regex literals evaluate to their pattern string; comparison ops
@@ -2801,6 +3057,18 @@ fn eval_type_match(
     }
 }
 
+/// Parse a manifest's class/define definitions, returning a `line:col` error
+/// with the offending source line on failure. Used by tests and tooling that
+/// only need to know whether a manifest is accepted by the embedded parser.
+pub fn check_manifest_syntax(source: &str) -> Result<()> {
+    let mut parser = PuppetParser::new(source);
+    parser.parse_definitions().map(|_| ()).map_err(|err| {
+        let (line, col) = source_line_col(source, parser.position());
+        let snippet = source.lines().nth(line - 1).unwrap_or("").trim();
+        anyhow::anyhow!("{line}:{col}: {err}: near `{snippet}`")
+    })
+}
+
 struct PuppetParser<'a> {
     source: &'a str,
     tokens: Vec<Token>,
@@ -2874,6 +3142,8 @@ impl<'a> PuppetParser<'a> {
                 defs.push(PuppetDef::Class(self.parse_class_def()?));
             } else if self.consume_keyword("define") {
                 defs.push(PuppetDef::Define(self.parse_define_def()?));
+            } else if self.consume_keyword("function") {
+                defs.push(PuppetDef::Function(self.parse_function_def()?));
             } else {
                 self.index += 1;
             }
@@ -2887,6 +3157,7 @@ impl<'a> PuppetParser<'a> {
             params,
             types,
             required,
+            order,
         } = self.parse_param_list()?;
         let parent = if self.consume_keyword("inherits") {
             self.consume_leading_namespace_prefix();
@@ -2897,6 +3168,7 @@ impl<'a> PuppetParser<'a> {
         let body = self.parse_block()?;
         Ok(ClassDef {
             name,
+            order,
             params,
             param_types: types,
             required_params: required,
@@ -2906,16 +3178,83 @@ impl<'a> PuppetParser<'a> {
         })
     }
 
+    /// Parse `{ stmt* [expr] }` where the last bare expression is the value
+    /// (function bodies, multi-statement lambda bodies). Consumes the closing
+    /// brace.
+    fn parse_value_body(&mut self) -> Result<(Vec<Stmt>, Option<Expr>)> {
+        self.expect(TokenKind::LBrace)?;
+        let mut body = Vec::new();
+        let mut result = None;
+        while !self.consume(TokenKind::RBrace) && !self.is_eof() {
+            let is_stmt_keyword = self.peek_token().is_some_and(|t| {
+                t.kind == TokenKind::Ident
+                    && matches!(
+                        t.text.as_str(),
+                        "if" | "unless"
+                            | "case"
+                            | "fail"
+                            | "assert_type"
+                            | "include"
+                            | "contain"
+                            | "require"
+                            | "create_resources"
+                            | "ensure_resource"
+                            | "ensure_packages"
+                    )
+            });
+            let is_assignment = self.peek_kind() == Some(TokenKind::Var)
+                && self.tokens.get(self.index + 1).map(|t| t.kind) == Some(TokenKind::Equal);
+            if is_stmt_keyword || is_assignment {
+                if let Some(stmt) = self.parse_statement()? {
+                    body.push(stmt);
+                } else {
+                    self.index += 1;
+                }
+                continue;
+            }
+            self.consume_keyword("return");
+            let before = self.index;
+            result = Some(self.parse_value_expr()?);
+            if self.index == before {
+                self.index += 1;
+            }
+        }
+        Ok((body, result))
+    }
+
+    fn parse_function_def(&mut self) -> Result<FunctionDef> {
+        let name = self.expect_ident()?;
+        let ParsedParams { order, params, .. } = self.parse_param_list()?;
+        // Optional return-type annotation: `>> String`.
+        if self.peek_kind() == Some(TokenKind::Gt) {
+            self.index += 1;
+            if self.peek_kind() == Some(TokenKind::Gt) {
+                self.index += 1;
+            }
+            let _ = self.parse_type_value();
+        }
+        let (body, result) = self.parse_value_body()?;
+        Ok(FunctionDef {
+            name,
+            order,
+            params,
+            body,
+            result,
+        })
+    }
+
     fn parse_define_def(&mut self) -> Result<DefineDef> {
         let name = self.expect_ident()?;
         let ParsedParams {
             params,
             types,
             required,
+            order,
         } = self.parse_param_list()?;
         let body = self.parse_block()?;
         Ok(DefineDef {
             name,
+            order,
             params,
             param_types: types,
             required_params: required,
@@ -2928,8 +3267,10 @@ impl<'a> PuppetParser<'a> {
         let mut params = HashMap::new();
         let mut types = HashMap::new();
         let mut required = HashSet::new();
+        let mut order: Vec<String> = Vec::new();
         if !self.consume(TokenKind::LParen) {
             return Ok(ParsedParams {
+                order: Vec::new(),
                 params,
                 types,
                 required,
@@ -2960,6 +3301,7 @@ impl<'a> PuppetParser<'a> {
             }
             if self.peek_kind() == Some(TokenKind::Var) {
                 let name = self.expect_var()?;
+                order.push(name.clone());
                 if let Some(spec) = param_type {
                     types.insert(name.clone(), spec);
                 }
@@ -2976,6 +3318,7 @@ impl<'a> PuppetParser<'a> {
             self.consume(TokenKind::Comma);
         }
         Ok(ParsedParams {
+            order,
             params,
             types,
             required,
@@ -3018,29 +3361,20 @@ impl<'a> PuppetParser<'a> {
         result
     }
 
-    /// Parse the `{ … }` body of a value-position lambda, returning its result
-    /// expression. Reads the first expression inside the braces (the lambda's
-    /// return value for the common single-expression body) and then skips any
-    /// remaining tokens up to the matching `}`, so multi-statement bodies parse
-    /// without error even though only the leading expression is modeled.
+    /// Parse the `{ … }` body of a value-position lambda. A single expression
+    /// is returned as is; a body with leading statements becomes an
+    /// `Expr::Block` (statements, then the last expression as the value).
     fn parse_lambda_value_body(&mut self) -> Result<Expr> {
-        self.expect(TokenKind::LBrace)?;
-        let body = if self.peek_kind() == Some(TokenKind::RBrace) {
-            Expr::Undef
+        let (stmts, result) = self.parse_value_body()?;
+        let result = result.unwrap_or(Expr::Undef);
+        Ok(if stmts.is_empty() {
+            result
         } else {
-            self.parse_expr()?
-        };
-        // Skip to the brace that closes this lambda body, tracking nesting.
-        let mut depth = 1;
-        while depth > 0 && !self.is_eof() {
-            match self.peek_kind() {
-                Some(TokenKind::LBrace) => depth += 1,
-                Some(TokenKind::RBrace) => depth -= 1,
-                _ => {}
+            Expr::Block {
+                stmts,
+                result: Box::new(result),
             }
-            self.index += 1;
-        }
-        Ok(body)
+        })
     }
 
     /// If `expr` is a `.each` method call immediately followed by a lambda
@@ -3139,7 +3473,15 @@ impl<'a> PuppetParser<'a> {
                     default = self.parse_block()?;
                     continue;
                 }
-                let branch_expr = self.parse_expr()?;
+                let mut alternatives = vec![self.parse_expr()?];
+                while self.consume(TokenKind::Comma) {
+                    alternatives.push(self.parse_expr()?);
+                }
+                let branch_expr = if alternatives.len() == 1 {
+                    alternatives.remove(0)
+                } else {
+                    Expr::Array(alternatives)
+                };
                 self.consume(TokenKind::Colon);
                 let body = self.parse_block()?;
                 branches.push((branch_expr, body));
@@ -3151,6 +3493,28 @@ impl<'a> PuppetParser<'a> {
             }));
         }
         if self.peek_kind() == Some(TokenKind::Ident)
+            && self.peek_token().is_some_and(|token| token.text == "assert_type")
+            && self.tokens.get(self.index + 1).map(|t| t.kind) == Some(TokenKind::LParen)
+        {
+            self.index += 2; // `assert_type` `(`
+            let ty = self.parse_expr()?;
+            self.consume(TokenKind::Comma);
+            let value = self.parse_value_expr()?;
+            self.consume(TokenKind::RParen);
+            let (params, body) = if self.peek_kind() == Some(TokenKind::Pipe) {
+                let params = self.parse_lambda_params()?;
+                (params, Some(self.parse_block()?))
+            } else {
+                (Vec::new(), None)
+            };
+            return Ok(Some(Stmt::AssertType {
+                ty,
+                value,
+                params,
+                body,
+            }));
+        }
+        if self.peek_kind() == Some(TokenKind::Ident)
             && self.peek_token().is_some_and(|token| token.text == "fail")
             && self
                 .tokens
@@ -3158,11 +3522,10 @@ impl<'a> PuppetParser<'a> {
                 .is_some_and(|token| token.kind == TokenKind::LParen)
         {
             self.index += 2; // consume `fail` and `(`
-            let message = if let Expr::String(msg) = self.parse_expr()? {
-                msg
-            } else {
-                "fail".to_string()
-            };
+            let message = self.parse_value_expr()?;
+            while self.consume(TokenKind::Comma) && self.peek_kind() != Some(TokenKind::RParen) {
+                let _ = self.parse_value_expr()?;
+            }
             self.consume(TokenKind::RParen);
             return Ok(Some(Stmt::Fail(message)));
         }
@@ -3227,7 +3590,10 @@ impl<'a> PuppetParser<'a> {
             let rtype_expr = self.parse_expr()?;
             self.consume(TokenKind::Comma);
             let hash_expr = self.parse_expr()?;
-            let defaults_expr = if self.consume(TokenKind::Comma) {
+            let defaults_expr = if self.consume(TokenKind::Comma)
+                && self.peek_kind() != Some(TokenKind::RParen)
+            {
+                // (a trailing comma before `)` is allowed and carries no defaults)
                 Some(self.parse_expr()?)
             } else {
                 None
@@ -3388,10 +3754,30 @@ impl<'a> PuppetParser<'a> {
 
     /// Unary `!` and parenthesised compound conditions.
     fn parse_cond_unary(&mut self) -> Result<Cond> {
-        if self.consume(TokenKind::LParen) {
+        if self.peek_kind() == Some(TokenKind::LParen) {
+            let save = self.index;
+            self.index += 1;
             let cond = self.parse_cond()?;
             self.consume(TokenKind::RParen);
-            return Ok(cond);
+            // `(cond) ? { … }` / `(expr).method` / `(a) + b` continue as an
+            // expression, so re-parse the parenthesised group as a primary.
+            if !matches!(
+                self.peek_kind(),
+                Some(
+                    TokenKind::Question
+                        | TokenKind::Dot
+                        | TokenKind::Plus
+                        | TokenKind::Minus
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::EqEq
+                        | TokenKind::NotEq
+                )
+            ) {
+                return Ok(cond);
+            }
+            self.index = save;
+            return self.parse_cond_atom();
         }
         if self.consume(TokenKind::Bang) {
             return Ok(Cond::Not(Box::new(self.parse_cond_unary()?)));
@@ -3606,11 +3992,69 @@ impl<'a> PuppetParser<'a> {
         Ok(expr)
     }
 
+    /// Parse the remainder of `if C { v } [elsif C { v }]* [else { v }]` (the
+    /// `if`/`unless` keyword is already consumed) used in value position.
+    fn parse_if_value(&mut self, negate: bool) -> Result<Expr> {
+        let cond = self.parse_cond()?;
+        let cond = if negate { Cond::Not(Box::new(cond)) } else { cond };
+        let then = self.parse_value_block()?;
+        let otherwise = if self.consume_keyword("elsif") {
+            self.parse_if_value(false)?
+        } else if self.consume_keyword("else") {
+            self.parse_value_block()?
+        } else {
+            Expr::Undef
+        };
+        Ok(Expr::IfValue {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            otherwise: Box::new(otherwise),
+        })
+    }
+
+    /// `{ <value expr> }`. A block with several statements yields `undef`
+    /// (only single-expression bodies are modelled); it is skipped by brace
+    /// depth so the surrounding parse stays in sync.
+    fn parse_value_block(&mut self) -> Result<Expr> {
+        self.expect(TokenKind::LBrace)?;
+        if self.consume(TokenKind::RBrace) {
+            return Ok(Expr::Undef);
+        }
+        let save = self.index;
+        if let Ok(value) = self.parse_value_expr() {
+            if self.consume(TokenKind::RBrace) {
+                return Ok(value);
+            }
+        }
+        self.index = save;
+        let mut depth = 1usize;
+        while !self.is_eof() && depth > 0 {
+            match self.peek_kind() {
+                Some(TokenKind::LBrace) => depth += 1,
+                Some(TokenKind::RBrace) => depth -= 1,
+                _ => {}
+            }
+            self.index += 1;
+        }
+        Ok(Expr::Undef)
+    }
+
     fn parse_primary(&mut self) -> Result<Expr> {
         if self.consume(TokenKind::LParen) {
-            let expr = self.parse_expr()?;
+            // A parenthesised value may be a full comparison/boolean
+            // expression: `($facts['os']['release']['major'] == '7') ? { … }`.
+            let expr = self.parse_value_expr()?;
             self.consume(TokenKind::RParen);
             return Ok(expr);
+        }
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && matches!(self.peek_token().map(|t| t.text.as_str()), Some("if" | "unless"))
+            // `unless => $cmd` is an attribute name, not an expression.
+            && self.tokens.get(self.index + 1).map(|t| t.kind) != Some(TokenKind::FatArrow)
+        {
+            let negate = self.peek_token().is_some_and(|t| t.text == "unless");
+            self.index += 1;
+            return self.parse_if_value(negate);
         }
         if self.peek_kind() == Some(TokenKind::String) {
             let value = self.expect_string()?;
@@ -3643,12 +4087,28 @@ impl<'a> PuppetParser<'a> {
             let ident = self.expect_ident()?;
             if self.consume(TokenKind::LParen) {
                 let mut args = Vec::new();
+                // Trailing `key => value` pairs without braces are an implicit
+                // hash argument: `epp('t.epp', machine => $m, login => $l)`.
+                let mut named: Vec<(Expr, Expr)> = Vec::new();
                 while !self.consume(TokenKind::RParen) && !self.is_eof() {
                     if self.peek_kind() == Some(TokenKind::Comma) {
                         self.index += 1;
                         continue;
                     }
-                    args.push(self.parse_expr()?);
+                    let before = self.index;
+                    let arg = self.parse_value_expr()?;
+                    if self.consume(TokenKind::FatArrow) {
+                        let value = self.parse_value_expr()?;
+                        named.push((arg, value));
+                    } else {
+                        args.push(arg);
+                    }
+                    if self.index == before {
+                        self.index += 1;
+                    }
+                }
+                if !named.is_empty() {
+                    args.push(Expr::Hash(named));
                 }
                 return Ok(Expr::FunctionCall { name: ident, args });
             }
@@ -3969,6 +4429,8 @@ impl Expr {
             Expr::Regex(pattern) => pattern.clone(),
             Expr::Selector { .. } => "selector".to_string(),
             Expr::Condition(_) => "condition".to_string(),
+            Expr::IfValue { .. } => "if-expression".to_string(),
+            Expr::Block { .. } => "block".to_string(),
             Expr::Arith { .. } => "arith".to_string(),
             Expr::Type(spec) => spec.render(),
         }
@@ -8223,5 +8685,348 @@ hierarchy:
             catalog.contains("file", "/opt/app"),
             "pick() must fall through to `false`, selecting the default arm"
         );
+    }
+
+    fn eval_foo(manifest: &str) -> PuppetCatalog {
+        let dir = write_module("foo", manifest);
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+        ev.evaluate_class(
+            "foo",
+            &PuppetValue::Hash(IndexMap::new()),
+            &PuppetValue::Hash(IndexMap::new()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selector_over_parenthesised_comparison() {
+        // docker/manifests/params.pp: `($a == '7') ? { true => ..., default => ... }`
+        let manifest = r#"
+            class foo (String $major = '7') {
+              $path = ($major == '7') ? {
+                true    => 'centos',
+                default => 'rhel',
+              }
+              notify { "path-${path}": }
+            }
+        "#;
+        assert!(eval_foo(manifest).contains("notify", "path-centos"));
+    }
+
+    #[test]
+    fn function_call_with_bare_named_arguments() {
+        // apt/manifests/auth.pp: named args without braces form a trailing hash.
+        let manifest = r#"
+            class foo (String $login = undef) {
+              $content = epp('foo/x.epp',
+                machine  => 'm',
+                login    => $login,
+                password => 'p'
+              )
+              notify { 'parsed': }
+            }
+        "#;
+        assert!(eval_foo(manifest).contains("notify", "parsed"));
+    }
+
+    #[test]
+    fn if_expression_as_assignment_value() {
+        // apt/manifests/backports.pp and source.pp: `$x = if ... { } elsif ... { } else { }`.
+        let manifest = r#"
+            class foo (Optional[String] $key = undef, String $dir = 'd') {
+              $a = if $key { 'with-key' } else { 'no-key' }
+              $b = if $dir == 'x' {
+                'x'
+              } elsif $dir == 'd' {
+                "dir-${dir}"
+              } else {
+                'other'
+              }
+              notify { "${a}/${b}": }
+            }
+        "#;
+        assert!(eval_foo(manifest).contains("notify", "no-key/dir-d"));
+    }
+
+    #[test]
+    fn case_branch_with_string_list_and_in_operator() {
+        // stdlib/manifests/manage.pp: list-of-strings case branch nested in
+        // `each`, plus `'epp' in $attrs`.
+        let manifest = r#"
+            class foo (Hash $res = { 'concat::fragment' => { 'a' => { 'epp' => 'x' } }, 'file' => { 'b' => {} } }) {
+              $res.each |$type, $resources| {
+                $resources.each |$title, $attrs| {
+                  case $type {
+                    'file', 'concat::fragment': {
+                      if 'epp' in $attrs {
+                        notify { "epp-${title}": }
+                      } else {
+                        notify { "plain-${title}": }
+                      }
+                    }
+                    default: {
+                      notify { "other-${title}": }
+                    }
+                  }
+                }
+              }
+            }
+        "#;
+        let catalog = eval_foo(manifest);
+        assert!(catalog.contains("notify", "epp-a"));
+        assert!(catalog.contains("notify", "plain-b"));
+        assert!(!catalog.contains("notify", "other-a"));
+    }
+
+    #[test]
+    fn unless_attribute_name_is_not_an_if_expression() {
+        let manifest = r#"
+            class foo {
+              exec { 'x':
+                command => '/bin/true',
+                unless  => '/bin/false',
+              }
+              notify { 'ok': }
+            }
+        "#;
+        assert!(eval_foo(manifest).contains("notify", "ok"));
+    }
+
+    #[test]
+    fn assert_type_with_lambda_runs_body_only_on_mismatch() {
+        // docker::init: `assert_type(Pattern[/^(Debian|RedHat)$/], $v) |$a,$b| { fail(..) }`
+        let manifest = r#"
+            class foo (String $fam = 'Debian') {
+              assert_type(Pattern[/^(Debian|RedHat)$/], $fam) |$a, $b| {
+                fail('unsupported family')
+              }
+              notify { 'supported': }
+            }
+        "#;
+        assert!(eval_foo(manifest).contains("notify", "supported"));
+
+        let dir = write_module("foo", &manifest.replace("'Debian'", "'Plan9'"));
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+        let err = ev
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported family"), "{err}");
+    }
+
+    #[test]
+    fn create_resources_with_trailing_comma_after_hash_argument() {
+        // docker/manifests/init.pp: `create_resources('t', lookup(...),\n)`.
+        let manifest = r#"
+            class foo {
+              create_resources(
+                'notify',
+                { 'a' => {} },
+              )
+              notify { 'after': }
+            }
+        "#;
+        let catalog = eval_foo(manifest);
+        assert!(catalog.contains("notify", "a"));
+        assert!(catalog.contains("notify", "after"));
+    }
+
+    fn eval_foo_err(manifest: &str) -> String {
+        let dir = write_module("foo", manifest);
+        let ev = PuppetEvaluator::new(dir.path()).unwrap();
+        ev.evaluate_class(
+            "foo",
+            &PuppetValue::Hash(IndexMap::new()),
+            &PuppetValue::Hash(IndexMap::new()),
+        )
+        .unwrap_err()
+        .to_string()
+    }
+
+    #[test]
+    fn fail_message_interpolates_variables_in_nested_if() {
+        let msg = eval_foo_err(
+            r#"
+            class foo (String $v = 'x', Boolean $on = true) {
+              if $on { if $v == 'x' { fail("nested ${v} failure") } }
+            }"#,
+        );
+        assert_eq!(msg, "nested x failure");
+    }
+
+    #[test]
+    fn fail_accepts_a_variable_message() {
+        let msg = eval_foo_err("class foo { $m = 'boom'\n fail($m) }");
+        assert_eq!(msg, "boom");
+    }
+
+    #[test]
+    fn versioncmp_orders_dotted_versions_like_puppet() {
+        use super::builtins::versioncmp;
+        assert_eq!(versioncmp("2.49.9", "2.50.0"), -1);
+        assert_eq!(versioncmp("2.50.0", "2.49.9"), 1);
+        assert_eq!(versioncmp("2.50.0", "2.50.0"), 0);
+        assert_eq!(versioncmp("10.0", "9.9"), 1); // numeric, not lexical
+        assert_eq!(versioncmp("1.0", "1.0-1"), -1);
+        let msg = eval_foo_err(
+            r#"class foo (String $ver = '2.49.9') {
+              if versioncmp($ver, '2.50.0') < 0 { fail("too old ${ver}") }
+            }"#,
+        );
+        assert_eq!(msg, "too old 2.49.9");
+    }
+
+    #[test]
+    fn regex_captures_feed_integer_and_match_function() {
+        let catalog = eval_foo(
+            r#"class foo (String $tag = 'v2.49.9') {
+              if $tag =~ /^v?(\d+)\.(\d+)/ {
+                $major = Integer($1)
+                $minor = Integer($2)
+                notify { "mm-${major}-${minor}": }
+              }
+              $m = $tag.match(/(\d+)\.(\d+)/)
+              notify { "match-${m[1]}": }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "mm-2-49"));
+        assert!(catalog.contains("notify", "match-2"));
+    }
+
+    #[test]
+    fn split_join_delete_at_compose() {
+        let catalog = eval_foo(
+            r#"class foo {
+              $a = split('pref-foo-bar', '-')
+              $base = join(delete_at($a, 0), '-')
+              notify { "${a[0]}/${base}": }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "pref/foo-bar"));
+    }
+
+    #[test]
+    fn join_treats_undef_elements_as_empty() {
+        let catalog = eval_foo(
+            r#"class foo (Optional[String] $r = undef) {
+              $j = join([$r, 'a', undef], '')
+              notify { "j-${j}": }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "j-a"));
+    }
+
+    #[test]
+    fn puppet_language_function_is_loaded_and_called() {
+        // docker::sanitised_name: a `function ns::name($x) { regsubst(...) }`
+        // under functions/, called with a string and with an array.
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path();
+        fs::create_dir_all(m.join("manifests")).unwrap();
+        fs::create_dir_all(m.join("functions")).unwrap();
+        fs::write(m.join("metadata.json"), r#"{"name":"acme-foo"}"#).unwrap();
+        fs::write(
+            m.join("functions/sanitised_name.pp"),
+            "function foo::sanitised_name($name) {\n  regsubst($name, '[^0-9A-Za-z.\\-_]', '-', 'G')\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            m.join("manifests/init.pp"),
+            r#"class foo {
+              $s = foo::sanitised_name('a b/c')
+              $arr = foo::sanitised_name(['x y', 'z'])
+              notify { "s-${s}": }
+              notify { "arr-${arr[0]}": }
+            }"#,
+        )
+        .unwrap();
+        let ev = PuppetEvaluator::new(m).unwrap();
+        let catalog = ev
+            .evaluate_class(
+                "foo",
+                &PuppetValue::Hash(IndexMap::new()),
+                &PuppetValue::Hash(IndexMap::new()),
+            )
+            .unwrap();
+        assert!(catalog.contains("notify", "s-a-b-c"));
+        assert!(catalog.contains("notify", "arr-x-y"));
+    }
+
+    #[test]
+    fn class_included_from_a_define_keeps_its_variables_visible_afterwards() {
+        // apt::source does `include apt`; a later apt::setting reads
+        // `$apt::root`. The define's scope restore must not wipe the class's
+        // qualified variables while the class stays marked as evaluated.
+        let catalog = eval_foo(
+            r#"class foo::base ( String $root = '/etc/apt', String $conf = "${root}/apt.conf.d" ) {}
+            define foo::src { include foo::base }
+            define foo::use { notify { "use-${foo::base::conf}": } }
+            class foo {
+              foo::src { 'a': }
+              foo::use { 'b': }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "use-/etc/apt/apt.conf.d"));
+    }
+
+    #[test]
+    fn param_default_may_reference_an_earlier_parameter() {
+        let catalog = eval_foo(
+            r#"class foo (
+              String $root = '/etc/apt',
+              Hash $files = { 'conf' => { 'path' => "${root}/conf.d" } },
+              String $late = $root,
+            ) {
+              notify { "${files['conf']['path']}-${late}": }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "/etc/apt/conf.d-/etc/apt"));
+    }
+
+    #[test]
+    fn flatten_method_on_array_of_selector_results() {
+        // dockerapp_netrisk: `[ $x ? { undef => [], default => ['a'] }, … ].flatten`
+        let catalog = eval_foo(
+            r#"class foo (Optional[String] $a = undef, Optional[String] $b = 'v') {
+              $env = [
+                $a ? { undef => [], default => ["A=${a}"] },
+                $b ? { undef => [], default => ["B=${b}"] },
+              ].flatten
+              $all = ['X'] + $env
+              notify { "n-${all.length}-${all[1]}": }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "n-2-B=v"));
+    }
+
+    #[test]
+    fn multi_statement_lambda_body_yields_last_expression() {
+        // dockerapp_netrisk: `.map |$k| { $v = $h[$k]; $p = $v ? {...}; "${k}=${p}" }`
+        let catalog = eval_foo(
+            r#"class foo (Hash $h = { 'B' => 'two', 'A' => 'one' }) {
+              $lines = $h.keys.sort.map |$k| {
+                $v = $h[$k]
+                $p = $v ? { 'one' => 'uno', default => $v }
+                "${k}=${p}"
+              }
+              notify { join($lines, ','): }
+            }"#,
+        );
+        assert!(catalog.contains("notify", "A=uno,B=two"));
+    }
+
+    #[test]
+    fn define_parameter_default_may_use_title() {
+        // dockerapp::run: `String $service_name = $title`.
+        let catalog = eval_foo(
+            r#"define foo::run (String $service_name = $title) {
+              notify { "svc-${service_name}": }
+            }
+            class foo { foo::run { 'web': } }"#,
+        );
+        assert!(catalog.contains("notify", "svc-web"));
     }
 }
